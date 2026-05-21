@@ -14,12 +14,11 @@ tasks stay on the existing linear-probe path of
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Tuple
 
 import numpy as np
 
@@ -29,12 +28,17 @@ from transformers import (
     AutoTokenizer,
     DataCollatorWithPadding,
     Trainer,
-    TrainingArguments,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _hf_finetune_common import load_encoder_for_head  # noqa: E402
+from _hf_finetune_common import (  # noqa: E402
+    add_common_finetune_args,
+    build_training_args,
+    load_encoder_for_head,
+    safe_ckpt,
+    write_jsonl_record,
+)
 from benchmark_tasks import TASKS, TaskConfig  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -43,25 +47,12 @@ _SUPPORTED_PROBLEM_TYPES = {"binary", "multiclass", "regression"}
 _VALIDATION_ALIASES = ("validation", "valid", "val", "dev")
 
 
-def _safe_ckpt(ckpt: str) -> str:
-    return ckpt.replace("/", "_").replace("\\", "_")
-
-
-def _select_split(ds, names: Tuple[str, ...]):
-    for n in names:
-        if n in ds:
-            return ds[n]
-    return None
-
-
 def _select_by_column(ds_split, column: str, values: Tuple[str, ...]):
-    """Filter rows whose column value is in ``values``."""
     vset = set(values)
     return ds_split.filter(lambda r, c=column, vs=vset: r[c] in vs)
 
 
 def _load_task_splits(cfg: TaskConfig, max_train_samples: int | None):
-    """Load HF dataset and return (train, eval, test) splits per ``cfg``."""
     from datasets import load_dataset
 
     load_kwargs: Dict[str, Any] = {}
@@ -69,10 +60,7 @@ def _load_task_splits(cfg: TaskConfig, max_train_samples: int | None):
         load_kwargs["name"] = cfg.dataset_config
     if cfg.data_dir:
         load_kwargs["data_dir"] = cfg.data_dir
-    try:
-        ds = load_dataset(cfg.dataset, **load_kwargs)
-    except Exception:
-        ds = load_dataset(cfg.dataset, trust_remote_code=True, **load_kwargs)
+    ds = load_dataset(cfg.dataset, trust_remote_code=True, **load_kwargs)
 
     train = ds[cfg.train_split]
     eval_split = None
@@ -90,11 +78,10 @@ def _load_task_splits(cfg: TaskConfig, max_train_samples: int | None):
         if cfg.validation_split and cfg.validation_split in ds:
             eval_split = ds[cfg.validation_split]
         else:
-            eval_split = _select_split(ds, _VALIDATION_ALIASES)
+            eval_split = next((ds[n] for n in _VALIDATION_ALIASES if n in ds), None)
         if cfg.test_split in ds:
             test_split = ds[cfg.test_split]
         elif cfg.auto_split:
-            # 80/20 random split of the train data.
             n = len(train)
             n_train = int(n * 0.8)
             train_sh = train.shuffle(seed=42)
@@ -190,14 +177,12 @@ def _build_compute_metrics(cfg: TaskConfig):
             "F1_Macro": float(f1_score(labels, preds, average="macro", zero_division=0)),
         }
         if pt == "binary":
-            try:
-                # Use softmax-prob of class 1 for AUC.
+            num_labels = np.array(preds_logits).shape[-1]
+            if num_labels == 2 and len(set(labels)) > 1:
                 logits = np.array(preds_logits)
                 exp = np.exp(logits - logits.max(axis=-1, keepdims=True))
                 probs = exp / exp.sum(axis=-1, keepdims=True)
                 out["AUC"] = float(roc_auc_score(labels, probs[:, 1]))
-            except Exception:
-                pass
         return out
 
     return cm
@@ -214,57 +199,31 @@ def _apply_mode(model, args: argparse.Namespace):
                 "peft is required for --mode lora. Install with "
                 "`pip install peft>=0.13` into the sibling venv."
             ) from e
-        targets = args.lora_targets
-        if targets == "all-linear":
-            target_modules = "all-linear"
-        else:
-            target_modules = [t.strip() for t in targets.split(",") if t.strip()]
         lora_cfg = LoraConfig(
             r=args.lora_r,
             lora_alpha=args.lora_alpha,
-            lora_dropout=args.lora_dropout,
-            target_modules=target_modules,
+            lora_dropout=0.05,
+            target_modules="all-linear",
             bias="none",
             task_type=TaskType.SEQ_CLS,
         )
-        # Wrap only the base model; the classification head stays trainable.
         base = model.base_model
         wrapped = get_peft_model(base, lora_cfg)
-        # Re-attach.
-        # PEFT replaces module forward; we patch model.base_model in place by
-        # swapping attribute references. The classifier head remains trainable.
         for name, child in model.named_children():
             if child is base:
                 setattr(model, name, wrapped)
                 break
-    # "full" → all params trainable, the default.
     return model
 
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Sequence-level fine-tuning for PLMs.")
-    p.add_argument("--model_name", required=True)
+    add_common_finetune_args(p)
     p.add_argument("--task", required=True, help="Any TASKS key whose problem_type is binary / multiclass / regression.")
     p.add_argument("--mode", default="probe", choices=["probe", "full", "lora"])
-    p.add_argument("--max_length", type=int, default=512)
-    p.add_argument("--max_train_samples", type=int, default=None)
-    p.add_argument("--num_train_epochs", type=float, default=3.0)
-    p.add_argument("--per_device_train_batch_size", type=int, default=8)
-    p.add_argument("--per_device_eval_batch_size", type=int, default=16)
-    p.add_argument("--learning_rate", type=float, default=5e-5)
-    p.add_argument("--weight_decay", type=float, default=0.0)
-    p.add_argument("--logging_steps", type=int, default=50)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--output_dir", default="plm/results/bench/")
     # LoRA-specific
     p.add_argument("--lora_r", type=int, default=8)
     p.add_argument("--lora_alpha", type=int, default=16)
-    p.add_argument("--lora_dropout", type=float, default=0.05)
-    p.add_argument(
-        "--lora_targets",
-        default="all-linear",
-        help="Comma-separated module names or 'all-linear'.",
-    )
     return p
 
 
@@ -299,25 +258,10 @@ def main(argv=None) -> int:
     )
     model = _apply_mode(model, args)
 
-    out_dir = Path(args.output_dir) / f"finetune_sequence_{_safe_ckpt(args.model_name)}_{args.task}"
+    out_dir = Path(args.output_dir) / f"finetune_sequence_{safe_ckpt(args.model_name)}_{args.task}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    training_args = TrainingArguments(
-        output_dir=str(out_dir / "trainer"),
-        num_train_epochs=args.num_train_epochs,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=args.per_device_eval_batch_size,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        eval_strategy="no",
-        save_strategy="no",
-        logging_steps=max(1, args.logging_steps),
-        report_to=[],
-        seed=args.seed,
-        fp16=False,
-        bf16=False,
-        dataloader_num_workers=0,
-    )
+    training_args = build_training_args(args, out_dir)
 
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
     compute_metrics = _build_compute_metrics(cfg)
@@ -326,7 +270,6 @@ def main(argv=None) -> int:
         model=model,
         args=training_args,
         train_dataset=tokenized["train"],
-        eval_dataset=tokenized.get("validation") or tokenized.get("test"),
         data_collator=collator,
         tokenizer=tokenizer,
         compute_metrics=compute_metrics,
@@ -342,11 +285,7 @@ def main(argv=None) -> int:
     # LoRA: save only the adapters (small, ~MB).
     if args.mode == "lora":
         adapter_dir = out_dir / "lora_adapter"
-        try:
-            model.base_model.save_pretrained(str(adapter_dir))
-        except AttributeError:
-            # Older PEFT API
-            model.save_pretrained(str(adapter_dir))
+        model.base_model.save_pretrained(str(adapter_dir))
 
     record = {
         "checkpoint": args.model_name,
@@ -359,11 +298,9 @@ def main(argv=None) -> int:
         "transformers_version": transformers.__version__,
         "args": vars(args),
     }
-    jsonl_path = out_dir.parent / (
-        f"finetune_sequence_{_safe_ckpt(args.model_name)}_{args.task}.jsonl"
+    jsonl_path = write_jsonl_record(
+        out_dir, "finetune_sequence", f"{args.model_name}_{args.task}", record
     )
-    with jsonl_path.open("a") as f:
-        f.write(json.dumps(record) + "\n")
     logger.info("Wrote %s", jsonl_path)
     return 0
 

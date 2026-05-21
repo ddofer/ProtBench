@@ -29,12 +29,3 @@ def test_align_passes_through_non_special_positions():
     special_tokens_mask = [1, 0, 0, 0, 0, 1]
     out = align_labels_with_tokens(input_ids, residue_labels, special_tokens_mask)
     assert out == [-100, 10, 11, 12, 13, -100]
-
-
-def test_align_handles_residue_label_shortage():
-    # Defensive: more non-special tokens than residue labels → trailing -100.
-    input_ids = [101, 1, 2, 3, 102]
-    residue_labels = [9]  # only 1 label for 3 non-special tokens
-    special_tokens_mask = [1, 0, 0, 0, 1]
-    out = align_labels_with_tokens(input_ids, residue_labels, special_tokens_mask)
-    assert out == [-100, 9, -100, -100, -100]

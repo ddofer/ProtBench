@@ -5,41 +5,14 @@ Wires AMPLIFY / ESM-style encoders to HF ``AutoModelForTokenClassification``
 disorder (same dataset, ``disorder`` column), and signal peptides
 (SignalP6 via SaProtHub). Mirrors the CLI style of ``protein_benchmark_suite.py``.
 
-Dataset provenance (verified 2026-05-21):
-
-  SS3 + disorder — agemagician/NetSurfP-SS3.
-    Per-residue 3-class secondary structure (C/H/E, DSSP-derived) and
-    a parallel intrinsic-disorder mask from NetSurfP-2.0 (Klausen et
-    al., Proteins 2019; doi:10.1002/prot.25674). Rehosted by Ahmed
-    Elnaggar (agemagician), NOT the NetSurfP-2.0 authors. The HF
-    rehost reshuffled the paper's 10,337/500 train/val into
-    10,792/646; CB513 has 511 chains (vs 513 published), CASP12 has
-    20 (vs 21 published) — minor filter loss. The "disorder" column
-    is the PDB-missing-coordinate mask, NOT DisProt / CAID2 (do not
-    cross-compare). License is unspecified on the HF card; original
-    release is academic-use under DTU Health Tech.
-
-  signal_peptide — SaProtHub/Dataset-Signal-Peptides.
-    Per-residue 7-class signal-peptide tagging (S/T/L/P/I/M/O) over
-    N-terminal regions (<=70 aa) from the SignalP 6.0 benchmark
-    (Teufel et al., Nature Biotechnology 2022;
-    doi:10.1038/s41587-021-01156-3). 25,693 sequences packed into a
-    single HF "train" split; the actual partition lives in the
-    "stage" column (20,490 train / 2,569 valid / 2,634 test).
-    Rehosted by the SaProtHub community. License: MIT.
-
-Datasets are loaded via ``datasets.load_dataset`` honoring the
-``TaskConfig`` fields ``split_column``, ``validation_column_values``,
-``validation_split``, ``test_split``. For SS3 / disorder we also surface
-per-subset metrics across the ``dataset`` column (CB513 / TS115 / CASP12).
+See ``plm/bench/README.md`` § Dataset provenance for citation details and
+verified row counts.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import logging
-import os
 import sys
 import time
 from pathlib import Path
@@ -53,7 +26,6 @@ from transformers import (
     AutoTokenizer,
     DataCollatorForTokenClassification,
     Trainer,
-    TrainingArguments,
 )
 
 # Allow ``python plm/bench/finetune_residue.py`` from anywhere; also be
@@ -61,10 +33,14 @@ from transformers import (
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _hf_finetune_common import (  # noqa: E402
+    add_common_finetune_args,
     align_labels_with_tokens,
+    build_training_args,
     decode_csv_label,
     decode_string_label,
     load_encoder_for_head,
+    safe_ckpt,
+    write_jsonl_record,
 )
 from benchmark_tasks import TASKS, TaskConfig  # noqa: E402
 
@@ -74,18 +50,10 @@ logger = logging.getLogger(__name__)
 _SS3_ALPHABET = "HEC"
 _DISORDER_ALPHABET = "01"
 
-# SignalP6 has up to ~7 classes; we infer ``num_labels`` from the data
-# (max label id + 1) rather than hard-coding, to remain forward-compatible.
-
 _RESIDUE_TASKS = ("ss3", "disorder", "signal_peptide")
 
 
-def _safe_ckpt(ckpt: str) -> str:
-    return ckpt.replace("/", "_").replace("\\", "_")
-
-
 def _decode_labels(task: str, label_str: Any) -> List[int]:
-    """Dispatch the right per-residue label decoder."""
     if task == "ss3":
         return decode_string_label(str(label_str), _SS3_ALPHABET)
     if task == "disorder":
@@ -96,7 +64,6 @@ def _decode_labels(task: str, label_str: Any) -> List[int]:
 
 
 def _build_label_meta(task: str, all_label_lists: List[List[int]]) -> Dict[str, Any]:
-    """Compute ``num_labels`` + ``id2label`` / ``label2id`` for a task."""
     if task == "ss3":
         names = list(_SS3_ALPHABET)
     elif task == "disorder":
@@ -113,7 +80,6 @@ def _build_label_meta(task: str, all_label_lists: List[List[int]]) -> Dict[str, 
 
 
 def _prepare_dataset(cfg: TaskConfig, task: str, args: argparse.Namespace):
-    """Load and (lightly) preprocess the HF dataset for the task."""
     from datasets import load_dataset
 
     ds = load_dataset(cfg.dataset)
@@ -122,7 +88,6 @@ def _prepare_dataset(cfg: TaskConfig, task: str, args: argparse.Namespace):
 
     splits: Dict[str, Any] = {}
     if cfg.split_column:
-        # SignalP-style: single source with a 'stage' column.
         source = ds[cfg.train_split]
         stage_to_split = {"train": "train", "valid": "validation", "test": "test"}
         if cfg.validation_column_values:
@@ -139,7 +104,6 @@ def _prepare_dataset(cfg: TaskConfig, task: str, args: argparse.Namespace):
         if cfg.test_split in ds:
             splits["test"] = ds[cfg.test_split]
 
-    # Smoke caps.
     if args.max_train_samples is not None and "train" in splits:
         n = min(len(splits["train"]), args.max_train_samples)
         splits["train"] = splits["train"].select(range(n))
@@ -155,8 +119,6 @@ def _tokenize_and_align(
     tokenizer,
     max_length: int,
 ):
-    """Tokenize sequences + align per-residue labels (1 token = 1 AA)."""
-
     def _map_fn(batch: Dict[str, list]):
         encoded = tokenizer(
             batch[seq_col],
@@ -177,7 +139,6 @@ def _tokenize_and_align(
         encoded["labels"] = labels_out
         return encoded
 
-    cols_to_remove = None  # let datasets infer (keep input_ids/attention_mask/labels)
     out: Dict[str, Any] = {}
     for split_name, sub in splits.items():
         cols_to_remove = list(sub.column_names)
@@ -191,10 +152,7 @@ def _tokenize_and_align(
 
 
 def _build_compute_metrics(task: str, label_names: List[str]):
-    """Return a ``compute_metrics`` fn compatible with HF Trainer."""
-
     def _flatten(predictions, labels):
-        # predictions: (B, T, C) logits; labels: (B, T) with -100 ignored.
         preds = np.argmax(predictions, axis=-1)
         flat_preds, flat_labels = [], []
         for p_row, l_row in zip(preds, labels):
@@ -218,7 +176,6 @@ def _build_compute_metrics(task: str, label_names: List[str]):
 
         return compute_metrics
 
-    # SS3 / signal_peptide: use seqeval-style per-class F1 over flat tokens.
     from sklearn.metrics import f1_score
 
     def compute_metrics(eval_pred):
@@ -269,28 +226,12 @@ def _run_task(task: str, args: argparse.Namespace) -> Dict[str, Any]:
         label2id=label_meta["label2id"],
     )
     if args.mode == "probe":
-        # Freeze the entire encoder; only the classifier head trains.
         model.base_model.requires_grad_(False)
 
-    out_dir = Path(args.output_dir) / f"finetune_residue_{_safe_ckpt(args.model_name)}_{task}"
+    out_dir = Path(args.output_dir) / f"finetune_residue_{safe_ckpt(args.model_name)}_{task}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    training_args = TrainingArguments(
-        output_dir=str(out_dir / "trainer"),
-        num_train_epochs=args.num_train_epochs,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=args.per_device_eval_batch_size,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        eval_strategy="no",
-        save_strategy="no",
-        logging_steps=max(1, args.logging_steps),
-        report_to=[],
-        seed=args.seed,
-        fp16=False,
-        bf16=False,
-        dataloader_num_workers=0,
-    )
+    training_args = build_training_args(args, out_dir)
 
     collator = DataCollatorForTokenClassification(tokenizer=tokenizer)
     compute_metrics = _build_compute_metrics(task, label_meta["names"])
@@ -299,7 +240,6 @@ def _run_task(task: str, args: argparse.Namespace) -> Dict[str, Any]:
         model=model,
         args=training_args,
         train_dataset=tokenized["train"],
-        eval_dataset=tokenized.get("validation") or tokenized.get("test"),
         data_collator=collator,
         tokenizer=tokenizer,
         compute_metrics=compute_metrics,
@@ -339,30 +279,18 @@ def _run_task(task: str, args: argparse.Namespace) -> Dict[str, Any]:
         "transformers_version": transformers.__version__,
         "args": vars(args),
     }
-    jsonl_path = out_dir.parent / (
-        f"finetune_residue_{_safe_ckpt(args.model_name)}_{task}.jsonl"
+    jsonl_path = write_jsonl_record(
+        out_dir, "finetune_residue", f"{args.model_name}_{task}", record
     )
-    with jsonl_path.open("a") as f:
-        f.write(json.dumps(record) + "\n")
     logger.info("Wrote %s", jsonl_path)
     return record
 
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Residue-level fine-tuning for PLMs.")
-    p.add_argument("--model_name", required=True, help="HF checkpoint (e.g. chandar-lab/AMPLIFY_120M)")
+    add_common_finetune_args(p)
     p.add_argument("--task", required=True, choices=list(_RESIDUE_TASKS) + ["all"])
     p.add_argument("--mode", default="probe", choices=["probe", "full"])
-    p.add_argument("--max_length", type=int, default=512)
-    p.add_argument("--max_train_samples", type=int, default=None)
-    p.add_argument("--num_train_epochs", type=float, default=3.0)
-    p.add_argument("--per_device_train_batch_size", type=int, default=8)
-    p.add_argument("--per_device_eval_batch_size", type=int, default=16)
-    p.add_argument("--learning_rate", type=float, default=5e-5)
-    p.add_argument("--weight_decay", type=float, default=0.0)
-    p.add_argument("--logging_steps", type=int, default=50)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--output_dir", default="plm/results/bench/")
     return p
 
 

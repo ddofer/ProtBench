@@ -166,6 +166,17 @@ any autoresearch path, `train_proxy.py`, or the queue runner. Call it
 manually during Stage-2 search to spot-check pretraining objectives against
 downstream signal.
 
+## Structural test sets are also leakage sources
+
+The structural tasks in this suite (`ss3`, `disorder`, `stability`,
+`chezod_disorder`) are first-class **leakage protection targets** when
+proteva pretrains with 3Di / fold-derived aux objectives. Their test
+sequences feed the train-side filtering pipeline documented at
+[`plm/docs/LEAKAGE_FILTERING_RUNBOOK.md`](../docs/LEAKAGE_FILTERING_RUNBOOK.md);
+they are included by default in `--task-group critical` and selectable
+in isolation via the new `--task-group structural`. PSSM-derived tasks
+are intentionally not treated as a structural leak.
+
 ## Updating
 
 To pull a newer revision from the sibling repo, re-run the same `cp`
