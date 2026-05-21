@@ -57,6 +57,7 @@ class TaskConfig:
             "multilabel",
             "regression",
             "retrieval",
+            "token_classification",
         }
         if self.problem_type not in valid_types:
             raise ValueError(f"problem_type must be one of {valid_types}")
@@ -437,6 +438,39 @@ TASKS: Dict[str, TaskConfig] = {
     #     problem_type="regression",
     #     main_metric="Spearman",
     # ),
+    # =========================================================================
+    # Token Classification (residue-level)
+    # =========================================================================
+    "ss3": TaskConfig(
+        name="Secondary Structure 3 (NetSurfP-SS3)",
+        dataset="agemagician/NetSurfP-SS3",
+        input_map={"seq": "input"},
+        label_col="label",
+        problem_type="token_classification",
+        main_metric="Accuracy",
+        validation_split="validation",
+        test_split="test",
+    ),
+    "disorder": TaskConfig(
+        name="Disorder (NetSurfP-SS3 mask)",
+        dataset="agemagician/NetSurfP-SS3",
+        input_map={"seq": "input"},
+        label_col="disorder",
+        problem_type="token_classification",
+        main_metric="MCC",
+        validation_split="validation",
+        test_split="test",
+    ),
+    "signal_peptide": TaskConfig(
+        name="Signal Peptide (SignalP6)",
+        dataset="SaProtHub/Dataset-Signal-Peptides",
+        input_map={"seq": "protein"},
+        label_col="label",
+        problem_type="token_classification",
+        main_metric="F1_Macro",
+        split_column="stage",
+        validation_column_values=("valid",),
+    ),
     # =========================================================================
     # ProteinGym — Zero-Shot (cosine similarity WT vs mutant, per-assay Spearman/AUC)
     # =========================================================================

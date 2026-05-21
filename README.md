@@ -56,6 +56,74 @@ CUDA_VISIBLE_DEVICES=4 /data/prot/ProteinSentenceTransformers/.venv/bin/python \
     /data/proteva/plm/bench/protein_benchmark_suite.py --model_name <ckpt> --tasks stability
 ```
 
+## Fine-tuning scripts (residue + sequence; LoRA)
+
+Two on-demand HF-Trainer wrappers live alongside the linear-probe path:
+
+- `finetune_residue.py` — token classification (SS3, intrinsic disorder,
+  signal peptides). Modes: `probe` (frozen encoder, default), `full`.
+- `finetune_sequence.py` — sequence-level fine-tuning for any task in
+  `TASKS` whose `problem_type` is `binary / multiclass / regression`.
+  Modes: `probe` (default), `full`, `lora` (PEFT). LoRA flags:
+  `--lora_r 8 --lora_alpha 16 --lora_dropout 0.05 --lora_targets all-linear`.
+
+```bash
+PY=/data/prot/ProteinSentenceTransformers/.venv/bin/python
+
+# Residue probe on SS3:
+CUDA_VISIBLE_DEVICES=4 $PY /data/proteva/plm/bench/finetune_residue.py \
+    --model_name chandar-lab/AMPLIFY_120M \
+    --task ss3 --mode probe --max_length 512 \
+    --output_dir /data/proteva/plm/results/bench/
+
+# All three residue tasks sequentially:
+CUDA_VISIBLE_DEVICES=4 $PY /data/proteva/plm/bench/finetune_residue.py \
+    --model_name chandar-lab/AMPLIFY_120M --task all
+
+# Sequence LoRA on stability:
+CUDA_VISIBLE_DEVICES=4 $PY /data/proteva/plm/bench/finetune_sequence.py \
+    --model_name chandar-lab/AMPLIFY_120M \
+    --task stability --mode lora --lora_r 8 --lora_alpha 16
+```
+
+**One-time setup** — `peft` and `seqeval` are not in the sibling venv.
+Install them once before first use:
+
+```bash
+/data/prot/ProteinSentenceTransformers/.venv/bin/pip install \
+    "peft>=0.13" "seqeval>=1.2"
+```
+
+(`evaluate` is optional; the scripts use `sklearn` / `scipy` directly.)
+
+Output: one JSONL line per `(checkpoint, task)` appended to
+`<output_dir>/finetune_<script>_<safe_ckpt>_<task>.jsonl`. LoRA mode
+also saves adapter weights under `.../lora_adapter/`.
+
+### Dataset provenance (verified 2026-05-21)
+
+| Task | Dataset | Source paper | Caveats |
+|---|---|---|---|
+| `ss3`, `disorder` | [`agemagician/NetSurfP-SS3`](https://huggingface.co/datasets/agemagician/NetSurfP-SS3) | Klausen et al., *NetSurfP-2.0*, Proteins 2019 ([doi:10.1002/prot.25674](https://doi.org/10.1002/prot.25674)) | Third-party rehost by Ahmed Elnaggar (ProtTrans author). Train/val reshuffled from paper's 10,337/500 to 10,792/646. **CB513 = 511 chains** (vs 513 in paper); **CASP12 = 20** (vs 21). Disorder = PDB-missing-coordinate mask, NOT DisProt / CAID2 — do not cross-compare. No license on HF card. |
+| `signal_peptide` | [`SaProtHub/Dataset-Signal-Peptides`](https://huggingface.co/datasets/SaProtHub/Dataset-Signal-Peptides) | Teufel et al., *SignalP 6.0*, Nat Biotechnol 2022 ([doi:10.1038/s41587-021-01156-3](https://doi.org/10.1038/s41587-021-01156-3)) | All 25,693 rows packed into HF `train` split; partition is in the `stage` column (20,490 / 2,569 / 2,634). Third-party rehost by SaProtHub. License: MIT. |
+
+## Tests
+
+Unit tests live in [`plm/bench/tests/`](tests/). Fast tests cover the
+`TaskConfig` validator extension, label decoders, and label alignment.
+Two CPU smoke tests (model + dataset download) are marked
+`@pytest.mark.slow` and skipped by default.
+
+```bash
+PY=/data/prot/ProteinSentenceTransformers/.venv/bin/python
+
+# Fast unit tests only:
+$PY -m pytest /data/proteva/plm/bench/tests/ -m "not slow"
+
+# Including the CPU smoke tests (needs peft + seqeval installed):
+CUDA_VISIBLE_DEVICES="" $PY -m pytest /data/proteva/plm/bench/tests/ -m slow
+```
+
 ## Quick examples (Stage-2 search: fast subsets, clean signal)
 
 ```bash
