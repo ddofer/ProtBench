@@ -76,7 +76,9 @@ def align_labels_with_tokens(
         if is_special:
             aligned.append(-100)
         else:
-            aligned.append(int(next(res_iter)))
+            # short residue_labels (malformed CSV row, short signal_peptide
+            # sequence) defaults to ignore-index rather than raising mid-batch.
+            aligned.append(int(next(res_iter, -100)))
     return aligned
 
 
