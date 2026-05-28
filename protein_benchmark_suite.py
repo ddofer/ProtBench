@@ -996,6 +996,144 @@ def _subsample_paired_data(
     return [sequences[i] for i in keep], [labels[i] for i in keep]
 
 
+_SS3_ALPHABET = "HEC"
+_DISORDER_ALPHABET = "01"
+
+
+def _decode_residue_label(task_name: str, label_col: str, raw: Any) -> List[int]:
+    """Decode per-residue labels.
+
+    SS3 / Disorder use string alphabets (``HEC`` / ``01``); other tasks
+    expect already-tokenized integer lists or comma-separated strings.
+    Robust to lists, strings, and falls back to ``int(c)``.
+    """
+    if isinstance(raw, list):
+        return [int(x) for x in raw]
+    s = str(raw)
+    name_lower = task_name.lower()
+    if "ss3" in name_lower or "secondary structure" in name_lower:
+        return [_SS3_ALPHABET.index(c) for c in s if c in _SS3_ALPHABET]
+    if "disorder" in name_lower or label_col == "disorder":
+        return [_DISORDER_ALPHABET.index(c) for c in s if c in _DISORDER_ALPHABET]
+    if "," in s:
+        return [int(tok) for tok in s.split(",") if tok.strip()]
+    # Fallback: try character-by-character int parsing
+    return [int(c) for c in s if c.isdigit()]
+
+
+def _prepare_token_classification_data(
+    cfg: TaskConfig,
+    max_samples: Optional[int],
+    eval_split: str,
+) -> Tuple[List[str], List[List[int]], Optional[List[str]], Optional[List[List[int]]], Dict[str, Any]]:
+    """Load a residue-level dataset and decode per-residue labels.
+
+    Mirrors the split-selection logic of ``prepare_data`` but emits
+    per-residue label lists (not sequence-level scalars).
+    """
+    from datasets import load_dataset
+
+    normalized_eval_split = _normalize_split_value(eval_split)
+    if normalized_eval_split not in SUPPORTED_EVAL_SPLITS:
+        raise ValueError(
+            f"eval_split must be one of {sorted(SUPPORTED_EVAL_SPLITS)}; "
+            f"got '{eval_split}'"
+        )
+    split_metadata: Dict[str, Any] = {
+        "requested_eval_split": normalized_eval_split,
+        "resolved_eval_split": normalized_eval_split,
+        "eval_strategy": (
+            "validation_split"
+            if normalized_eval_split == "validation"
+            else "test_split"
+        ),
+        "cv_fallback": False,
+    }
+    logger.info("Loading residue-level dataset: %s", cfg.dataset)
+    local_dataset_path = _resolve_local_dataset_path(cfg.dataset)
+    if local_dataset_path is not None:
+        ds = _load_local_dataset(local_dataset_path)
+    else:
+        load_kwargs = {}
+        if cfg.dataset_config:
+            load_kwargs["name"] = cfg.dataset_config
+        if cfg.data_dir:
+            load_kwargs["data_dir"] = cfg.data_dir
+        ds = load_dataset(cfg.dataset, **load_kwargs)
+
+    all_keys = [str(k) for k in ds.keys()]
+
+    seq_col = cfg.input_map.get("seq", "sequence")
+
+    def _decode_split(split_data) -> Tuple[List[str], List[List[int]]]:
+        seqs = [str(x) for x in split_data[seq_col]]
+        labs = [
+            _decode_residue_label(cfg.name, cfg.label_col, raw)
+            for raw in split_data[cfg.label_col]
+        ]
+        return seqs, labs
+
+    train_data = None
+    eval_data = None
+
+    if cfg.split_column:
+        source = get_split_data(ds, cfg.train_split, all_keys)
+        train_data = _select_rows_by_column_values(
+            source, cfg.split_column, {_normalize_split_value(cfg.train_split)}
+        )
+        if normalized_eval_split == "validation":
+            allowed = {
+                _normalize_split_value(v)
+                for v in (cfg.validation_column_values or _VALIDATION_SPLIT_ALIASES)
+            }
+            eval_data = _select_rows_by_column_values(source, cfg.split_column, allowed)
+            split_metadata["eval_strategy"] = "validation_split_column"
+        else:
+            eval_data = _select_rows_by_column_values(
+                source, cfg.split_column, {_normalize_split_value(cfg.test_split)}
+            )
+            split_metadata["resolved_eval_split"] = "test"
+            split_metadata["eval_strategy"] = "test_split_column"
+    else:
+        train_data = get_split_data(ds, cfg.train_split, all_keys)
+        validation_candidates = []
+        if cfg.validation_split:
+            validation_candidates.append(cfg.validation_split)
+        validation_candidates.extend(_VALIDATION_SPLIT_ALIASES)
+        if normalized_eval_split == "validation":
+            val_key = _find_named_split(all_keys, validation_candidates)
+            if val_key:
+                eval_data = get_split_data(ds, val_key, all_keys)
+                split_metadata["eval_strategy"] = "validation_split"
+            else:
+                split_metadata["eval_strategy"] = "validation_cv4_train"
+                split_metadata["cv_fallback"] = True
+        else:
+            if cfg.test_split in all_keys:
+                eval_data = get_split_data(ds, cfg.test_split, all_keys)
+                split_metadata["resolved_eval_split"] = "test"
+                split_metadata["eval_strategy"] = "test_split"
+
+    if max_samples and len(train_data) > max_samples:
+        train_data = train_data.shuffle(seed=BENCHMARK_SEED).select(range(max_samples))
+    if max_samples and eval_data is not None and len(eval_data) > max_samples:
+        eval_data = eval_data.shuffle(seed=BENCHMARK_SEED).select(range(max_samples))
+
+    train_seqs, train_labels = _decode_split(train_data)
+    if eval_data is not None and len(eval_data) > 0:
+        test_seqs, test_labels = _decode_split(eval_data)
+    else:
+        test_seqs, test_labels = None, None
+
+    logger.info(
+        "  Residue task: %d train sequences, %s eval sequences (%s)",
+        len(train_seqs),
+        len(test_seqs) if test_seqs is not None else "CV-fallback",
+        split_metadata["eval_strategy"],
+    )
+    return train_seqs, train_labels, test_seqs, test_labels, split_metadata
+
+
 def prepare_data(
     cfg: TaskConfig,
     max_samples: Optional[int] = None,
@@ -2266,6 +2404,55 @@ def evaluate_task(
     """Run full evaluation for a single task."""
 
     logger.info(f"Evaluating: {cfg.name}")
+
+    # Residue-level (per-token) tasks use a separate linear-probe path that
+    # extracts per-residue hidden states + fits a LogisticRegression. The
+    # sequence-level ``prepare_data`` parser cannot handle per-residue
+    # labels, so dispatch BEFORE it runs. See token_classification_probe.py.
+    if cfg.problem_type == "token_classification":
+        from token_classification_probe import (
+            EmbeddingCache,
+            evaluate_token_classification,
+        )
+
+        train_seqs, train_labels, test_seqs, test_labels, split_metadata = (
+            _prepare_token_classification_data(cfg, max_samples, eval_split)
+        )
+        resolved_eval_split = str(
+            split_metadata.get("resolved_eval_split", DEFAULT_RESULT_EVAL_SPLIT)
+        )
+        eval_strategy = str(
+            split_metadata.get("eval_strategy", DEFAULT_RESULT_EVAL_STRATEGY)
+        )
+        if is_sbert:
+            # SentenceTransformer wraps the encoder; unwrap to the underlying
+            # HF model + native tokenizer so we can do per-token extraction.
+            first_module = list(model_obj._modules.values())[0]
+            encoder = first_module.auto_model
+            tokenizer = first_module.tokenizer
+        else:
+            tokenizer, encoder = model_obj
+        cache_root = None
+        if embed_save_path:
+            cache_root = Path(embed_save_path).parent / "residue_cache"
+        cache = EmbeddingCache(cache_root) if cache_root else None
+        model_hash = embed_save_path or cfg.dataset
+        metrics = evaluate_token_classification(
+            cfg=cfg,
+            encoder=encoder,
+            tokenizer=tokenizer,
+            train_sequences=train_seqs,
+            train_labels=train_labels,
+            test_sequences=test_seqs,
+            test_labels=test_labels,
+            device=device,
+            batch_size=batch_size,
+            max_length=max_length,
+            cache=cache,
+            model_hash=model_hash,
+            task_key=cfg.name,
+        )
+        return metrics, resolved_eval_split, eval_strategy
 
     train_seqs, train_labels, test_seqs, test_labels, extra_data, split_metadata = (
         prepare_data(
