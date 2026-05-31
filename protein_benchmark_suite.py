@@ -153,7 +153,7 @@ from sklearn.preprocessing import (
     MultiLabelBinarizer,
     StandardScaler,
 )
-from transformers import AutoConfig, AutoModel, AutoModelForMaskedLM, AutoTokenizer
+from transformers import AutoModel, AutoModelForMaskedLM, AutoTokenizer
 
 from benchmark_comparison import compare_benchmarks, display_comparison
 from benchmark_tasks import (
@@ -488,6 +488,7 @@ def load_model(
         "fastplm_esm2",
         "dplm2",
         "profluent_e1",
+        "proteva",
     }:
         if (model_path / "modules.json").exists() or (
             model_path / "config_sentence_transformers.json"
@@ -530,36 +531,6 @@ def load_model(
         model.to(device).eval()
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         logger.info("-> Loaded as HF AutoModel (AMPLIFY)")
-        return (tokenizer, model), False, device
-
-    if model_type == "proteva":
-        logger.info("-> Detected Proteva (HF-native) model, loading with AutoModel")
-        # Importing plm.hf registers ProtevaConfig/ProtevaForPretraining with
-        # AutoConfig/AutoModel so trust_remote_code=False loads resolve.
-        import plm.hf  # noqa: F401  (registration side effect)
-
-        # The saved config bakes flash_attn_mode (e.g. "fa2-varlen") from the
-        # CUDA training run. The bench feeds standard non-packed (B, L) batches
-        # (no cu_seqlens), so force the dense SDPA path for forward-only
-        # embedding extraction — correct + works on both GPU and CPU.
-        cfg = AutoConfig.from_pretrained(model_name, trust_remote_code=False)
-        if isinstance(getattr(cfg, "encoder_config", None), dict):
-            cfg.encoder_config["flash_attn_mode"] = "off"
-        model = AutoModel.from_pretrained(
-            model_name, config=cfg, trust_remote_code=False
-        )
-        model.to(device).eval()
-        # The checkpoint dir may not carry tokenizer files; the project
-        # tokenizer in the cache is the canonical fallback.
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_name, trust_remote_code=True
-            )
-        except Exception:
-            tokenizer = AutoTokenizer.from_pretrained(
-                "/data/proteva/cache/tokenizer", trust_remote_code=True
-            )
-        logger.info("-> Loaded as HF AutoModel (Proteva, flash_attn_mode=off)")
         return (tokenizer, model), False, device
 
     if model_type == "fastplm_esm2":
@@ -610,6 +581,33 @@ def load_model(
         model.to(device).eval()
         tokenizer = model.tokenizer
         logger.info("-> Loaded as HF AutoModelForMaskedLM (ESMplusplus)")
+        return (tokenizer, model), False, device
+
+    if model_type == "proteva":
+        # Proteva is this project's HF-native encoder. It is benchmarked the
+        # SAME way it was trained: BF16 weights + the model's own
+        # ``flash_attn_mode="fa2-varlen"`` attention (block-diagonal varlen over
+        # packed, UNPADDED sequences). We deliberately do NOT pass an HF
+        # ``attn_implementation`` here — the encoder reads ``flash_attn_mode``
+        # from ``config.encoder_config`` and dispatches flash-attn internally;
+        # HF's attn dispatch does not apply to this custom model. Embeddings are
+        # produced by the varlen path in ``embed_sequences`` (pack -> forward ->
+        # segment-mean-pool), never the padded/SDPA-dense path.
+        import plm.hf  # noqa: F401  (registers ProtevaConfig/ProtevaForPretraining)
+
+        logger.info("-> Detected Proteva model, loading with AutoModel (BF16, fa2-varlen)")
+        model = AutoModel.from_pretrained(model_name, dtype=torch.bfloat16)
+        model.to(device).eval()
+        enc_mode = getattr(getattr(model, "encoder", None), "config", None)
+        enc_mode = getattr(enc_mode, "flash_attn_mode", "?")
+        logger.info(f"-> Proteva encoder flash_attn_mode={enc_mode}")
+        # The HF checkpoint ships weights only; load the project tokenizer.
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        except Exception:
+            tokenizer = AutoTokenizer.from_pretrained("/data/proteva/cache/tokenizer")
+            logger.info("-> Using fallback tokenizer: /data/proteva/cache/tokenizer")
+        logger.info("-> Loaded as HF AutoModel (Proteva)")
         return (tokenizer, model), False, device
 
     # 1. Try SentenceTransformer first (preferred for non-ESMplusplus pretrained models)
@@ -1593,6 +1591,63 @@ def _l2_normalize_embeddings(embs: np.ndarray) -> np.ndarray:
     return embs / safe_norms
 
 
+def _pack_token_id_rows(rows: List[np.ndarray]) -> Dict[str, Any]:
+    """Pack per-sequence token-id arrays into the fa2-varlen layout.
+
+    Mirrors the packing produced by ``plm.hf.collator.ProteinPackedCollator``
+    (the path the model was trained with): variable-length rows are
+    concatenated into a single ``(1, total_tokens)`` sequence with no padding,
+    accompanied by ``cu_seqlens`` (prefix-sum segment boundaries) and
+    per-segment RoPE ``position_ids``. The model's flash-attn varlen kernel
+    uses ``cu_seqlens`` for block-diagonal attention so segments never attend
+    across protein boundaries.
+
+    Args:
+        rows: list of 1-D int token-id arrays, one per sequence (already
+            tokenized + cropped; no padding).
+
+    Returns:
+        Dict with ``input_ids`` ``(1, T)``, ``attention_mask`` ``(1, T)``,
+        ``cu_seqlens_q``/``cu_seqlens_k`` ``(num_segments + 1,)`` int32,
+        ``position_ids`` ``(1, T)``, and ``max_seqlen_q``/``max_seqlen_k`` ints.
+    """
+    if not rows:
+        raise ValueError("_pack_token_id_rows received no rows")
+
+    seg_lens = [int(np.asarray(r).reshape(-1).shape[0]) for r in rows]
+    packed_ids = np.concatenate([np.asarray(r, dtype=np.int64).reshape(-1) for r in rows])
+    cu = np.zeros(len(seg_lens) + 1, dtype=np.int32)
+    cu[1:] = np.cumsum(seg_lens, dtype=np.int32)
+    max_seg = int(max(seg_lens))
+    pos = np.concatenate([np.arange(n, dtype=np.int32) for n in seg_lens])
+    total = int(cu[-1])
+
+    cu_t = torch.from_numpy(cu)
+    return {
+        "input_ids": torch.from_numpy(packed_ids).long().unsqueeze(0),
+        "attention_mask": torch.ones((1, total), dtype=torch.long),
+        "cu_seqlens_q": cu_t,
+        "cu_seqlens_k": cu_t,
+        "max_seqlen_q": max_seg,
+        "max_seqlen_k": max_seg,
+        "position_ids": torch.from_numpy(pos).unsqueeze(0),
+    }
+
+
+def _segment_mean_pool(hidden: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
+    """Mean-pool packed hidden states back to one vector per segment.
+
+    Inverse of :func:`_pack_token_id_rows`: given ``(1, total_tokens, H)``
+    hidden states and the ``cu_seqlens`` boundaries, average each segment's
+    token vectors to ``(num_segments, H)``. Output is always float32 (the
+    model forwards in bf16; the linear probe wants float).
+    """
+    h = hidden.squeeze(0).float()  # (total_tokens, H)
+    bounds = cu_seqlens.detach().cpu().to(torch.int64).tolist()
+    pooled = [h[bounds[i] : bounds[i + 1]].mean(dim=0) for i in range(len(bounds) - 1)]
+    return torch.stack(pooled, dim=0)
+
+
 def embed_sequences(
     model_obj,
     is_sbert: bool,
@@ -1654,13 +1709,53 @@ def embed_sequences(
         is_amplify_model = (
             getattr(getattr(model, "config", None), "model_type", "") == "AMPLIFY"
         )
+        is_proteva_model = (
+            getattr(getattr(model, "config", None), "model_type", "") == "proteva"
+        )
         # Synthyra models (ESM++) expose embed_dataset() for efficient batched
         # inference with length-sorted batches — use it when available.
         has_embed_dataset = hasattr(model, "embed_dataset") and callable(
             model.embed_dataset
         )
 
-        if has_embed_dataset:
+        if is_proteva_model:
+            # Proteva fa2-varlen path: tokenize each sequence, pack a chunk of
+            # rows into a single UNPADDED (1, total_tokens) sequence with
+            # cu_seqlens + per-segment position_ids, forward through the model's
+            # block-diagonal flash-attn (BF16, the trained attention path), then
+            # segment-mean-pool back to one (H,) vector per sequence. No padding
+            # (mask is all-ones over the packed tokens), no SDPA-dense fallback.
+            model_device = next(model.parameters()).device
+            embs_list = []
+            for i in range(0, len(flat_seqs), batch_size):
+                batch = flat_seqs[i : i + batch_size]
+                # Tokenize per sequence (no padding) -> per-row id arrays.
+                tok = tokenizer(
+                    batch,
+                    add_special_tokens=True,
+                    truncation=True,
+                    max_length=max_length,
+                )
+                rows = [np.asarray(ids, dtype=np.int64) for ids in tok["input_ids"]]
+                packed = _pack_token_id_rows(rows)
+                forward_inputs = {
+                    k: (v.to(model_device) if isinstance(v, torch.Tensor) else v)
+                    for k, v in packed.items()
+                }
+                with torch.inference_mode():
+                    outputs = model(**forward_inputs, return_dict=True)
+                hidden = outputs.last_hidden_state  # (1, total_tokens, H)
+                if hidden is None:
+                    raise RuntimeError(
+                        "Proteva forward returned no last_hidden_state"
+                    )
+                pooled = _segment_mean_pool(
+                    hidden, packed["cu_seqlens_q"]
+                )  # (len(batch), H)
+                embs_list.append(pooled.detach().cpu().numpy())
+            embs = np.concatenate(embs_list, axis=0)
+
+        elif has_embed_dataset:
             # embed_dataset handles batching/sorting internally; returns dict[seq->tensor]
             # Note: embed_dataset truncates sequences to max_len, so dict keys are
             # truncated. We truncate the lookup keys to match.

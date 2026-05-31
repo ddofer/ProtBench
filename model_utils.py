@@ -81,6 +81,10 @@ def detect_model_type(model_name: str) -> ModelType:
     if ("profluent" in name_lower and "synthyra" in name_lower) or "e1-" in name_lower:
         return "profluent_e1"
 
+    # Proteva (this project's HF-native encoder; loaded fa2-varlen + BF16)
+    if "proteva" in name_lower:
+        return "proteva"
+
     # Check local config.json for non-obvious model paths
     config_path = Path(model_name) / "config.json"
     if config_path.exists():
@@ -89,9 +93,6 @@ def detect_model_type(model_name: str) -> ModelType:
                 cfg = json.load(f)
             if cfg.get("model_type") == "AMPLIFY":
                 return "amplify"
-            # HF-native Proteva checkpoint (output of plm/hf/run_stage2.py).
-            # Detected by the model_type field so we can import plm.hf to
-            # register the type and override the baked flash_attn_mode at load.
             if cfg.get("model_type") == "proteva":
                 return "proteva"
             archs = cfg.get("architectures", [])
@@ -108,6 +109,9 @@ def detect_model_type(model_name: str) -> ModelType:
             # Profluent-E1: check for E1 architectures
             if any("E1" in str(v) or "ProfluentE1" in str(v) for v in all_vals):
                 return "profluent_e1"
+            # Proteva: ProtevaForPretraining architecture
+            if any("Proteva" in str(v) for v in all_vals):
+                return "proteva"
         except Exception:
             pass
 
