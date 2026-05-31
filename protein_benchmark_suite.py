@@ -153,7 +153,7 @@ from sklearn.preprocessing import (
     MultiLabelBinarizer,
     StandardScaler,
 )
-from transformers import AutoModel, AutoModelForMaskedLM, AutoTokenizer
+from transformers import AutoConfig, AutoModel, AutoModelForMaskedLM, AutoTokenizer
 
 from benchmark_comparison import compare_benchmarks, display_comparison
 from benchmark_tasks import (
@@ -530,6 +530,36 @@ def load_model(
         model.to(device).eval()
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         logger.info("-> Loaded as HF AutoModel (AMPLIFY)")
+        return (tokenizer, model), False, device
+
+    if model_type == "proteva":
+        logger.info("-> Detected Proteva (HF-native) model, loading with AutoModel")
+        # Importing plm.hf registers ProtevaConfig/ProtevaForPretraining with
+        # AutoConfig/AutoModel so trust_remote_code=False loads resolve.
+        import plm.hf  # noqa: F401  (registration side effect)
+
+        # The saved config bakes flash_attn_mode (e.g. "fa2-varlen") from the
+        # CUDA training run. The bench feeds standard non-packed (B, L) batches
+        # (no cu_seqlens), so force the dense SDPA path for forward-only
+        # embedding extraction — correct + works on both GPU and CPU.
+        cfg = AutoConfig.from_pretrained(model_name, trust_remote_code=False)
+        if isinstance(getattr(cfg, "encoder_config", None), dict):
+            cfg.encoder_config["flash_attn_mode"] = "off"
+        model = AutoModel.from_pretrained(
+            model_name, config=cfg, trust_remote_code=False
+        )
+        model.to(device).eval()
+        # The checkpoint dir may not carry tokenizer files; the project
+        # tokenizer in the cache is the canonical fallback.
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_name, trust_remote_code=True
+            )
+        except Exception:
+            tokenizer = AutoTokenizer.from_pretrained(
+                "/data/proteva/cache/tokenizer", trust_remote_code=True
+            )
+        logger.info("-> Loaded as HF AutoModel (Proteva, flash_attn_mode=off)")
         return (tokenizer, model), False, device
 
     if model_type == "fastplm_esm2":

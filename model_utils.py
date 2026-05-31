@@ -38,7 +38,13 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 ModelType = Literal[
-    "amplify", "esmplusplus", "fastplm_esm2", "dplm2", "profluent_e1", "standard"
+    "amplify",
+    "esmplusplus",
+    "fastplm_esm2",
+    "dplm2",
+    "profluent_e1",
+    "proteva",
+    "standard",
 ]
 
 # Flash attention availability (cached at import time)
@@ -83,6 +89,11 @@ def detect_model_type(model_name: str) -> ModelType:
                 cfg = json.load(f)
             if cfg.get("model_type") == "AMPLIFY":
                 return "amplify"
+            # HF-native Proteva checkpoint (output of plm/hf/run_stage2.py).
+            # Detected by the model_type field so we can import plm.hf to
+            # register the type and override the baked flash_attn_mode at load.
+            if cfg.get("model_type") == "proteva":
+                return "proteva"
             archs = cfg.get("architectures", [])
             auto_map = cfg.get("auto_map", {})
             all_vals = [*archs, *auto_map.values()]
