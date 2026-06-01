@@ -177,6 +177,7 @@ from model_utils import (
     detect_model_type,
     disable_esm2_token_dropout,
     fix_amplify_meta_tensors,
+    fix_proteva_rope_buffer,
     from_pretrained_with_flash,
     get_torch_compile_settings,
     needs_esm2_token_dropout_workaround,
@@ -614,6 +615,14 @@ def load_model(
             _cfg.encoder_config["fused_rmsnorm"] = False
         model = AutoModel.from_pretrained(model_name, config=_cfg)
         model.to(device).to(torch.bfloat16).eval()
+        # ProteinEncoder registers rope_cs as a NON-persistent buffer, so HF's
+        # from_pretrained leaves it as uninitialized meta/garbage memory (it is
+        # absent from the checkpoint and never re-run through __init__'s
+        # _precompute_rope). That silently DISABLES RoPE for the benched model and
+        # was the root cause of the constant ~0.03-0.32 downstream gap vs native
+        # AMPLIFY benched on identical weights. Recompute it explicitly (analogous
+        # to fix_amplify_meta_tensors for AMPLIFY's freqs_cis).
+        fix_proteva_rope_buffer(model)
         enc_mode = getattr(getattr(model, "encoder", None), "config", None)
         enc_mode = getattr(enc_mode, "flash_attn_mode", "?")
         logger.info(f"-> Proteva encoder flash_attn_mode={enc_mode}")

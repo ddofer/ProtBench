@@ -526,6 +526,61 @@ def fix_amplify_meta_tensors(model):
         )
 
 
+def fix_proteva_rope_buffer(model):
+    """Recompute Proteva's ``encoder.rope_cs`` RoPE cache after ``from_pretrained``.
+
+    ``ProteinEncoder`` registers ``rope_cs`` (the precomputed cos/sin RoPE cache)
+    as a NON-persistent buffer (``persistent=False``), so it is intentionally
+    excluded from the safetensors checkpoint. HF's ``from_pretrained`` materializes
+    the model on a meta device and copies tensors from the state dict; because the
+    buffer is absent from the checkpoint, it is left as the meta/empty allocation
+    and is NEVER re-run through ``__init__``'s ``_precompute_rope``. The result is a
+    garbage ``rope_cs`` (observed: all-zeros, or non-deterministic memory junk that
+    differs run-to-run) — i.e. RoPE is silently DISABLED for the benched model.
+
+    This is the exact analogue of the AMPLIFY ``freqs_cis`` meta-tensor problem that
+    :func:`fix_amplify_meta_tensors` repairs. Without this fix, benched Proteva
+    embeddings carry no positional information and the linear-probe scores sit a
+    constant ~0.03–0.32 below the same AMPLIFY weights benched natively.
+
+    Recomputes the buffer from the encoder config (matching ``ProteinEncoder.__init__``)
+    and writes it back on the buffer's existing device/dtype. No-op for non-Proteva
+    models or when the buffer is already valid.
+    """
+    enc = getattr(model, "encoder", None)
+    if enc is None or not hasattr(enc, "rope_cs"):
+        return
+    buf = enc.rope_cs
+    # Reference cos at position 1, pair 0 must be cos(1 * inv_freq[0]) = cos(1) ≈ 0.5403.
+    # A meta/zero/garbage buffer fails this; a correct buffer always has cos[0]==1.0.
+    pos0_ok = bool(torch.allclose(buf[0, :, 0].float(), torch.ones_like(buf[0, :, 0].float()), atol=1e-3))
+    pos0_sin_ok = bool(torch.allclose(buf[0, :, 1].float(), torch.zeros_like(buf[0, :, 1].float()), atol=1e-3))
+    if pos0_ok and pos0_sin_ok and not bool(torch.isnan(buf).any()):
+        return  # already a valid RoPE cache
+    from plm.model import _precompute_rope, _precompute_rope_multi_scale
+
+    ecfg = enc.config
+    if getattr(ecfg, "multi_scale_rope", False):
+        fresh = _precompute_rope_multi_scale(
+            ecfg.head_dim,
+            ecfg.max_position,
+            thetas=(1_000.0, 10_000.0, 100_000.0),
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+    else:
+        fresh = _precompute_rope(
+            ecfg.head_dim,
+            ecfg.max_position,
+            ecfg.rope_theta,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            rope_frac=ecfg.rope_frac,
+        )
+    enc.rope_cs = fresh.to(device=buf.device, dtype=buf.dtype)
+    logger.info("   Recomputed Proteva encoder.rope_cs (was uninitialized after from_pretrained)")
+
+
 _AMPLIFY_PATCHED_MODULES: set[str] = set()
 
 
