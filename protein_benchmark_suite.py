@@ -595,13 +595,24 @@ def load_model(
         # segment-mean-pool), never the padded/SDPA-dense path.
         import plm.hf  # noqa: F401  (registers ProtevaConfig/ProtevaForPretraining)
 
-        logger.info("-> Detected Proteva model, loading with AutoModel (fp32->BF16, fa2-varlen)")
-        # Load in fp32 FIRST, then cast to bf16. Loading directly in bf16
-        # (dtype=torch.bfloat16) makes __init__ compute the RoPE rotary cache
-        # (sin/cos of large position angles) in bf16 — a precision-critical op
-        # that yields NaN embeddings (100% NaN, verified). Building in fp32 then
-        # casting keeps the cache correct. (No meta buffers involved.)
-        model = AutoModel.from_pretrained(model_name)
+        logger.info("-> Detected Proteva model, loading with AutoModel (fp32->BF16, fa2-varlen override)")
+        # Build with INFERENCE-SAFE kernels, overriding whatever the checkpoint
+        # trained with (weights are identical; outputs are equivalent — both
+        # validated):
+        #   * flash_attn_mode="fa2-varlen": fa3-varlen NaNs on real multi-segment
+        #     packed inputs in eval-mode bf16 (100% NaN, verified); fa2-varlen is
+        #     block-diagonal + bit-exact-validated. (fa3 is fine for TRAINING.)
+        #   * fused_rmsnorm=False: native RMSNorm — no FLA/FLA_TILELANG dependency
+        #     in the bench env; numerically equivalent to the fused kernel.
+        # Load in fp32 FIRST then cast to bf16: loading directly in bf16 makes
+        # __init__ compute the RoPE sin/cos cache in bf16 -> NaN embeddings.
+        from plm.hf.config import ProtevaConfig
+
+        _cfg = ProtevaConfig.from_pretrained(model_name)
+        if isinstance(getattr(_cfg, "encoder_config", None), dict):
+            _cfg.encoder_config["flash_attn_mode"] = "fa2-varlen"
+            _cfg.encoder_config["fused_rmsnorm"] = False
+        model = AutoModel.from_pretrained(model_name, config=_cfg)
         model.to(device).to(torch.bfloat16).eval()
         enc_mode = getattr(getattr(model, "encoder", None), "config", None)
         enc_mode = getattr(enc_mode, "flash_attn_mode", "?")
