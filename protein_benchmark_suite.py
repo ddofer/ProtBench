@@ -160,6 +160,7 @@ from benchmark_tasks import (
     DEFAULT_TASKS,
     FAST_MAX_SAMPLES,
     FAST_TASKS,
+    VERY_FAST_TASKS,
     RETRIEVAL_TASKS,
     PROTEINGYM_TASKS,
     TASKS,
@@ -3170,6 +3171,17 @@ def parse_args():
         help="Run a fast subset of tasks (default: True)",
     )
     parser.add_argument(
+        "--very-fast",
+        dest="very_fast",
+        action="store_true",
+        default=False,
+        help=(
+            "Run only the curated very-fast / low-variance subset "
+            f"({', '.join(VERY_FAST_TASKS)}) for high-ROI scout comparisons. "
+            "Takes precedence over --fast; ignored if --tasks is given."
+        ),
+    )
+    parser.add_argument(
         "--output_dir",
         "-o",
         type=str,
@@ -3324,6 +3336,7 @@ def main():
         "output_dir": args.output_dir,
         "device": args.device,
         "fast": args.fast,
+        "very_fast": args.very_fast,
         "cache_embeddings": args.cache_embeddings,
         "embed_cache_dir": args.embed_cache_dir,
         "proteingym": args.proteingym,
@@ -3417,12 +3430,15 @@ def main():
                     compile_kwargs.get("mode", "default"),
                 )
 
-    # Select tasks
+    # Select tasks. --very-fast (curated low-variance subset) takes precedence
+    # over --fast; explicit --tasks overrides both.
     if config.get("tasks"):
         task_keys = [t for t in config["tasks"] if t in TASKS]
         if len(task_keys) != len(config["tasks"]):
             missing = set(config["tasks"]) - set(task_keys)
             raise ValueError(f"Unknown tasks provided: {sorted(missing)}")
+    elif config.get("very_fast"):
+        task_keys = list(VERY_FAST_TASKS)
     elif config.get("fast"):
         task_keys = list(FAST_TASKS) + list(RETRIEVAL_TASKS)
     else:

@@ -86,6 +86,22 @@ FAST_TASKS = [
     "chezod_disorder",
 ]
 
+# Curated very-fast / low-variance subset (2026-06-03) for high-ROI scout
+# comparisons: a fold-recognition task (representation quality) + two fast
+# stable binary tasks + three stable regression/fitness tasks. Deliberately
+# omits the slower or higher-variance FAST_TASKS (ec_classification,
+# ppi_bernett, chezod_disorder residue-level, enzyme_catalytic_efficiency,
+# variant_effect, peptide_hla, profet) and the retrieval task. Selected via
+# --very-fast. Every entry MUST be a key in TASKS.
+VERY_FAST_TASKS = [
+    "remote_homology",
+    "solubility",
+    "metal_ion_binding",
+    "fluorescence",
+    "stability",
+    "beta_lactamase_peer",
+]
+
 FAST_MAX_SAMPLES = 100_000
 
 _CLINICAL_LABEL_MAP = {"Pathogenic": 1, "Benign": 0, "0": 0, "1": 1}
