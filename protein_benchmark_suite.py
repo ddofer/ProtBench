@@ -2535,6 +2535,66 @@ def evaluate_retrieval(
     return results
 
 
+def _run_zeroshot_tta(
+    cfg,
+    model_obj,
+    is_sbert,
+    device,
+    mutants,
+    wts,
+    groups,
+    labels,
+    tta_cfg,
+    batch_size,
+    max_length,
+    amp_dtype,
+    l2_normalize_embeddings,
+):
+    """Per-assay WT test-time training for the ProteinGym zero-shot path.
+
+    Returns a list of per-group metric values, or ``None`` when TTA cannot apply
+    to this model (SentenceTransformer, or no reachable MLM head) so the caller
+    falls back to the standard embedding-cosine path. The embedding cache is
+    bypassed (``embed_save_path=None``): per-assay adapted weights make any cached
+    embedding stale by construction.
+    """
+    if is_sbert:
+        logger.info(
+            "  --tta requested but model is a SentenceTransformer (no reachable "
+            "MLM head); running standard zero-shot instead."
+        )
+        return None
+
+    from wt_test_time_training import resolve_mlm_head, run_tta_zeroshot
+
+    tokenizer, model = model_obj
+    try:
+        refs = resolve_mlm_head(model, tokenizer)
+    except ValueError as exc:
+        logger.warning("  --tta disabled for this model: %s", exc)
+        return None
+
+    logger.info(
+        "  WT test-time training: iters=%d lr=%g layers=%d mask_rate=%g "
+        "train_head=%s (embedding cache bypassed)",
+        tta_cfg.iters, tta_cfg.lr, tta_cfg.n_layers, tta_cfg.mask_rate,
+        tta_cfg.train_head,
+    )
+
+    def embed_fn(seqs):
+        return embed_sequences(
+            model_obj, is_sbert, seqs, device,
+            batch_size=batch_size, max_length=max_length, amp_dtype=amp_dtype,
+            embed_save_path=None,
+            l2_normalize_embeddings=l2_normalize_embeddings,
+        )
+
+    return run_tta_zeroshot(
+        model, refs, tokenizer, mutants, wts, groups, labels,
+        cfg.problem_type, embed_fn, tta_cfg, device=device, max_length=max_length,
+    )
+
+
 def evaluate_task(
     cfg: TaskConfig,
     model_obj,
@@ -2551,8 +2611,13 @@ def evaluate_task(
     knn_weights: str = "uniform",
     l2_normalize_embeddings: bool = False,
     eval_split: str = DEFAULT_BENCHMARK_EVAL_SPLIT,
+    tta_cfg=None,
 ) -> Tuple[Dict[str, Any], str, str]:
-    """Run full evaluation for a single task."""
+    """Run full evaluation for a single task.
+
+    ``tta_cfg`` (a ``wt_test_time_training.TTAConfig`` or None) enables wild-type
+    test-time training on the ProteinGym zero-shot path; ignored elsewhere.
+    """
 
     logger.info(f"Evaluating: {cfg.name}")
 
@@ -2685,6 +2750,36 @@ def evaluate_task(
             # train_seqs = [(mutant, wt), ...] — keys sorted: "mutant" < "wt"
             mutants = [s[0] for s in train_seqs]
             wts = [s[1] for s in train_seqs]
+
+            # Optional wild-type test-time training: adapt the model to each
+            # assay's WT (a few MLM rounds) before the same cosine readout.
+            # Returns None (and we fall through to baseline) when TTA is not
+            # applicable to this model — e.g. SentenceTransformer or no MLM head.
+            if tta_cfg is not None:
+                tta_group_metrics = _run_zeroshot_tta(
+                    cfg, model_obj, is_sbert, device, mutants, wts, groups, labels,
+                    tta_cfg, batch_size=batch_size, max_length=max_length,
+                    amp_dtype=amp_dtype,
+                    l2_normalize_embeddings=l2_normalize_embeddings,
+                )
+                if tta_group_metrics is not None:
+                    group_metrics = tta_group_metrics
+                    valid_metrics = [x for x in group_metrics if np.isfinite(x)]
+                    if not valid_metrics:
+                        return (
+                            {"Error": "No valid groups for evaluation"},
+                            resolved_eval_split,
+                            eval_strategy,
+                        )
+                    return (
+                        {
+                            cfg.main_metric: float(np.mean(valid_metrics)),
+                            "Assays_Evaluated": len(valid_metrics),
+                        },
+                        resolved_eval_split,
+                        eval_strategy,
+                    )
+
             logger.info("  Generating embeddings (zero-shot)...")
             mutant_embs = embed_sequences(
                 model_obj,
@@ -3287,6 +3382,44 @@ def parse_args():
             "Disabled by default."
         ),
     )
+
+    # --- WT test-time training (TTT/TTA), opt-in; ProteinGym zero-shot only ---
+    parser.add_argument(
+        "--tta",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable wild-type test-time training: run a few MLM rounds on each "
+            "assay's WT before the zero-shot embedding-cosine readout (ProteinTTT, "
+            "arXiv 2411.02109). ProteinGym zero-shot tasks only; AMPLIFY/Proteva "
+            "(non-SentenceTransformer) models with a reachable MLM head. Forces the "
+            "embedding cache off. No-op (with a logged reason) elsewhere."
+        ),
+    )
+    parser.add_argument(
+        "--tta-iters", dest="tta_iters", type=int, default=20,
+        help="WT-TTT SGD steps per assay (default: 20; ProteinTTT uses 10-30).",
+    )
+    parser.add_argument(
+        "--tta-lr", dest="tta_lr", type=float, default=4e-4,
+        help="WT-TTT learning rate; SGD momentum=0, weight_decay=0 (default: 4e-4).",
+    )
+    parser.add_argument(
+        "--tta-layers", dest="tta_layers", type=int, default=2,
+        help="Top encoder blocks to unfreeze for WT-TTT (default: 2).",
+    )
+    parser.add_argument(
+        "--tta-mask-rate", dest="tta_mask_rate", type=float, default=0.15,
+        help="MLM mask rate for WT-TTT, replicating pretraining (default: 0.15).",
+    )
+    parser.add_argument(
+        "--tta-train-head", dest="tta_train_head",
+        action=argparse.BooleanOptionalAction, default=True,
+        help=(
+            "Also fine-tune the MLM head during WT-TTT (default: True). "
+            "--no-tta-train-head freezes the head (adapt backbone only, per ProteinTTT)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -3507,6 +3640,22 @@ def main():
     # Run evaluations
     tracker = ResultTracker(config["model"])
 
+    tta_cfg = None
+    if getattr(args, "tta", False):
+        from wt_test_time_training import TTAConfig
+
+        tta_cfg = TTAConfig(
+            iters=args.tta_iters,
+            lr=args.tta_lr,
+            n_layers=args.tta_layers,
+            mask_rate=args.tta_mask_rate,
+            train_head=args.tta_train_head,
+            seed=args.seed,
+        )
+        logger.info(
+            "WT test-time training ENABLED (zero-shot tasks only): %s", tta_cfg
+        )
+
     total_runs = len(task_keys) * len(benchmark_seeds)
     completed_runs = 0
     for seed_index, benchmark_seed in enumerate(benchmark_seeds, start=1):
@@ -3556,6 +3705,7 @@ def main():
                     l2_normalize_embeddings=config.get(
                         "l2_normalize_embeddings", False
                     ),
+                    tta_cfg=tta_cfg,
                 )
 
                 main_val = metrics.get(cfg.main_metric, None)
