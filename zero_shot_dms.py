@@ -473,6 +473,361 @@ def load_task_variants(task: str, max_variants: int | None = None) -> list[DMSVa
     return variants if max_variants is None else variants[:max_variants]
 
 
+# --------------------------------------------------------------------------- #
+# ProteinGym multi-assay loading (the locally cached DMS panel).
+# --------------------------------------------------------------------------- #
+# ProteinGym v1 ships ~217 substitution DMS assays as a sharded parquet dataset
+# (one row per variant) with an *explicit* wild-type ``target_seq`` and a
+# ``mutant`` field of the form ``W<pos>M`` (1-based position), colon-separated
+# for multi-mutant variants. This is richer than the GB1 / beta-lactamase TAPE
+# datasets (which carry only full variant sequences and need a consensus WT), so
+# the loader parses the mutation list directly rather than diffing.
+_PROTEINGYM_REPO = "OATML-Markslab/ProteinGym_v1"
+_PROTEINGYM_SUBSTITUTIONS_DIR = "DMS_substitutions"
+_PROTEINGYM_PREFIX = "proteingym:"
+
+# AMPLIFY-120M masked-marginal Spearman references (fixed external facts; only
+# the assays we have a measured AMPLIFY number for). beta_lactamase is the
+# audited n=5198 figure carried in project memory.
+AMPLIFY_REFERENCES: dict[str, float] = {
+    "beta_lactamase": 0.347,
+}
+
+
+def _proteingym_snapshot_dir() -> str | None:
+    """Return the locally cached ProteinGym snapshot dir, or ``None`` if absent.
+
+    Resolves the cache *offline* (``local_files_only=True``) so no network call
+    or download is ever made — the panel only scores data already on disk.
+    """
+    try:
+        from huggingface_hub import snapshot_download
+
+        return snapshot_download(
+            _PROTEINGYM_REPO, repo_type="dataset", local_files_only=True
+        )
+    except Exception:  # not cached / hub_hub unavailable
+        return None
+
+
+def _proteingym_shards() -> list[str]:
+    """Return the cached ProteinGym DMS_substitutions parquet shard paths."""
+    import glob
+    import os
+
+    snap = _proteingym_snapshot_dir()
+    if snap is None:
+        return []
+    sub = os.path.join(snap, _PROTEINGYM_SUBSTITUTIONS_DIR)
+    return sorted(glob.glob(os.path.join(sub, "*.parquet")))
+
+
+def proteingym_assay_ids() -> list[str]:
+    """Enumerate the DMS_id of every locally cached ProteinGym substitution assay.
+
+    Returns:
+        Sorted ``DMS_id`` strings, or an empty list when ProteinGym is not
+        cached. Cheap: reads only the ``DMS_id`` column across shards.
+    """
+    shards = _proteingym_shards()
+    if not shards:
+        return []
+    import pyarrow.parquet as pq
+
+    ids: set[str] = set()
+    for shard in shards:
+        table = pq.read_table(shard, columns=["DMS_id"])
+        ids.update(str(x) for x in table.column("DMS_id").to_pylist())
+    return sorted(ids)
+
+
+def parse_proteingym_mutant(
+    mutant: str, target_seq: str
+) -> list[tuple[int, str, str]]:
+    """Parse a ProteinGym ``mutant`` field into a 0-based mutation list.
+
+    Args:
+        mutant: ``W<pos>M`` (1-based ``pos``), colon-separated for multi-mutants
+            (e.g. ``"D6A:E32F"``). The synonymous wild-type sentinel ``"WT"`` (and
+            an empty string) parse to an empty list.
+        target_seq: The wild-type sequence, used to validate the listed WT residue.
+
+    Returns:
+        List of ``(position, wt_aa, mut_aa)`` (0-based ``position``, ascending).
+
+    Raises:
+        ValueError: If a token is malformed or its WT residue disagrees with
+            ``target_seq`` at the given position.
+    """
+    mutant = mutant.strip()
+    if not mutant or mutant.upper() == "WT":
+        return []
+    muts: list[tuple[int, str, str]] = []
+    for token in mutant.split(":"):
+        token = token.strip()
+        if len(token) < 3:
+            raise ValueError(f"malformed ProteinGym mutant token {token!r}")
+        wt_aa, mut_aa, pos_str = token[0], token[-1], token[1:-1]
+        try:
+            pos1 = int(pos_str)
+        except ValueError as exc:
+            raise ValueError(
+                f"malformed ProteinGym mutant token {token!r}"
+            ) from exc
+        pos0 = pos1 - 1  # ProteinGym positions are 1-based.
+        if not (0 <= pos0 < len(target_seq)):
+            raise ValueError(
+                f"mutant {token!r} position {pos1} out of range for "
+                f"target_seq of length {len(target_seq)}"
+            )
+        if target_seq[pos0] != wt_aa:
+            raise ValueError(
+                f"mutant {token!r} WT residue {wt_aa!r} disagrees with "
+                f"target_seq[{pos0}]={target_seq[pos0]!r}"
+            )
+        muts.append((pos0, wt_aa, mut_aa))
+    muts.sort()
+    return muts
+
+
+def load_proteingym_assay(
+    dms_id: str, max_variants: int | None = None
+) -> list[DMSVariant]:
+    """Load one cached ProteinGym substitution assay as :class:`DMSVariant` rows.
+
+    Args:
+        dms_id: The assay ``DMS_id`` (e.g. ``"BLAT_ECOLX_Stiffler_2015"``).
+        max_variants: Optional cap on the number of variants returned.
+
+    Returns:
+        The DMS variants for the assay (explicit WT from ``target_seq``).
+
+    Raises:
+        ValueError: If ProteinGym is not cached or ``dms_id`` is not present.
+    """
+    shards = _proteingym_shards()
+    if not shards:
+        raise ValueError(
+            "ProteinGym is not cached locally; cannot load assay "
+            f"{dms_id!r} (run the benchmark suite once to populate the cache)"
+        )
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    variants: list[DMSVariant] = []
+    for shard in shards:
+        table = pq.read_table(
+            shard, columns=["DMS_id", "target_seq", "mutant", "DMS_score"]
+        )
+        mask = pc.equal(table.column("DMS_id"), dms_id)
+        sub = table.filter(mask)
+        if sub.num_rows == 0:
+            continue
+        data = sub.to_pydict()
+        for target_seq, mutant, score in zip(
+            data["target_seq"], data["mutant"], data["DMS_score"]
+        ):
+            variants.append(
+                DMSVariant(
+                    wt_sequence=str(target_seq),
+                    mutations=parse_proteingym_mutant(str(mutant), str(target_seq)),
+                    fitness=float(score),
+                )
+            )
+            if max_variants is not None and len(variants) >= max_variants:
+                return variants
+    if not variants:
+        raise ValueError(f"no ProteinGym rows for DMS_id {dms_id!r}")
+    return variants
+
+
+# --------------------------------------------------------------------------- #
+# Task registry + panel.
+# --------------------------------------------------------------------------- #
+def available_tasks(include_proteingym: bool = True) -> list[str]:
+    """List every DMS task that can be scored from *locally cached* data.
+
+    Always includes the curated single-protein tasks (``gb1``,
+    ``beta_lactamase``); appends one ``proteingym:<DMS_id>`` entry per cached
+    ProteinGym substitution assay when present.
+
+    Args:
+        include_proteingym: When False, skip the ProteinGym panel (the curated
+            two-protein set only).
+
+    Returns:
+        Sorted, de-duplicated task names.
+    """
+    tasks = ["beta_lactamase", "gb1"]
+    if include_proteingym:
+        tasks.extend(f"{_PROTEINGYM_PREFIX}{a}" for a in proteingym_assay_ids())
+    return tasks
+
+
+def load_variants_for_task(
+    task: str, max_variants: int | None = None
+) -> list[DMSVariant]:
+    """Dispatch a task name to its variant loader (curated or ProteinGym).
+
+    Args:
+        task: ``gb1`` / ``beta_lactamase`` (curated) or ``proteingym:<DMS_id>``.
+        max_variants: Optional cap.
+
+    Returns:
+        The DMS variants for the task.
+    """
+    if task.startswith(_PROTEINGYM_PREFIX):
+        return load_proteingym_assay(
+            task[len(_PROTEINGYM_PREFIX) :], max_variants=max_variants
+        )
+    return load_task_variants(task, max_variants=max_variants)
+
+
+def amplify_reference_for(task: str) -> float | None:
+    """Return the AMPLIFY-120M Spearman reference for a task, if known."""
+    if task.startswith(_PROTEINGYM_PREFIX):
+        return AMPLIFY_REFERENCES.get(task[len(_PROTEINGYM_PREFIX) :])
+    return AMPLIFY_REFERENCES.get(task)
+
+
+def score_panel(
+    scorer: MaskedLMScorer,
+    tasks: list[str],
+    *,
+    batch_size: int = 64,
+    max_variants: int | None = None,
+    on_result: Callable[[str, DMSResult], None] | None = None,
+) -> dict[str, DMSResult]:
+    """Score every task in ``tasks`` with one scorer; return per-task results.
+
+    A failing assay (load or scoring error) is logged and skipped rather than
+    aborting the whole panel, so one malformed assay never sinks a run.
+
+    Args:
+        scorer: The model adapter.
+        tasks: Task names (see :func:`available_tasks`).
+        batch_size: Masked positions per forward.
+        max_variants: Optional per-assay cap (handy for smoke runs).
+        on_result: Optional callback invoked as ``(task, result)`` after each
+            assay (e.g. to stream progress).
+
+    Returns:
+        Mapping ``task -> DMSResult`` for every assay that scored successfully.
+    """
+    results: dict[str, DMSResult] = {}
+    for task in tasks:
+        try:
+            variants = load_variants_for_task(task, max_variants=max_variants)
+            result = score_variants(scorer, variants, batch_size=batch_size)
+        except Exception:  # noqa: BLE001 - one bad assay must not sink the panel
+            logger.exception("skipping task %s (load/score failed)", task)
+            continue
+        results[task] = result
+        if on_result is not None:
+            on_result(task, result)
+    return results
+
+
+def build_panel_artifact(
+    model_id: str,
+    results: dict[str, DMSResult],
+    *,
+    is_amplify: bool = False,
+) -> dict:
+    """Assemble the durable JSON-serialisable panel artifact.
+
+    Schema (the audit's missing artifact)::
+
+        {
+          "model_id": str,           # ckpt dir or "amplify_120m"
+          "is_amplify": bool,
+          "n_assays": int,
+          "mean_spearman": float,    # unweighted mean over scored assays
+          "assays": [str, ...],      # the task names scored (sorted)
+          "per_assay": {             # one entry per assay
+             task: {"spearman": float, "n": int,
+                    "amplify_reference": float | None}
+          }
+        }
+
+    Args:
+        model_id: Checkpoint dir (or ``amplify_120m``).
+        results: ``task -> DMSResult`` (typically from :func:`score_panel`).
+        is_amplify: Mark the artifact as the AMPLIFY reference panel.
+
+    Returns:
+        A plain ``dict`` ready for :func:`json.dump`.
+    """
+    assays = sorted(results)
+    finite = [
+        results[t].spearman
+        for t in assays
+        if results[t].spearman == results[t].spearman  # not NaN
+    ]
+    mean_spearman = float(np.mean(finite)) if finite else float("nan")
+    per_assay = {
+        task: {
+            "spearman": results[task].spearman,
+            "n": results[task].n,
+            "amplify_reference": amplify_reference_for(task),
+        }
+        for task in assays
+    }
+    return {
+        "model_id": model_id,
+        "is_amplify": is_amplify,
+        "n_assays": len(assays),
+        "mean_spearman": mean_spearman,
+        "assays": assays,
+        "per_assay": per_assay,
+    }
+
+
+def ckpt_tag(model_id: str) -> str:
+    """Derive a filesystem-safe artifact tag from a ckpt dir or model id.
+
+    Args:
+        model_id: Checkpoint directory path or ``amplify_120m``.
+
+    Returns:
+        A slug usable in ``zeroshot_<tag>.json`` (basename, non-alnum -> ``_``).
+    """
+    import os
+    import re
+
+    base = os.path.basename(os.path.normpath(model_id)) or model_id
+    return re.sub(r"[^0-9A-Za-z._-]+", "_", base).strip("_") or "model"
+
+
+def write_panel_artifact(
+    artifact: dict, results_dir: str | None = None
+) -> str:
+    """Write a panel artifact to ``<results_dir>/zeroshot_<tag>.json``.
+
+    Args:
+        artifact: The dict from :func:`build_panel_artifact`.
+        results_dir: Output directory (default ``plm/results`` next to the
+            package). Created if absent.
+
+    Returns:
+        The path written.
+    """
+    import json
+    import os
+
+    if results_dir is None:
+        results_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results"
+        )
+    os.makedirs(results_dir, exist_ok=True)
+    tag = ckpt_tag(str(artifact["model_id"]))
+    path = os.path.join(results_dir, f"zeroshot_{tag}.json")
+    with open(path, "w") as fh:
+        json.dump(artifact, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    return path
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point: score one task with a checkpoint and print Spearman."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -486,8 +841,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--task",
         required=True,
-        choices=sorted(_TASK_SPECS),
-        help="DMS task (gb1 / beta_lactamase).",
+        help=(
+            "DMS task. A curated task (gb1 / beta_lactamase), a single ProteinGym "
+            "assay (proteingym:<DMS_id>), or 'all' to score every locally cached "
+            "assay and write a JSON panel artifact."
+        ),
     )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--batch-size", type=int, default=64)
@@ -495,20 +853,22 @@ def main(argv: list[str] | None = None) -> int:
         "--max-variants",
         type=int,
         default=None,
-        help="Optional cap on the number of variants scored.",
+        help="Optional cap on the number of variants scored (per assay).",
+    )
+    parser.add_argument(
+        "--results-dir",
+        default=None,
+        help="Where to write the panel artifact for --task all (default plm/results).",
+    )
+    parser.add_argument(
+        "--no-proteingym",
+        action="store_true",
+        help="With --task all, score only the curated gb1/beta_lactamase set.",
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 
-    logger.info("Loading variants for task %s", args.task)
-    variants = load_task_variants(args.task, max_variants=args.max_variants)
-    n_mut = sum(len(v.mutations) for v in variants)
-    logger.info(
-        "Loaded %d variants (avg %.2f mutations/variant)",
-        len(variants),
-        n_mut / max(len(variants), 1),
-    )
-
+    # Build the scorer once (shared across the whole panel).
     if args.amplify:
         logger.info("Loading AMPLIFY-120M reference")
         scorer = build_amplify_scorer(args.device)
@@ -517,6 +877,46 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("Loading Proteva checkpoint from %s", args.ckpt)
         scorer = build_proteva_scorer(args.ckpt, args.device)
         model_tag = args.ckpt
+
+    if args.task == "all":
+        tasks = available_tasks(include_proteingym=not args.no_proteingym)
+        logger.info("Scoring panel of %d locally cached assays", len(tasks))
+
+        def _progress(task: str, result: DMSResult) -> None:
+            print(
+                f"{task}\tmodel={model_tag}"
+                f"\tspearman={result.spearman:.6f}\tn={result.n}",
+                flush=True,
+            )
+
+        results = score_panel(
+            scorer,
+            tasks,
+            batch_size=args.batch_size,
+            max_variants=args.max_variants,
+            on_result=_progress,
+        )
+        artifact = build_panel_artifact(
+            model_tag, results, is_amplify=args.amplify
+        )
+        path = write_panel_artifact(artifact, results_dir=args.results_dir)
+        logger.info(
+            "Wrote panel artifact %s (%d assays, mean Spearman %.4f)",
+            path,
+            artifact["n_assays"],
+            artifact["mean_spearman"],
+        )
+        print(f"PANEL\tmodel={model_tag}\tartifact={path}", flush=True)
+        return 0
+
+    logger.info("Loading variants for task %s", args.task)
+    variants = load_variants_for_task(args.task, max_variants=args.max_variants)
+    n_mut = sum(len(v.mutations) for v in variants)
+    logger.info(
+        "Loaded %d variants (avg %.2f mutations/variant)",
+        len(variants),
+        n_mut / max(len(variants), 1),
+    )
 
     result = score_variants(scorer, variants, batch_size=args.batch_size)
     # Single clean stdout line, parseable by callers.
