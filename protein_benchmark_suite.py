@@ -1684,6 +1684,7 @@ def embed_sequences(
     amp_dtype: Optional[torch.dtype] = None,
     embed_save_path: Optional[str] = None,
     l2_normalize_embeddings: bool = False,
+    probe_embed_mode: str = "trunk",
 ) -> np.ndarray:
     """Generate embeddings for sequences (single or pairs).
 
@@ -1738,6 +1739,12 @@ def embed_sequences(
         is_proteva_model = (
             getattr(getattr(model, "config", None), "model_type", "") == "proteva"
         )
+        if probe_embed_mode != "trunk" and not is_proteva_model:
+            logger.warning(
+                "probe_embed_mode=%s is only supported for Proteva models; falling back to trunk",
+                probe_embed_mode,
+            )
+            probe_embed_mode = "trunk"
         # Synthyra models (ESM++) expose embed_dataset() for efficient batched
         # inference with length-sorted batches — use it when available.
         has_embed_dataset = hasattr(model, "embed_dataset") and callable(
@@ -1778,7 +1785,18 @@ def embed_sequences(
                 pooled = _segment_mean_pool(
                     hidden, packed["cu_seqlens_q"]
                 )  # (len(batch), H)
-                embs_list.append(pooled.detach().cpu().numpy())
+                if probe_embed_mode == "trunk":
+                    embs_list.append(pooled.detach().cpu().numpy())
+                else:
+                    from aux_embed import build_probe_embedding, extract_aux_features
+
+                    aux = extract_aux_features(
+                        outputs, packed["cu_seqlens_q"], _log=(i == 0)
+                    )
+                    if probe_embed_mode == "aux_only" and aux is not None:
+                        embs_list.append(aux.detach().cpu().numpy())
+                    else:
+                        embs_list.append(build_probe_embedding(pooled.detach().cpu().numpy(), aux))
             embs = np.concatenate(embs_list, axis=0)
 
         elif has_embed_dataset:
@@ -2389,6 +2407,7 @@ def _evaluate_proteingym_supervised_probe(
     amp_dtype: Optional[torch.dtype],
     embed_save_path: Optional[str],
     l2_normalize_embeddings: bool,
+    probe_embed_mode: str = "trunk",
 ) -> Dict[str, Any]:
     """Evaluate supervised ProteinGym tasks with the selected non-linear probe."""
     logger.info(
@@ -2405,6 +2424,7 @@ def _evaluate_proteingym_supervised_probe(
         amp_dtype=amp_dtype,
         embed_save_path=embed_save_path,
         l2_normalize_embeddings=l2_normalize_embeddings,
+        probe_embed_mode=probe_embed_mode,
     )
     labels = np.asarray(train_labels)
     groups = np.asarray(extra_data)
@@ -2612,6 +2632,7 @@ def evaluate_task(
     l2_normalize_embeddings: bool = False,
     eval_split: str = DEFAULT_BENCHMARK_EVAL_SPLIT,
     tta_cfg=None,
+    probe_embed_mode: str = "trunk",
 ) -> Tuple[Dict[str, Any], str, str]:
     """Run full evaluation for a single task.
 
@@ -2723,6 +2744,7 @@ def evaluate_task(
                 amp_dtype=amp_dtype,
                 embed_save_path=embed_save_path,
                 l2_normalize_embeddings=l2_normalize_embeddings,
+                probe_embed_mode=probe_embed_mode,
             ),
             resolved_eval_split,
             eval_strategy,
@@ -2860,6 +2882,7 @@ def evaluate_task(
             amp_dtype=amp_dtype,
             embed_save_path=embed_save_path,
             l2_normalize_embeddings=l2_normalize_embeddings,
+            probe_embed_mode=probe_embed_mode,
         )
         return (
             evaluate_retrieval(retrieval_embs, np.asarray(train_labels)),
@@ -2881,6 +2904,7 @@ def evaluate_task(
             amp_dtype=amp_dtype,
             embed_save_path=embed_save_path,
             l2_normalize_embeddings=l2_normalize_embeddings,
+            probe_embed_mode=probe_embed_mode,
         )
         y_train = np.array(
             train_labels,
@@ -2942,6 +2966,7 @@ def evaluate_task(
         amp_dtype=amp_dtype,
         embed_save_path=embed_save_path,
         l2_normalize_embeddings=l2_normalize_embeddings,
+        probe_embed_mode=probe_embed_mode,
     )
     X_test = embed_sequences(
         model_obj,
@@ -2953,6 +2978,7 @@ def evaluate_task(
         amp_dtype=amp_dtype,
         embed_save_path=embed_save_path,
         l2_normalize_embeddings=l2_normalize_embeddings,
+        probe_embed_mode=probe_embed_mode,
     )
 
     y_train = np.array(
@@ -3382,6 +3408,18 @@ def parse_args():
             "Disabled by default."
         ),
     )
+    parser.add_argument(
+        "--probe-embed-mode",
+        choices=["trunk", "trunk_and_aux", "aux_only"],
+        default="trunk",
+        dest="probe_embed_mode",
+        help=(
+            "trunk (default): standard mean-pooled encoder hidden state. "
+            "trunk_and_aux: concatenate non-None aux-head outputs (3Di, cons, tax, pLDDT…). "
+            "aux_only: aux heads only (diagnostic). "
+            "Proteva models only; other models log a warning and fall back to trunk."
+        ),
+    )
 
     # --- WT test-time training (TTT/TTA), opt-in; ProteinGym zero-shot only ---
     parser.add_argument(
@@ -3480,6 +3518,7 @@ def main():
         "knn_k": args.knn_k,
         "knn_weights": args.knn_weights,
         "l2_normalize_embeddings": args.l2_normalize_embeddings,
+        "probe_embed_mode": args.probe_embed_mode,
     }
 
     # Device selection
@@ -3706,6 +3745,7 @@ def main():
                         "l2_normalize_embeddings", False
                     ),
                     tta_cfg=tta_cfg,
+                    probe_embed_mode=config.get("probe_embed_mode", "trunk"),
                 )
 
                 main_val = metrics.get(cfg.main_metric, None)
