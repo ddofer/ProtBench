@@ -84,15 +84,17 @@ FAST_TASKS = [
     "ppi_bernett",
     # go_mf excluded: multilabel task, not counted in paper wins
     "chezod_disorder",
+    "ss3",
+    "conservation_flip",
 ]
 
 # Curated very-fast / low-variance subset (2026-06-03) for high-ROI scout
 # comparisons: a fold-recognition task (representation quality) + two fast
-# stable binary tasks + three stable regression/fitness tasks. Deliberately
-# omits the slower or higher-variance FAST_TASKS (ec_classification,
-# ppi_bernett, chezod_disorder residue-level, enzyme_catalytic_efficiency,
-# variant_effect, peptide_hla, profet) and the retrieval task. Selected via
-# --very-fast. Every entry MUST be a key in TASKS.
+# stable binary tasks + three stable regression/fitness tasks + two residue-
+# level structural/evolutionary tasks. Deliberately omits the slower or
+# higher-variance FAST_TASKS (ec_classification, ppi_bernett, chezod_disorder,
+# enzyme_catalytic_efficiency, variant_effect, peptide_hla, profet) and the
+# retrieval task. Selected via --very-fast. Every entry MUST be a key in TASKS.
 VERY_FAST_TASKS = [
     "remote_homology",
     "solubility",
@@ -100,9 +102,14 @@ VERY_FAST_TASKS = [
     "fluorescence",
     "stability",
     "beta_lactamase_peer",
+    "ss3",
+    "conservation_flip",
 ]
 
 FAST_MAX_SAMPLES = 100_000
+# For token_classification tasks in fast mode, cap at sequence count to keep
+# residue-level logistic regression tractable on CPU (~400k residues at 2000 seqs).
+FAST_TOKEN_CLASS_MAX_SAMPLES = 2_000
 
 _CLINICAL_LABEL_MAP = {"Pathogenic": 1, "Benign": 0, "0": 0, "1": 1}
 
@@ -364,6 +371,35 @@ TASKS: Dict[str, TaskConfig] = {
         main_metric="Spearman",
         auto_split=True,
     ),
+    "meltome": TaskConfig(
+        name="Meltome (Melting Temperature Tm)",
+        dataset="hazemessam/meltome",
+        input_map={"seq": "sequence"},
+        label_col="label",
+        problem_type="regression",
+        main_metric="MSE",
+        split_column="split",
+        train_split="train",
+        test_split="test",
+    ),
+    # FLIP2 subtasks: pre-filtered local Arrow datasets (data/flip2_*/);
+    # created by scripts/prep_flip2.py from LiteFold/FLIP2.
+    "flip2_amylase": TaskConfig(
+        name="Alpha-Amylase Fitness (FLIP2)",
+        dataset="data/flip2_amylase",
+        input_map={"seq": "sequence"},
+        label_col="score",
+        problem_type="regression",
+        main_metric="Spearman",
+    ),
+    "flip2_rhomax": TaskConfig(
+        name="Rhodopsin Fitness (FLIP2)",
+        dataset="data/flip2_rhomax",
+        input_map={"seq": "sequence"},
+        label_col="score",
+        problem_type="regression",
+        main_metric="Spearman",
+    ),
     "optimal_ph": TaskConfig(
         name="Optimal pH",
         dataset="biomap-research/optimal_ph",
@@ -457,6 +493,18 @@ TASKS: Dict[str, TaskConfig] = {
     # =========================================================================
     # Token Classification (residue-level)
     # =========================================================================
+    # Per-residue conservation scores 1-9 (9-class token classification).
+    # Local Arrow dataset built by scripts/prep_conservation.py from FLIP FASTA.
+    "conservation_flip": TaskConfig(
+        name="Residue Conservation (FLIP)",
+        dataset="data/conservation_flip",
+        input_map={"seq": "sequence"},
+        label_col="conservation_labels",
+        problem_type="token_classification",
+        main_metric="F1_Macro",
+        validation_split="validation",
+        test_split="test",
+    ),
     "ss3": TaskConfig(
         name="Secondary Structure 3 (NetSurfP-SS3)",
         dataset="agemagician/NetSurfP-SS3",

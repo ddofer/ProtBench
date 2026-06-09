@@ -262,9 +262,9 @@ def _compute_metrics(
     except ValueError:
         metrics["MCC"] = 0.0
 
-    # Ensure main_metric is present in returned dict (else caller can't
-    # find ``cfg.main_metric`` and the result row shows Error).
-    metrics.setdefault(main_metric, metrics.get(main_metric, 0.0))
+    # Ensure main_metric is always present (e.g. custom metric not in the
+    # standard Accuracy/F1_Macro/MCC set computed above).
+    metrics.setdefault(main_metric, 0.0)
     return metrics
 
 

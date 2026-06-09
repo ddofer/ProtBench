@@ -159,6 +159,7 @@ from benchmark_comparison import compare_benchmarks, display_comparison
 from benchmark_tasks import (
     DEFAULT_TASKS,
     FAST_MAX_SAMPLES,
+    FAST_TOKEN_CLASS_MAX_SAMPLES,
     FAST_TASKS,
     VERY_FAST_TASKS,
     RETRIEVAL_TASKS,
@@ -611,11 +612,22 @@ def load_model(
         from plm.hf.config import ProtevaConfig
 
         _cfg = ProtevaConfig.from_pretrained(model_name)
+        _is_cpu = str(device).startswith("cpu")
         if isinstance(getattr(_cfg, "encoder_config", None), dict):
-            _cfg.encoder_config["flash_attn_mode"] = "fa2-varlen"
+            # CPU has no flash_attn (CUDA-only). Force the non-flash attention
+            # path (`use_flash=False` -> SDPA/manual at model.py:2437) so the
+            # model loads + forwards without importing flash_attn. The embed loop
+            # below forwards ONE sequence per packed call on CPU, so the single
+            # segment makes the SDPA dense attention exact (it ignores cu_seqlens).
+            _cfg.encoder_config["flash_attn_mode"] = "off" if _is_cpu else "fa2-varlen"
             _cfg.encoder_config["fused_rmsnorm"] = False
         model = AutoModel.from_pretrained(model_name, config=_cfg)
-        model.to(device).to(torch.bfloat16).eval()
+        # GPU: cast to bf16 to match the trained attention path. CPU: keep fp32
+        # (bf16 matmul/SDPA is unsupported or pathologically slow on CPU).
+        if _is_cpu:
+            model.to(device).eval()
+        else:
+            model.to(device).to(torch.bfloat16).eval()
         # ProteinEncoder registers rope_cs as a NON-persistent buffer, so HF's
         # from_pretrained leaves it as uninitialized meta/garbage memory (it is
         # absent from the checkpoint and never re-run through __init__'s
@@ -1759,9 +1771,18 @@ def embed_sequences(
             # segment-mean-pool back to one (H,) vector per sequence. No padding
             # (mask is all-ones over the packed tokens), no SDPA-dense fallback.
             model_device = next(model.parameters()).device
+            # CPU / flash-off fallback: the non-flash SDPA/manual attention path
+            # attends densely and IGNORES cu_seqlens, so packing >1 sequence would
+            # leak across segment boundaries. Forwarding ONE sequence per packed
+            # call (single segment) makes the dense full-attention exact. Detect
+            # via the encoder's resolved flash_attn_mode (set to "off" on CPU in
+            # load_model). GPU fa2-varlen is unchanged (packs `batch_size` rows).
+            _enc_cfg = getattr(getattr(model, "encoder", None), "config", None)
+            _flash_off = getattr(_enc_cfg, "flash_attn_mode", "fa2-varlen") == "off"
+            _pack_bs = 1 if (_flash_off or model_device.type == "cpu") else batch_size
             embs_list = []
-            for i in range(0, len(flat_seqs), batch_size):
-                batch = flat_seqs[i : i + batch_size]
+            for i in range(0, len(flat_seqs), _pack_bs):
+                batch = flat_seqs[i : i + _pack_bs]
                 # Tokenize per sequence (no padding) -> per-row id arrays.
                 tok = tokenizer(
                     batch,
@@ -3726,12 +3747,25 @@ def main():
                 )
                 print(f"{'=' * 60}")
 
+                _raw_max_samples = config.get("max_samples")
+                # Token-classification tasks run residue-level logistic
+                # regression; cap sequences tighter than FAST_MAX_SAMPLES to
+                # stay within a few minutes on CPU (~400k residues at 2k seqs).
+                _task_max_samples = (
+                    FAST_TOKEN_CLASS_MAX_SAMPLES
+                    if (
+                        cfg.problem_type == "token_classification"
+                        and _raw_max_samples is not None
+                        and _raw_max_samples > FAST_TOKEN_CLASS_MAX_SAMPLES
+                    )
+                    else _raw_max_samples
+                )
                 metrics, resolved_eval_split, eval_strategy = evaluate_task(
                     cfg,
                     model_obj,
                     is_sbert,
                     device,
-                    config.get("max_samples"),
+                    _task_max_samples,
                     config.get("top_k_labels"),
                     amp_dtype,
                     embed_save_path=embed_save_path,

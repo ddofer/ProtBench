@@ -1,0 +1,5 @@
+# Ignore local Arrow/HuggingFace datasets created by prep_*.py scripts.
+# Only symlinks (e.g. chezod -> /data/prot/...) are committed.
+conservation_flip/
+flip2_amylase/
+flip2_rhomax/

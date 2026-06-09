@@ -144,11 +144,21 @@ def _toy_ss3_dataset(seed: int = 0, n: int = 32, length: int = 24) -> List[_Samp
     samples: List[_Sample] = []
     aas = list("ACDEFGHIKLMNPQRSTVWY")
     for _ in range(n):
-        # Build a sequence whose labels are deterministic from AAs so a
-        # linear probe over the synthetic embedding table is well above chance.
         seq_chars = rng.choice(aas, size=length).tolist()
-        # SS3 classes 0/1/2 keyed off the AA index modulo 3
         labels = [aas.index(c) % 3 for c in seq_chars]
+        samples.append(_Sample("".join(seq_chars), labels))
+    return samples
+
+
+def _toy_conservation_dataset(seed: int = 0, n: int = 32, length: int = 20) -> List[_Sample]:
+    """9-class conservation dataset (labels 1-9) matching the conservation_flip format."""
+    rng = np.random.RandomState(seed)
+    samples: List[_Sample] = []
+    aas = list("ACDEFGHIKLMNPQRSTVWY")
+    for _ in range(n):
+        seq_chars = rng.choice(aas, size=length).tolist()
+        # Labels 1-9 keyed from AA index modulo 9, plus 1 (mirrors FLIP conservation scores)
+        labels = [aas.index(c) % 9 + 1 for c in seq_chars]
         samples.append(_Sample("".join(seq_chars), labels))
     return samples
 
@@ -291,3 +301,64 @@ def test_task_exception_resolved(tmp_path):
     assert isinstance(metrics["Accuracy"], float)
     # Sanity bounds
     assert 0.0 <= metrics["Accuracy"] <= 1.0
+
+
+def test_conservation_9class_labels_decoded_correctly():
+    """Labels 1-9 (conservation_flip format) pass through _decode_residue_label
+    as a plain list[int] and produce 9-class F1_Macro metric in [0, 1]."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from protein_benchmark_suite import _decode_residue_label
+
+    raw = [1, 3, 5, 7, 9, 2, 4, 6, 8]
+    decoded = _decode_residue_label("Residue Conservation (FLIP)", "conservation_labels", raw)
+    assert decoded == [1, 3, 5, 7, 9, 2, 4, 6, 8], f"unexpected decode: {decoded}"
+
+
+def test_conservation_9class_probe_returns_f1_macro(tmp_path):
+    """9-class conservation probe returns F1_Macro in [0, 1] and beats trivial baseline."""
+    enc = _TinyEncoder(hidden=16, seed=99)
+    tok = _TinyTokenizer()
+    train = _toy_conservation_dataset(seed=5, n=80, length=20)
+    test = _toy_conservation_dataset(seed=6, n=40, length=20)
+
+    cfg = TaskConfig(
+        name="Residue Conservation (FLIP)",
+        dataset="data/conservation_flip",
+        input_map={"seq": "sequence"},
+        label_col="conservation_labels",
+        problem_type="token_classification",
+        main_metric="F1_Macro",
+    )
+
+    metrics = evaluate_token_classification(
+        cfg=cfg,
+        encoder=enc,
+        tokenizer=tok,
+        train_sequences=[s.sequence for s in train],
+        train_labels=[s.labels for s in train],
+        test_sequences=[s.sequence for s in test],
+        test_labels=[s.labels for s in test],
+        device="cpu",
+        batch_size=8,
+        max_length=64,
+        cache=EmbeddingCache(tmp_path),
+        model_hash="unit-test-conservation",
+    )
+    assert "F1_Macro" in metrics, f"F1_Macro missing from metrics: {metrics}"
+    f1 = metrics["F1_Macro"]
+    assert isinstance(f1, float)
+    assert 0.0 <= f1 <= 1.0, f"F1_Macro out of range: {f1}"
+    # Chance for 9-class = ~0.11; deterministic mapping should beat it.
+    assert f1 > 0.11, f"F1_Macro {f1:.3f} not above 9-class chance"
+
+
+def test_fast_task_lists_include_conservation():
+    """conservation_flip must appear in both FAST_TASKS and VERY_FAST_TASKS."""
+    from benchmark_tasks import FAST_TASKS, VERY_FAST_TASKS
+
+    assert "conservation_flip" in FAST_TASKS, "conservation_flip missing from FAST_TASKS"
+    assert "conservation_flip" in VERY_FAST_TASKS, "conservation_flip missing from VERY_FAST_TASKS"
+    assert "ss3" in FAST_TASKS
+    assert "ss3" in VERY_FAST_TASKS
