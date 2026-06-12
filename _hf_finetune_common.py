@@ -28,12 +28,53 @@ def load_encoder_for_head(
 ):
     """Load ``ckpt`` into the HF auto-model ``head_cls``.
 
-    Ensures ``config.model_type == "AMPLIFY"`` is set (some AMPLIFY repos
-    omit this; the sibling suite's AMPLIFY detection depends on it).
-    Passes ``trust_remote_code=True`` to support AMPLIFY's remote modules.
+    Handles three model families:
+
+    * **Proteva** (``model_type == "proteva"``): import ``plm.hf`` to register
+      ``ProtevaForSequenceClassification`` / ``ProtevaForTokenClassification``
+      with the Auto factories, then dispatch through them. The head's own
+      ``from_pretrained`` forces ``flash_attn_mode="off"`` (dense SDPA, honors
+      the padded ``attention_mask``) and repairs the non-persistent RoPE cache —
+      the validated equivalent of the bench loader. ``trust_remote_code`` is
+      irrelevant (types are locally registered), but we keep it harmless.
+    * **AMPLIFY**: set ``config.model_type == "AMPLIFY"`` (some repos omit it;
+      the sibling suite's AMPLIFY detection depends on it) + remote code.
+    * Everything else (ESM, …): standard HF dispatch.
     """
+    # Register ProtevaConfig + the two discriminative heads on the Auto factories
+    # BEFORE the AutoConfig lookup — otherwise ``AutoConfig.from_pretrained`` on a
+    # ``model_type=="proteva"`` checkpoint raises (the type is unknown until
+    # ``plm.hf`` is imported). Idempotent: the registration swallows duplicate
+    # errors. Best-effort so non-Proteva environments (no plm package) still work.
+    try:
+        import plm.hf  # noqa: F401
+    except Exception:
+        pass
+
     config = AutoConfig.from_pretrained(ckpt, trust_remote_code=True)
-    if getattr(config, "model_type", None) in (None, "", "amplify") and (
+    model_type = getattr(config, "model_type", None)
+
+    if model_type == "proteva":
+        config.num_labels = num_labels
+        if id2label is not None:
+            config.id2label = id2label
+        if label2id is not None:
+            config.label2id = label2id
+        # ProtevaConfig has no problem_type in its __init__ signature; the head
+        # reads it via getattr, so set it as a plain attribute when supplied.
+        problem_type = kwargs.pop("problem_type", None)
+        if problem_type is not None:
+            config.problem_type = problem_type
+        # Load fp32 (the RoPE cache must be computed in fp32, NOT bf16 -> NaN);
+        # HF Trainer casts to bf16 for the train/eval forward when bf16=True.
+        return head_cls.from_pretrained(
+            ckpt,
+            config=config,
+            ignore_mismatched_sizes=True,
+            **kwargs,
+        )
+
+    if model_type in (None, "", "amplify") and (
         "amplify" in ckpt.lower() or "AMPLIFY" in ckpt
     ):
         config.model_type = "AMPLIFY"
@@ -49,6 +90,151 @@ def load_encoder_for_head(
         ignore_mismatched_sizes=True,
         **kwargs,
     )
+
+
+# Per-model-family LoRA target module names (the body's attention + FFN
+# Linears). Resolved by ``config.model_type``. NOT "all-linear" — that would
+# also wrap the embedding, the MLM decoder, and the aux heads, which we want
+# left frozen (we measure the BODY's adaptability; the classifier head trains
+# separately via ``modules_to_save``).
+#
+# Proteva names verified in plm/model.py: attention ``wq/wk/wv/wo`` (EncoderBlock,
+# ~L1894-1901), SwiGLU FFN ``w12`` (packed gate+value) / ``w3`` (down) (~L1935-1936).
+PROTEVA_LORA_TARGETS = ["wq", "wk", "wv", "wo", "w12", "w3"]
+# AMPLIFY (chandar-lab/AMPLIFY_120M remote code): fused QKV ``Wqkv`` + ``wo``;
+# SwiGLU ``w12``/``w3`` in newer revs (``fc1``/``fc2`` in older). Include both
+# so PEFT matches whichever the checkpoint exposes (unmatched names are ignored).
+AMPLIFY_LORA_TARGETS = ["Wqkv", "wo", "w12", "w3", "fc1", "fc2"]
+# ESM-2 (HF): self-attention q/k/v/out + FFN intermediate/output dense.
+ESM_LORA_TARGETS = ["query", "key", "value", "dense"]
+
+
+def lora_target_modules(model_type: str | None) -> list[str] | str:
+    """Return the LoRA ``target_modules`` for a model family.
+
+    Falls back to ``"all-linear"`` for unknown families (PEFT's own default),
+    which is safe for vanilla encoders but is explicitly NOT used for Proteva
+    (see ``PROTEVA_LORA_TARGETS``).
+    """
+    mt = (model_type or "").lower()
+    if mt == "proteva":
+        return list(PROTEVA_LORA_TARGETS)
+    if mt == "amplify":
+        return list(AMPLIFY_LORA_TARGETS)
+    if mt in ("esm", "esm2"):
+        return list(ESM_LORA_TARGETS)
+    return "all-linear"
+
+
+def _encoder_blocks(base_model):
+    """Best-effort handle on the per-layer block ``ModuleList`` for last-N.
+
+    Proteva: ``encoder.blocks`` (plm/model.py). HF ESM: ``encoder.layer``.
+    AMPLIFY: ``transformer_encoder``. Returns ``None`` if not found (caller then
+    treats last-N as a no-op and warns)."""
+    for attr in ("blocks", "layer", "layers", "transformer_encoder"):
+        mod = getattr(base_model, attr, None)
+        if mod is not None and hasattr(mod, "__len__"):
+            return mod
+        # one level down (e.g. encoder.encoder.layer)
+        inner = getattr(base_model, "encoder", None)
+        if inner is not None:
+            sub = getattr(inner, attr, None)
+            if sub is not None and hasattr(sub, "__len__"):
+                return sub
+    return None
+
+
+def apply_finetune_mode(
+    model,
+    *,
+    mode: str,
+    model_type: str | None,
+    task_type,
+    lora_r: int = 16,
+    lora_alpha: int = 32,
+    lora_dropout: float = 0.05,
+    last_n: int = 4,
+    classifier_module: str = "classifier",
+):
+    """Apply ``probe`` / ``full`` / ``lora`` / ``last_n`` to a head model.
+
+    * ``probe``: freeze the encoder body (``model.base_model``); train only the head.
+    * ``full``: train everything (no-op).
+    * ``lora``: wrap the body with PEFT LoRA using model-type-aware target
+      modules (``r``, ``alpha`` configurable); the classifier head is kept
+      trainable + saved via ``modules_to_save``.
+    * ``last_n``: freeze the body, then unfreeze the top ``N`` encoder blocks +
+      the encoder's final norm; the head is always trainable.
+
+    Returns the (possibly PEFT-wrapped) model. The accepted ``mode`` aliases
+    ``"lastn"`` -> ``"last_n"`` so the shell driver's token matches the script.
+    """
+    mode = "last_n" if mode == "lastn" else mode
+
+    if mode == "full":
+        return model
+
+    if mode == "probe":
+        model.base_model.requires_grad_(False)
+        return model
+
+    if mode == "last_n":
+        base = model.base_model
+        base.requires_grad_(False)
+        blocks = _encoder_blocks(base)
+        if blocks is None:
+            import warnings
+
+            warnings.warn(
+                "apply_finetune_mode(last_n): could not find the encoder block "
+                "ModuleList; the body stays fully frozen (acts like probe).",
+                stacklevel=2,
+            )
+        else:
+            n = min(int(last_n), len(blocks))
+            for blk in list(blocks)[len(blocks) - n:]:
+                blk.requires_grad_(True)
+            # Final norm sits after the last block; unfreeze it too.
+            final_norm = getattr(base, "final_norm", None)
+            if final_norm is not None:
+                final_norm.requires_grad_(True)
+        return model
+
+    if mode == "lora":
+        try:
+            from peft import LoraConfig, get_peft_model
+        except ImportError as e:
+            raise RuntimeError(
+                "peft is required for --mode lora. Install with "
+                "`pip install 'peft>=0.13'` into the bench venv."
+            ) from e
+        lora_cfg = LoraConfig(
+            r=int(lora_r),
+            lora_alpha=int(lora_alpha),
+            lora_dropout=float(lora_dropout),
+            bias="none",
+            task_type=task_type,
+            target_modules=lora_target_modules(model_type),
+            # Keep the classification head fully trainable + saved with the
+            # adapter (it is NOT in target_modules, so PEFT would otherwise
+            # freeze it). We measure the body's adaptability; the head learns
+            # alongside in fp32.
+            modules_to_save=[classifier_module],
+        )
+        # Wrap the WHOLE head model (not just ``model.base_model``): the head's
+        # ``forward`` (pooling + classifier + loss) must remain the entry point,
+        # and ``PeftModel.forward`` delegates to it. ``target_modules`` match by
+        # name suffix anywhere in the tree, so they still hit ONLY the encoder
+        # body Linears (wq/wk/wv/wo, w12/w3). Wrapping the bare encoder instead
+        # routes through PEFT's task-specific forward, which reads
+        # ``self.config.use_return_dict`` — absent on the encoder's plain
+        # ``EncoderConfig`` dataclass — and crashes. The PeftModel exposes
+        # ``.config`` (the ProtevaConfig) and ``save_pretrained`` (adapter only),
+        # so the Trainer + JSONL/adapter-save paths are unaffected.
+        return get_peft_model(model, lora_cfg)
+
+    raise ValueError(f"Unknown finetune mode: {mode!r}")
 
 
 def decode_string_label(label_str: str, alphabet: str) -> List[int]:
@@ -99,6 +285,13 @@ def add_common_finetune_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_dir", default="plm/results/bench/")
     parser.add_argument("--dataloader_num_workers", type=int, default=2)
+    # Discriminative-tier (LoRA / last-N) hyper-parameters. Shared by the
+    # sequence + residue scripts. Spec defaults: r=16, alpha=32 (=2r), last_n=4.
+    parser.add_argument("--lora_r", type=int, default=16)
+    parser.add_argument("--lora_alpha", type=int, default=32)
+    parser.add_argument("--lora_dropout", type=float, default=0.05)
+    parser.add_argument("--last_n", type=int, default=4,
+                        help="Top-N encoder blocks (+ final norm) to unfreeze for --mode last_n.")
 
 
 def build_training_args(args: argparse.Namespace, output_dir: Path) -> TrainingArguments:

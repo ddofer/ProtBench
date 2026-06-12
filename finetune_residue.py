@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _hf_finetune_common import (  # noqa: E402
     add_common_finetune_args,
     align_labels_with_tokens,
+    apply_finetune_mode,
     build_training_args,
     decode_csv_label,
     decode_string_label,
@@ -225,8 +226,24 @@ def _run_task(task: str, args: argparse.Namespace) -> Dict[str, Any]:
         id2label=label_meta["id2label"],
         label2id=label_meta["label2id"],
     )
-    if args.mode == "probe":
-        model.base_model.requires_grad_(False)
+    model_type = getattr(model.config, "model_type", None)
+    # peft's TaskType is only needed by the lora branch; import lazily so
+    # probe / full / last_n don't require peft installed.
+    task_type = None
+    if args.mode == "lora":
+        from peft import TaskType
+
+        task_type = TaskType.TOKEN_CLS
+    model = apply_finetune_mode(
+        model,
+        mode=args.mode,
+        model_type=model_type,
+        task_type=task_type,
+        lora_r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        last_n=args.last_n,
+    )
 
     out_dir = Path(args.output_dir) / f"finetune_residue_{safe_ckpt(args.model_name)}_{task}"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -241,7 +258,8 @@ def _run_task(task: str, args: argparse.Namespace) -> Dict[str, Any]:
         args=training_args,
         train_dataset=tokenized["train"],
         data_collator=collator,
-        tokenizer=tokenizer,
+        # transformers 5.x renamed Trainer's ``tokenizer`` -> ``processing_class``.
+        processing_class=tokenizer,
         compute_metrics=compute_metrics,
     )
 
@@ -271,6 +289,7 @@ def _run_task(task: str, args: argparse.Namespace) -> Dict[str, Any]:
         "checkpoint": args.model_name,
         "task": task,
         "mode": args.mode,
+        "model_type": model_type,
         "metric": metric,
         "eval_subsets": eval_subsets,
         "n_train": len(tokenized["train"]),
@@ -290,7 +309,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Residue-level fine-tuning for PLMs.")
     add_common_finetune_args(p)
     p.add_argument("--task", required=True, choices=list(_RESIDUE_TASKS) + ["all"])
-    p.add_argument("--mode", default="probe", choices=["probe", "full"])
+    # ``lastn`` is the shell-driver alias for ``last_n`` (apply_finetune_mode maps it).
+    p.add_argument("--mode", default="probe", choices=["probe", "full", "lora", "last_n", "lastn"])
     return p
 
 

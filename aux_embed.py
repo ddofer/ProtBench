@@ -84,7 +84,9 @@ def extract_aux_features(
         present.append(field)
         if t.dim() == 3:
             # Per-residue: (1, T, D) → (P, D) via segment mean-pool.
-            parts.append(torch.segment_reduce(t[0].float(), "mean", lengths=seg_lens))
+            # seg_lens originates from cu_seqlens (CPU); move to the tensor's device
+            # so segment_reduce doesn't raise a device-mismatch on CUDA.
+            parts.append(torch.segment_reduce(t[0].float(), "mean", lengths=seg_lens.to(t[0].device)))
         else:
             # Per-protein: (P, D) already pooled.
             parts.append(t.float())

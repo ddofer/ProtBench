@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _hf_finetune_common import (  # noqa: E402
     add_common_finetune_args,
+    apply_finetune_mode,
     build_training_args,
     load_encoder_for_head,
     safe_ckpt,
@@ -188,42 +189,37 @@ def _build_compute_metrics(cfg: TaskConfig):
     return cm
 
 
-def _apply_mode(model, args: argparse.Namespace):
-    if args.mode == "probe":
-        model.base_model.requires_grad_(False)
-    elif args.mode == "lora":
-        try:
-            from peft import LoraConfig, TaskType, get_peft_model
-        except ImportError as e:
-            raise RuntimeError(
-                "peft is required for --mode lora. Install with "
-                "`pip install peft>=0.13` into the sibling venv."
-            ) from e
-        lora_cfg = LoraConfig(
-            r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            lora_dropout=0.05,
-            target_modules="all-linear",
-            bias="none",
-            task_type=TaskType.SEQ_CLS,
-        )
-        base = model.base_model
-        wrapped = get_peft_model(base, lora_cfg)
-        for name, child in model.named_children():
-            if child is base:
-                setattr(model, name, wrapped)
-                break
-    return model
+def _apply_mode(model, args: argparse.Namespace, model_type: str | None):
+    """Apply probe / full / lora / last_n via the shared helper.
+
+    ``model_type`` (from the loaded config) selects the LoRA target modules:
+    Proteva -> wq/wk/wv/wo + w12/w3 (NOT "all-linear").
+    """
+    # peft's ``TaskType`` is only consumed by the lora branch; import it lazily so
+    # probe / full / last_n runs don't require peft to be installed.
+    task_type = None
+    if args.mode == "lora":
+        from peft import TaskType
+
+        task_type = TaskType.SEQ_CLS
+    return apply_finetune_mode(
+        model,
+        mode=args.mode,
+        model_type=model_type,
+        task_type=task_type,
+        lora_r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        last_n=args.last_n,
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Sequence-level fine-tuning for PLMs.")
     add_common_finetune_args(p)
     p.add_argument("--task", required=True, help="Any TASKS key whose problem_type is binary / multiclass / regression.")
-    p.add_argument("--mode", default="probe", choices=["probe", "full", "lora"])
-    # LoRA-specific
-    p.add_argument("--lora_r", type=int, default=8)
-    p.add_argument("--lora_alpha", type=int, default=16)
+    # ``lastn`` is the shell-driver alias for ``last_n`` (apply_finetune_mode maps it).
+    p.add_argument("--mode", default="probe", choices=["probe", "full", "lora", "last_n", "lastn"])
     return p
 
 
@@ -256,7 +252,8 @@ def main(argv=None) -> int:
         label2id=label_meta["label2id"],
         problem_type=label_meta["problem_type_hf"] if cfg.problem_type != "regression" else "regression",
     )
-    model = _apply_mode(model, args)
+    model_type = getattr(model.config, "model_type", None)
+    model = _apply_mode(model, args, model_type)
 
     out_dir = Path(args.output_dir) / f"finetune_sequence_{safe_ckpt(args.model_name)}_{args.task}"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -271,7 +268,8 @@ def main(argv=None) -> int:
         args=training_args,
         train_dataset=tokenized["train"],
         data_collator=collator,
-        tokenizer=tokenizer,
+        # transformers 5.x renamed Trainer's ``tokenizer`` -> ``processing_class``.
+        processing_class=tokenizer,
         compute_metrics=compute_metrics,
     )
 
@@ -282,15 +280,18 @@ def main(argv=None) -> int:
     if test_set is not None:
         metric = trainer.evaluate(eval_dataset=test_set, metric_key_prefix="eval")
 
-    # LoRA: save only the adapters (small, ~MB).
+    # LoRA: save only the adapters (small, ~MB). ``model`` is the PeftModel
+    # (apply_finetune_mode wraps the whole head model), so save_pretrained writes
+    # the adapter + the modules_to_save'd classifier, not the full encoder.
     if args.mode == "lora":
         adapter_dir = out_dir / "lora_adapter"
-        model.base_model.save_pretrained(str(adapter_dir))
+        model.save_pretrained(str(adapter_dir))
 
     record = {
         "checkpoint": args.model_name,
         "task": args.task,
         "mode": args.mode,
+        "model_type": model_type,
         "metric": metric,
         "n_train": len(tokenized["train"]),
         "n_eval": len(test_set) if test_set is not None else 0,
