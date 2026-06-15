@@ -30,6 +30,14 @@ def _main_metric(task: str, fallback: str = "AUC") -> str:
 def normalize_probe_row(row: dict, main_metric: str, task_type: str,
                         notes: str, runtime_s: float | None, source_file: str = "") -> dict:
     val = row.get(main_metric, "")
+    if val in ("", None):
+        # Probe CSV uses display names (e.g. "Remote Homology (Fold)") but TASKS keys
+        # are short ("remote_homology"), so _main_metric may fall back to "AUC" for
+        # non-AUC tasks.  Scan known metric columns and pick the first non-empty one.
+        for _col in ("AUC", "Spearman", "F1_Macro", "Accuracy", "MCC", "Recall@10", "MSE"):
+            _v = row.get(_col, "")
+            if _v not in ("", None):
+                val = _v; main_metric = _col; break
     return {
         "date": row.get("Date", ""), "model": row.get("Model", ""), "notes": notes,
         "probe_type": (row.get("Probe", "") or "linear").lower(),
