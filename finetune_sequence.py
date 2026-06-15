@@ -37,6 +37,7 @@ from _hf_finetune_common import (  # noqa: E402
     apply_finetune_mode,
     build_training_args,
     load_encoder_for_head,
+    load_tokenizer,
     safe_ckpt,
     write_jsonl_record,
 )
@@ -241,7 +242,7 @@ def main(argv=None) -> int:
         raise SystemExit(f"No train split for task {args.task}")
 
     label_meta = _label_meta(cfg, train)
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
+    tokenizer = load_tokenizer(args.model_name)
     tokenized = _tokenize_splits(train, eval_split, test_split, cfg, tokenizer, args.max_length)
 
     model = load_encoder_for_head(
@@ -275,11 +276,6 @@ def main(argv=None) -> int:
 
     trainer.train()
 
-    test_set = tokenized.get("test")
-    metric: Dict[str, Any] = {}
-    if test_set is not None:
-        metric = trainer.evaluate(eval_dataset=test_set, metric_key_prefix="eval")
-
     # LoRA: save only the adapters (small, ~MB). ``model`` is the PeftModel
     # (apply_finetune_mode wraps the whole head model), so save_pretrained writes
     # the adapter + the modules_to_save'd classifier, not the full encoder.
@@ -287,22 +283,29 @@ def main(argv=None) -> int:
         adapter_dir = out_dir / "lora_adapter"
         model.save_pretrained(str(adapter_dir))
 
-    record = {
-        "checkpoint": args.model_name,
-        "task": args.task,
-        "mode": args.mode,
-        "model_type": model_type,
-        "metric": metric,
-        "n_train": len(tokenized["train"]),
-        "n_eval": len(test_set) if test_set is not None else 0,
-        "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "transformers_version": transformers.__version__,
-        "args": vars(args),
-    }
-    jsonl_path = write_jsonl_record(
-        out_dir, "finetune_sequence", f"{args.model_name}_{args.task}", record
-    )
-    logger.info("Wrote %s", jsonl_path)
+    for split_name in ("validation", "test"):
+        split_ds = tokenized.get(split_name)
+        if split_ds is None:
+            continue
+        metric = trainer.evaluate(eval_dataset=split_ds, metric_key_prefix="eval")
+        record = {
+            "checkpoint": args.model_name,
+            "task": args.task,
+            "mode": args.mode,
+            "split": split_name,
+            "model_type": model_type,
+            "metric": metric,
+            "n_train": len(tokenized["train"]),
+            "n_eval": len(split_ds),
+            "notes": args.notes,
+            "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "transformers_version": transformers.__version__,
+            "args": vars(args),
+        }
+        jsonl_path = write_jsonl_record(
+            out_dir, "finetune_sequence", f"{args.model_name}_{args.task}", record
+        )
+        logger.info("Wrote %s", jsonl_path)
     return 0
 
 

@@ -40,6 +40,7 @@ from _hf_finetune_common import (  # noqa: E402
     decode_csv_label,
     decode_string_label,
     load_encoder_for_head,
+    load_tokenizer,
     safe_ckpt,
     write_jsonl_record,
 )
@@ -214,7 +215,7 @@ def _run_task(task: str, args: argparse.Namespace) -> Dict[str, Any]:
     all_label_lists = [_decode_labels(task, x) for x in splits["train"][label_col]]
     label_meta = _build_label_meta(task, all_label_lists)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
+    tokenizer = load_tokenizer(args.model_name)
     tokenized = _tokenize_and_align(
         splits, seq_col, label_col, task, tokenizer, args.max_length
     )
@@ -265,43 +266,44 @@ def _run_task(task: str, args: argparse.Namespace) -> Dict[str, Any]:
 
     trainer.train()
 
-    # Primary eval on the test split, plus optional per-subset breakdown.
-    test_set = tokenized.get("test")
-    metric: Dict[str, Any] = {}
-    eval_subsets: Dict[str, Any] = {}
-    if test_set is not None:
-        metric = trainer.evaluate(eval_dataset=test_set, metric_key_prefix="eval")
-        # Subset split for SS3 / disorder via the ``dataset`` column on
-        # the *raw* split (before tokenization removed columns).
-        if task in ("ss3", "disorder") and "test" in splits:
+    for split_name in ("validation", "test"):
+        split_ds = tokenized.get(split_name)
+        if split_ds is None:
+            continue
+        metric = trainer.evaluate(eval_dataset=split_ds, metric_key_prefix="eval")
+        # Subset breakdown for SS3 / disorder (test split only, via the ``dataset``
+        # column on the *raw* split before tokenization removed columns).
+        eval_subsets: Dict[str, Any] = {}
+        if split_name == "test" and task in ("ss3", "disorder") and "test" in splits:
             raw_test = splits["test"]
             if "dataset" in raw_test.column_names:
                 for tag in ("cb513", "ts115", "casp12"):
                     idx = [i for i, v in enumerate(raw_test["dataset"]) if v == tag]
                     if not idx:
                         continue
-                    sub = test_set.select(idx)
+                    sub = split_ds.select(idx)
                     eval_subsets[tag] = trainer.evaluate(
                         eval_dataset=sub, metric_key_prefix=f"eval_{tag}"
                     )
-
-    record = {
-        "checkpoint": args.model_name,
-        "task": task,
-        "mode": args.mode,
-        "model_type": model_type,
-        "metric": metric,
-        "eval_subsets": eval_subsets,
-        "n_train": len(tokenized["train"]),
-        "n_eval": len(test_set) if test_set is not None else 0,
-        "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "transformers_version": transformers.__version__,
-        "args": vars(args),
-    }
-    jsonl_path = write_jsonl_record(
-        out_dir, "finetune_residue", f"{args.model_name}_{task}", record
-    )
-    logger.info("Wrote %s", jsonl_path)
+        record = {
+            "checkpoint": args.model_name,
+            "task": task,
+            "mode": args.mode,
+            "split": split_name,
+            "model_type": model_type,
+            "metric": metric,
+            "eval_subsets": eval_subsets,
+            "n_train": len(tokenized["train"]),
+            "n_eval": len(split_ds),
+            "notes": args.notes,
+            "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "transformers_version": transformers.__version__,
+            "args": vars(args),
+        }
+        jsonl_path = write_jsonl_record(
+            out_dir, "finetune_residue", f"{args.model_name}_{task}", record
+        )
+        logger.info("Wrote %s", jsonl_path)
     return record
 
 

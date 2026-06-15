@@ -14,7 +14,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 import torch
-from transformers import AutoConfig, TrainingArguments
+from transformers import AutoConfig, AutoTokenizer, TrainingArguments
+
+# Proteva stage-2 checkpoints are saved WITHOUT tokenizer files (they reuse the
+# AMPLIFY vocab). When AutoTokenizer can't build one from the checkpoint, fall
+# back to AMPLIFY's tokenizer — what the probe suite already does for them.
+AMPLIFY_TOKENIZER = "chandar-lab/AMPLIFY_120M"
+
+
+def load_tokenizer(model_name: str):
+    try:
+        return AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    except (ValueError, OSError):
+        return AutoTokenizer.from_pretrained(AMPLIFY_TOKENIZER, trust_remote_code=True)
 
 
 def load_encoder_for_head(
@@ -83,6 +95,11 @@ def load_encoder_for_head(
         config.id2label = id2label
     if label2id is not None:
         config.label2id = label2id
+    # ``problem_type`` is a config attribute, not a model __init__ kwarg; set it
+    # on the config object directly so it isn't forwarded to the model constructor.
+    problem_type = kwargs.pop("problem_type", None)
+    if problem_type is not None:
+        config.problem_type = problem_type
     return head_cls.from_pretrained(
         ckpt,
         config=config,
@@ -284,6 +301,8 @@ def add_common_finetune_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--logging_steps", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_dir", default="plm/results/bench/")
+    parser.add_argument("--notes", type=str, default="",
+                        help="Free-text note copied into each result record (e.g. 'amplify-120M-HEAD + epoch1').")
     parser.add_argument("--dataloader_num_workers", type=int, default=2)
     # Discriminative-tier (LoRA / last-N) hyper-parameters. Shared by the
     # sequence + residue scripts. Spec defaults: r=16, alpha=32 (=2r), last_n=4.
