@@ -93,14 +93,13 @@ Two on-demand HF-Trainer wrappers live alongside the linear-probe path:
   `TASKS` whose `problem_type` is `binary / multiclass / regression`.
   Modes: `probe` (default), `full`, `lora` (PEFT), `last_n`.
 
-**LoRA config (modern PEFT best practice, set in `run_full_bench.sh`):**
-`--lora_r 32 --lora_alpha 64` (α = 2r), 1 epoch / keep-last (regression tasks
-overfit past 1 epoch), `lr 1e-4`. `target_modules` are resolved per model
-family in `_hf_finetune_common.py` to **all body Linears** — Proteva
-`wq/wk/wv/wo/attn_gate/w12/w3`, AMPLIFY `q/k/v/wo/w12/w3` (attention + SwiGLU
-FFN); the MLM decoder + pretraining aux heads stay frozen, the task classifier
-trains via `modules_to_save`. NOT `all-linear` (that would wrap the frozen
-heads).
+**LoRA config (set in `run_full_bench.sh`):**
+Default `r=64 α=64 lr=2e-4 patience=1`. Per-task-type overrides:
+- **Regression** (beta_lactamase, stability, fluorescence, meltome, …): `r=16 α=32 lr=1e-4 --fp32` — small sets overfit quickly; fp32 for RoPE precision.
+- **Many-class classification** (remote_homology=1195 classes, ec_classification): `lr=1e-4 patience=3` — aggressive default causes loss to stay at ln(N) for the full 1-epoch grace period and patience=1 restores the near-random checkpoint (F1≈0.0003 verified 2026-06-16).
+- **Other classification** (binary, low-cardinality multiclass): default.
+
+`target_modules` resolved per model family in `_hf_finetune_common.py` to **all body Linears** — Proteva `wq/wk/wv/wo/attn_gate/w12/w3`, AMPLIFY `q/k/v/wo/w12/w3`; MLM decoder + aux heads stay frozen, task head via `modules_to_save`. NOT `all-linear`.
 
 ```bash
 PY=/data/prot/ProteinSentenceTransformers/.venv/bin/python
@@ -141,6 +140,18 @@ also saves adapter weights under `.../lora_adapter/`.
 |---|---|---|---|
 | `ss3`, `disorder` | [`agemagician/NetSurfP-SS3`](https://huggingface.co/datasets/agemagician/NetSurfP-SS3) | Klausen et al., *NetSurfP-2.0*, Proteins 2019 ([doi:10.1002/prot.25674](https://doi.org/10.1002/prot.25674)) | Third-party rehost by Ahmed Elnaggar (ProtTrans author). Train/val reshuffled from paper's 10,337/500 to 10,792/646. **CB513 = 511 chains** (vs 513 in paper); **CASP12 = 20** (vs 21). Disorder = PDB-missing-coordinate mask, NOT DisProt / CAID2 — do not cross-compare. No license on HF card. |
 | `signal_peptide` | [`SaProtHub/Dataset-Signal-Peptides`](https://huggingface.co/datasets/SaProtHub/Dataset-Signal-Peptides) | Teufel et al., *SignalP 6.0*, Nat Biotechnol 2022 ([doi:10.1038/s41587-021-01156-3](https://doi.org/10.1038/s41587-021-01156-3)) | All 25,693 rows packed into HF `train` split; partition is in the `stage` column (20,490 / 2,569 / 2,634). Third-party rehost by SaProtHub. License: MIT. |
+
+## Applied fixes (2026-06-16/17)
+
+| Bug | Fix | Commit |
+|---|---|---|
+| Sequence probe used `OneVsRestClassifier(liblinear)` — OvR wrapper means pseudo-multinomial, not true multinomial; `liblinear` stalls at 100 iters on 100k+ sample tasks | Switched to `LogisticRegression(solver="saga")` — true multinomial, handles large n | `c70b743` |
+| Residue probe (`token_classification_probe.py`) used `lbfgs` which stalls past 1000 iters on ~600k SS3 residues | Switched to `solver="saga"` | `ef9a1c6` |
+| ProteinGym clinical pathogenicity AUC inverted (~0.10 instead of ~0.90) | Negate MLM scores before `roc_auc_score` — pathogenic = deleterious = lower logP | `c151261` |
+| MLM JSONL not collected by `collect_bench_results.py` glob | Use subdir pattern `FT_OUT/mlm_zs_{ckpt}/` so `write_jsonl_record(.parent)` lands in `FT_OUT` | `7dc61f1` |
+| `resolve_mlm_head` only knew AMPLIFY — Proteva models raised ValueError | Added Proteva branch using `model(…).logits` / `encoder.blocks` / `encoder.decoder` | `6844ae0` |
+| Proteva MLM crashed with RoPE size mismatch at max_length=2048 | Clamp `max_length` to `encoder.config.max_position` (=1024) before scoring | `78ba78f` |
+| `remote_homology` LoRA collapsed (F1≈0.0003) — 1195-class head can't descend from ln(1195) in 1 epoch with patience=1 | Many-class carve-out: `lr=1e-4, patience=3` for `remote_homology` and `ec_classification` | `23dd06e` |
 
 ## Tests
 
