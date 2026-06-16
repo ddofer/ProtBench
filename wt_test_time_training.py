@@ -111,9 +111,35 @@ def resolve_mlm_head(model, tokenizer) -> MLMHeadRefs:
             special_ids=special_ids,
         )
 
+    if mtype == "proteva":
+        # ProtevaForPretraining.forward(input_ids, attention_mask) returns
+        # ProtevaOutput.logits = full-length [B, T, vocab] MLM logits via the
+        # encoder's own decoder head. In fp32 (flash_attn_mode="off", SDPA dense)
+        # the standard 1/0 attention_mask is consumed directly — no additive-mask
+        # or varlen prep needed (unlike AMPLIFY).
+        encoder = getattr(model, "encoder", None)
+        decoder = getattr(encoder, "decoder", None)
+        if encoder is None or decoder is None:
+            raise ValueError(
+                "Proteva model is missing encoder.decoder; cannot run MLM zero-shot."
+            )
+
+        def forward_logits(input_ids, attention_mask):
+            out = model(input_ids=input_ids, attention_mask=attention_mask)
+            return out.logits
+
+        return MLMHeadRefs(
+            forward_logits=forward_logits,
+            encoder_blocks=encoder.blocks,
+            final_norm=getattr(encoder, "final_norm", None),
+            head_module=decoder,
+            mask_token_id=int(mask_id),
+            special_ids=special_ids,
+        )
+
     raise ValueError(
         f"WT test-time training is not supported for model_type={mtype!r}. "
-        "Supported: AMPLIFY. Load a model exposing an MLM/decoder head."
+        "Supported: AMPLIFY, proteva. Load a model exposing an MLM/decoder head."
     )
 
 
