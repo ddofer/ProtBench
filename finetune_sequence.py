@@ -110,7 +110,8 @@ def _parse_label(val: Any, problem_type: str):
 
 
 def _tokenize_splits(
-    train, eval_split, test_split, cfg: TaskConfig, tokenizer, max_length: int
+    train, eval_split, test_split, cfg: TaskConfig, tokenizer, max_length: int,
+    normalize_targets: bool = False,
 ):
     seq_col = cfg.input_map.get("seq")
     if seq_col is None:
@@ -120,12 +121,31 @@ def _tokenize_splits(
         )
     label_col = cfg.label_col
 
+    # Optional (off by default, like PEER's `normalization:False`): z-score the
+    # regression targets with TRAIN stats. Spearman is rank-invariant so the
+    # metric is unchanged in principle, BUT normalizing rescales the MSE gradient
+    # by 1/std^2 — for beta_lactamase (std~0.32) that ~10x's the effective LR, so
+    # it is NOT free. Only help when target std is far from 1; pair with a lower
+    # LR. (Lit: van Hasselt 2016.)
+    label_mean = label_std = None
+    if cfg.problem_type == "regression" and normalize_targets:
+        import numpy as np
+
+        _raw = np.asarray(
+            [_parse_label(v, "regression") for v in train[label_col]], dtype="float64"
+        )
+        label_mean = float(_raw.mean())
+        label_std = float(_raw.std()) or 1.0
+
     def _map_fn(batch):
         seqs = batch[seq_col]
         if cfg.remove_sequence_whitespace:
             seqs = ["".join(s.split()) for s in seqs]
         enc = tokenizer(seqs, truncation=True, max_length=max_length)
-        enc["labels"] = [_parse_label(v, cfg.problem_type) for v in batch[label_col]]
+        labels = [_parse_label(v, cfg.problem_type) for v in batch[label_col]]
+        if label_mean is not None:
+            labels = [(x - label_mean) / label_std for x in labels]
+        enc["labels"] = labels
         return enc
 
     out = {}
@@ -219,6 +239,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Sequence-level fine-tuning for PLMs.")
     add_common_finetune_args(p)
     p.add_argument("--task", required=True, help="Any TASKS key whose problem_type is binary / multiclass / regression.")
+    p.add_argument("--normalize_targets", action="store_true", help="z-score regression targets with train stats (off by default; see _tokenize_splits).")
     # ``lastn`` is the shell-driver alias for ``last_n`` (apply_finetune_mode maps it).
     p.add_argument("--mode", default="probe", choices=["probe", "full", "lora", "last_n", "lastn"])
     return p
@@ -243,7 +264,8 @@ def main(argv=None) -> int:
 
     label_meta = _label_meta(cfg, train)
     tokenizer = load_tokenizer(args.model_name)
-    tokenized = _tokenize_splits(train, eval_split, test_split, cfg, tokenizer, args.max_length)
+    tokenized = _tokenize_splits(train, eval_split, test_split, cfg, tokenizer, args.max_length,
+                                normalize_targets=args.normalize_targets)
 
     model = load_encoder_for_head(
         args.model_name,

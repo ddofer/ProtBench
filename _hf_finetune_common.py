@@ -328,6 +328,9 @@ def add_common_finetune_args(parser: argparse.ArgumentParser) -> None:
                              "with EarlyStoppingCallback; --num_train_epochs becomes the max cap.")
     parser.add_argument("--early_stop_patience", type=int, default=1,
                         help="Epochs of no val-metric improvement before stopping (with --early_stop).")
+    parser.add_argument("--fp32", action="store_true",
+                        help="Train in fp32 (disable bf16). Needed for regression: a bf16 forward "
+                             "is too coarse for the regression head -> constant preds / Spearman~0.")
 
 
 # Metrics where LOWER is better, for early-stopping / best-model selection.
@@ -366,7 +369,11 @@ def build_training_args(
         report_to=[],
         seed=args.seed,
         fp16=False,
-        bf16=torch.cuda.is_bf16_supported(),
+        # bf16 forward is too coarse for regression: the MSE loss is fp32 but the
+        # LOGITS come from a bf16 forward (~3 sig digits) -> the head cannot rank
+        # fine fitness differences -> constant predictions, Spearman~0. --fp32
+        # (set by run_full_bench for regression tasks) keeps the whole forward fp32.
+        bf16=torch.cuda.is_bf16_supported() and not getattr(args, "fp32", False),
         dataloader_num_workers=args.dataloader_num_workers,
     )
     if getattr(args, "early_stop", False) and main_metric is not None:

@@ -158,6 +158,25 @@ def test_ss3_main_metric_is_f1_macro():
     assert TASKS["ss3"].main_metric == "F1_Macro"
 
 
+def test_fp32_flag_disables_bf16():
+    """--fp32 must turn OFF bf16 (regression forwards need fp32 precision — a bf16
+    forward is too coarse for the regression head). Without it, keep bf16 if HW
+    supports it."""
+    import torch
+    from argparse import Namespace
+    from pathlib import Path
+    from _hf_finetune_common import build_training_args
+
+    base = dict(num_train_epochs=1, per_device_train_batch_size=8,
+                per_device_eval_batch_size=16, learning_rate=1e-4, weight_decay=0.0,
+                logging_steps=50, seed=42, dataloader_num_workers=0, early_stop=False)
+    ta_fp32 = build_training_args(Namespace(**base, fp32=True), Path("/tmp/x"))
+    assert ta_fp32.bf16 is False
+    # default (fp32 unset): bf16 follows hardware support
+    ta_def = build_training_args(Namespace(**base, fp32=False), Path("/tmp/x"))
+    assert ta_def.bf16 == torch.cuda.is_bf16_supported()
+
+
 def test_early_stop_metric_direction():
     """Early-stopping best-model direction must follow the metric, not be hardcoded.
 
