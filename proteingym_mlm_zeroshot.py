@@ -190,6 +190,15 @@ def main(argv=None):
     if refs is None:
         raise SystemExit(f"No MLM head for {args.model_name}")
 
+    # Clamp max_length to the encoder's positional capacity. Proteva precomputes
+    # a RoPE cache for encoder.config.max_position (=1024); a longer sequence
+    # hits a cos/sin size mismatch in _apply_rope. AMPLIFY has no such cap.
+    enc_cfg = getattr(getattr(model, "encoder", None), "config", None)
+    max_pos = getattr(enc_cfg, "max_position", None)
+    if max_pos and args.max_length > max_pos:
+        print(f"Clamping max_length {args.max_length} -> {max_pos} (encoder.max_position)")
+        args.max_length = int(max_pos)
+
     # Use a subdir so write_jsonl_record(.parent) resolves back to output_dir,
     # matching the pattern in finetune_sequence/residue (picked up by collect glob).
     out = Path(args.output_dir) / f"mlm_zs_{safe_ckpt(args.model_name)}"
