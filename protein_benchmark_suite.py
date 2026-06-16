@@ -450,6 +450,24 @@ def _fix_sbert_tokenizer(model) -> None:
                     logger.info("Embeddings resized successfully")
 
 
+def resolve_proteva_runtime(torch_dtype, is_cpu):
+    """Weight dtype + ``flash_attn_mode`` for the Proteva encoder, honoring the
+    requested precision instead of force-casting bf16.
+
+    The frozen probe defaults to fp32 (``torch_dtype`` None) so precision is a
+    non-confound across models and near-degenerate-sequence tasks (GB1, DMS subs)
+    keep their sub-bf16-noise-floor signal. ``fa2-varlen`` is a bf16/fp16-only
+    kernel, so fp32 MUST use the dense SDPA path (``"off"``) — bit-identical to
+    AMPLIFY in fp32 (verified). Explicit bf16 keeps the fast flash kernel. CPU is
+    always fp32 + ``"off"`` (no flash_attn; bf16 matmul unsupported/slow there).
+    """
+    if is_cpu:
+        return torch.float32, "off"
+    if torch_dtype == torch.bfloat16:
+        return torch.bfloat16, "fa2-varlen"
+    return torch.float32, "off"
+
+
 def load_model(
     model_name: str,
     device: str = "cuda",
@@ -613,21 +631,19 @@ def load_model(
 
         _cfg = ProtevaConfig.from_pretrained(model_name)
         _is_cpu = str(device).startswith("cpu")
+        # Honor the requested precision (was force-bf16, which made AMPLIFY-fp32
+        # vs Proteva-bf16 an unfair comparison on precision-sensitive tasks).
+        # fp32 (default) -> dense SDPA ("off") since fa2-varlen is bf16-only;
+        # explicit bf16 -> the fast flash kernel.
+        _weight_dtype, _flash_mode = resolve_proteva_runtime(torch_dtype, _is_cpu)
         if isinstance(getattr(_cfg, "encoder_config", None), dict):
-            # CPU has no flash_attn (CUDA-only). Force the non-flash attention
-            # path (`use_flash=False` -> SDPA/manual at model.py:2437) so the
-            # model loads + forwards without importing flash_attn. The embed loop
-            # below forwards ONE sequence per packed call on CPU, so the single
-            # segment makes the SDPA dense attention exact (it ignores cu_seqlens).
-            _cfg.encoder_config["flash_attn_mode"] = "off" if _is_cpu else "fa2-varlen"
+            _cfg.encoder_config["flash_attn_mode"] = _flash_mode
             _cfg.encoder_config["fused_rmsnorm"] = False
+        # Load fp32 FIRST then cast (loading directly in bf16 makes __init__
+        # compute the RoPE sin/cos cache in bf16 -> NaN); fix_proteva_rope_buffer
+        # below recomputes it in fp32 regardless. fp32 weight_dtype -> no-op cast.
         model = AutoModel.from_pretrained(model_name, config=_cfg)
-        # GPU: cast to bf16 to match the trained attention path. CPU: keep fp32
-        # (bf16 matmul/SDPA is unsupported or pathologically slow on CPU).
-        if _is_cpu:
-            model.to(device).eval()
-        else:
-            model.to(device).to(torch.bfloat16).eval()
+        model.to(device).to(_weight_dtype).eval()
         # ProteinEncoder registers rope_cs as a NON-persistent buffer, so HF's
         # from_pretrained leaves it as uninitialized meta/garbage memory (it is
         # absent from the checkpoint and never re-run through __init__'s
