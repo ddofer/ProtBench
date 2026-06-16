@@ -236,7 +236,13 @@ def apply_finetune_mode(
             r=int(lora_r),
             lora_alpha=int(lora_alpha),
             lora_dropout=float(lora_dropout),
+            # bias="none" (QLoRA standard): LoRA adapts no bias terms; base-model
+            # biases stay frozen. Regression's intercept is NOT lost — the task
+            # head (Linear with bias) is fully trained via modules_to_save.
             bias="none",
+            # rank-stabilized LoRA: scale by alpha/sqrt(r) not alpha/r, so higher
+            # r (we run r=64 for ~16% trainable) actually pays off + stays stable.
+            use_rslora=True,
             task_type=task_type,
             target_modules=lora_target_modules(model_type),
             # Keep the classification head fully trainable + saved with the
@@ -317,18 +323,45 @@ def add_common_finetune_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--last_n", type=int, default=4,
                         help="Top-N encoder blocks (+ final norm) to unfreeze for --mode last_n.")
+    parser.add_argument("--early_stop", action="store_true",
+                        help="Eval each epoch on validation, keep the best (load_best_model_at_end) "
+                             "with EarlyStoppingCallback; --num_train_epochs becomes the max cap.")
+    parser.add_argument("--early_stop_patience", type=int, default=1,
+                        help="Epochs of no val-metric improvement before stopping (with --early_stop).")
 
 
-def build_training_args(args: argparse.Namespace, output_dir: Path) -> TrainingArguments:
-    return TrainingArguments(
+# Metrics where LOWER is better, for early-stopping / best-model selection.
+# Everything else our tasks use (AUC / F1* / Spearman / Pearson / Accuracy / MCC
+# / Recall@k / AP) is higher-is-better. NOTE: e.g. ``meltome`` is a regression
+# task whose main_metric is MSE — hardcoding greater_is_better=True would make
+# early stopping keep the WORST epoch, so the direction must follow the metric.
+_LOWER_IS_BETTER_METRICS = {"mse", "mae", "rmse", "loss", "perplexity"}
+
+
+def metric_greater_is_better(metric_name: str | None) -> bool:
+    return (metric_name or "").lower() not in _LOWER_IS_BETTER_METRICS
+
+
+def build_training_args(
+    args: argparse.Namespace, output_dir: Path, *, main_metric: str | None = None
+) -> TrainingArguments:
+    """TrainingArguments for the FT scripts.
+
+    When ``args.early_stop`` is set AND ``main_metric`` is given, switch on
+    per-epoch eval + ``load_best_model_at_end`` (paired with an
+    ``EarlyStoppingCallback`` in the driver). ``num_train_epochs`` then acts as
+    the MAX-epoch cap, not a fixed count: easy/regression tasks stop after the
+    metric plateaus (avoiding overfit), hard tasks (e.g. 1195-class fold) get
+    the epochs they need. All our main metrics (F1_Macro/Spearman/AUC/Accuracy)
+    are higher-is-better. Without early-stop it keeps the old fixed-epoch /
+    no-eval / keep-last behavior."""
+    kw = dict(
         output_dir=str(output_dir / "trainer"),
         num_train_epochs=args.num_train_epochs,
         per_device_train_batch_size=args.per_device_train_batch_size,
         per_device_eval_batch_size=args.per_device_eval_batch_size,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
-        eval_strategy="no",
-        save_strategy="no",
         logging_steps=max(1, args.logging_steps),
         report_to=[],
         seed=args.seed,
@@ -336,6 +369,18 @@ def build_training_args(args: argparse.Namespace, output_dir: Path) -> TrainingA
         bf16=torch.cuda.is_bf16_supported(),
         dataloader_num_workers=args.dataloader_num_workers,
     )
+    if getattr(args, "early_stop", False) and main_metric is not None:
+        kw.update(
+            eval_strategy="epoch",
+            save_strategy="epoch",
+            load_best_model_at_end=True,
+            metric_for_best_model=main_metric,
+            greater_is_better=metric_greater_is_better(main_metric),
+            save_total_limit=1,
+        )
+    else:
+        kw.update(eval_strategy="no", save_strategy="no")
+    return TrainingArguments(**kw)
 
 
 def write_jsonl_record(output_dir: Path, prefix: str, ckpt: str, record: Dict[str, Any]) -> Path:

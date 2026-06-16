@@ -259,19 +259,31 @@ def main(argv=None) -> int:
     out_dir = Path(args.output_dir) / f"finetune_sequence_{safe_ckpt(args.model_name)}_{args.task}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    training_args = build_training_args(args, out_dir)
+    training_args = build_training_args(args, out_dir, main_metric=cfg.main_metric)
 
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
     compute_metrics = _build_compute_metrics(cfg)
+
+    # Early stopping needs an in-loop eval set (the validation split) + the
+    # callback; without --early_stop both stay absent (old fixed-epoch behavior).
+    callbacks = []
+    eval_during_train = None
+    if args.early_stop:
+        from transformers import EarlyStoppingCallback
+
+        eval_during_train = tokenized.get("validation") or tokenized.get("test")
+        callbacks = [EarlyStoppingCallback(early_stopping_patience=args.early_stop_patience)]
 
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=tokenized["train"],
+        eval_dataset=eval_during_train,
         data_collator=collator,
         # transformers 5.x renamed Trainer's ``tokenizer`` -> ``processing_class``.
         processing_class=tokenizer,
         compute_metrics=compute_metrics,
+        callbacks=callbacks,
     )
 
     trainer.train()

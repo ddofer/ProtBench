@@ -156,3 +156,19 @@ def test_ss3_main_metric_is_f1_macro():
     from benchmark_tasks import TASKS
 
     assert TASKS["ss3"].main_metric == "F1_Macro"
+
+
+def test_early_stop_metric_direction():
+    """Early-stopping best-model direction must follow the metric, not be hardcoded.
+
+    Regression task `meltome` uses MSE (lower-is-better) — greater_is_better must
+    be False for it, else early stopping keeps the WORST epoch. Higher-is-better
+    metrics (Spearman/F1_Macro/AUC/Accuracy/Recall@10/MCC) must be True."""
+    from _hf_finetune_common import metric_greater_is_better
+
+    for lower in ("MSE", "mae", "RMSE", "loss"):
+        assert metric_greater_is_better(lower) is False, lower
+    for higher in ("Spearman", "F1_Macro", "AUC", "Accuracy", "Recall@10", "MCC"):
+        assert metric_greater_is_better(higher) is True, higher
+    # None / unknown -> treat as higher-is-better (safe default for our metrics)
+    assert metric_greater_is_better(None) is True
