@@ -81,7 +81,12 @@ def _read_existing(out_csv: Path) -> list[dict]:
         return list(csv.DictReader(f))
 
 def _dedup_key(r: dict) -> tuple:
-    return (r["model"], r["task"], r["probe_type"], r["split"], r["metric_name"], r.get("date", ""))
+    # NOT keyed on date: a corrected re-run (e.g. fixed LoRA lr) must OVERWRITE
+    # the stale row, not append a second one on a new day. `notes` IS in the key
+    # so two distinct runs on the SAME checkpoint stay separate (e.g. a
+    # "verify-...-lora" smoke vs the real run) — notes is set once per launcher,
+    # not hand-typed per row, so it is stable enough to be identity here.
+    return (r["model"], r.get("notes", ""), r["task"], r["probe_type"], r["split"], r["metric_name"])
 
 def collect(probe_csvs: list[str], ft_jsonls: list[str], out_csv: str,
             notes: str = "", runtime_map: dict | None = None) -> int:

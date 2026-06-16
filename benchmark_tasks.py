@@ -511,7 +511,7 @@ TASKS: Dict[str, TaskConfig] = {
         input_map={"seq": "input"},
         label_col="label",
         problem_type="token_classification",
-        main_metric="Accuracy",
+        main_metric="F1_Macro",
         validation_split="validation",
         test_split="test",
     ),

@@ -36,6 +36,8 @@ def score_substitution(wt, mut, logP, aa2id):
     """Sum of per-position log-prob deltas; None if lengths differ (indel)."""
     if len(wt) != len(mut):
         return None
+    if len(wt) > logP.shape[0]:
+        return None  # truncated; skip variant
     s = 0.0
     for i, (w, m) in enumerate(zip(wt, mut)):
         if w == m or w not in aa2id or m not in aa2id:
@@ -45,7 +47,7 @@ def score_substitution(wt, mut, logP, aa2id):
 
 
 @torch.no_grad()
-def masked_marginal_logprob_table(refs, tokenizer, wt, device, max_length=1024, batch_size=64):
+def masked_marginal_logprob_table(refs, tokenizer, wt, device, max_length=2048, batch_size=64):
     """[L,V] log-softmax table; row i = log p(aa | WT with residue i masked).
 
     Uses refs.forward_logits (MLMHeadRefs callable) instead of a bare model
@@ -162,7 +164,7 @@ def main(argv=None):
     ap.add_argument("--output_dir", default="/data/proteva/plm/results/bench/discrim_mlmzs")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--batch_size", type=int, default=64)
-    ap.add_argument("--max_length", type=int, default=1024)
+    ap.add_argument("--max_length", type=int, default=2048)
     ap.add_argument("--max_assays", type=int, default=None)
     ap.add_argument("--notes", default="")
     args = ap.parse_args(argv)

@@ -144,6 +144,20 @@ def extract_residue_embeddings(
 
     encoder.eval() if hasattr(encoder, "eval") else None
 
+    # AMPLIFY needs an ADDITIVE attention mask (0.0 / -inf) + length padded to a
+    # multiple of 8, exactly like the sequence-level embed path; a bool mask
+    # raises "AMPLIFY expects an additive attention_mask". Detected by the same
+    # canonical config.model_type marker embed_sequences uses. Loop-invariant —
+    # resolved once here, not per batch.
+    is_amplify = str(
+        getattr(getattr(encoder, "config", None), "model_type", "")
+    ).lower() == "amplify"
+    if is_amplify:
+        from model_utils import _prepare_amplify_inputs
+
+        _amplify_param = next(encoder.parameters(), None)
+        _amplify_dtype = _amplify_param.dtype if _amplify_param is not None else None
+
     all_X: List[np.ndarray] = []
     all_y: List[np.ndarray] = []
 
@@ -166,11 +180,29 @@ def extract_residue_embeddings(
                     toks[k] = v.to(device)
 
         with torch.inference_mode():
-            outputs = encoder(
-                input_ids=toks["input_ids"],
-                attention_mask=toks.get("attention_mask"),
-            )
-        hidden = _last_hidden_state(outputs)  # (B, L, H)
+            if is_amplify:
+                ids_p, add_mask, orig_len, _ = _prepare_amplify_inputs(
+                    toks["input_ids"],
+                    toks.get("attention_mask"),
+                    device=device,
+                    dtype=_amplify_dtype,
+                )
+                outputs = encoder(
+                    input_ids=ids_p,
+                    attention_mask=add_mask,
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
+                hidden = _last_hidden_state(outputs)[:, :orig_len, :]  # un-pad
+                # AMPLIFY's final norm is NOT applied inside hidden_states.
+                if hasattr(encoder, "layer_norm_2"):
+                    hidden = encoder.layer_norm_2(hidden)
+            else:
+                outputs = encoder(
+                    input_ids=toks["input_ids"],
+                    attention_mask=toks.get("attention_mask"),
+                )
+                hidden = _last_hidden_state(outputs)  # (B, L, H)
 
         attn = toks.get("attention_mask")
         stm = toks["special_tokens_mask"]

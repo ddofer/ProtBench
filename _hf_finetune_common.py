@@ -118,10 +118,12 @@ def load_encoder_for_head(
 # Proteva names verified in plm/model.py: attention ``wq/wk/wv/wo`` (EncoderBlock,
 # ~L1894-1901), SwiGLU FFN ``w12`` (packed gate+value) / ``w3`` (down) (~L1935-1936).
 PROTEVA_LORA_TARGETS = ["wq", "wk", "wv", "wo", "w12", "w3"]
-# AMPLIFY (chandar-lab/AMPLIFY_120M remote code): fused QKV ``Wqkv`` + ``wo``;
-# SwiGLU ``w12``/``w3`` in newer revs (``fc1``/``fc2`` in older). Include both
-# so PEFT matches whichever the checkpoint exposes (unmatched names are ignored).
-AMPLIFY_LORA_TARGETS = ["Wqkv", "wo", "w12", "w3", "fc1", "fc2"]
+# AMPLIFY (chandar-lab/AMPLIFY_120M remote code): SEPARATE attention projections
+# ``q``/``k``/``v``/``wo`` (NOT fused ``Wqkv``) + SwiGLU FFN ``w12``/``w3``.
+# Verified by named_modules() on the 120M checkpoint: 24× each of q/k/v/wo/w12/w3.
+# (``Wqkv``/``fc1``/``fc2`` are other AMPLIFY revs and don't exist here → would
+# silently match nothing, leaving q/k/v unadapted.)
+AMPLIFY_LORA_TARGETS = ["q", "k", "v", "wo", "w12", "w3"]
 # ESM-2 (HF): self-attention q/k/v/out + FFN intermediate/output dense.
 ESM_LORA_TARGETS = ["query", "key", "value", "dense"]
 

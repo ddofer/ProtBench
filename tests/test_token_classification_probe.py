@@ -80,6 +80,36 @@ class _TinyEncoder:
         return iter([torch.zeros(1)])
 
 
+class _FakeAmplifyEncoder(_TinyEncoder):
+    """AMPLIFY-like encoder that, like the real model, REJECTS a boolean
+    attention_mask. The residue path must convert it to an additive
+    (float, -inf-on-pad) mask first — otherwise this raises exactly the
+    error the real AMPLIFY raised in the bench run.
+
+    Also exposes ``layer_norm_2`` (AMPLIFY's final norm, applied by the fix)
+    and a float param so ``_prepare_amplify_inputs`` can match dtype.
+    """
+
+    def __init__(self, hidden: int = 8, vocab: int = 32, seed: int = 0):
+        super().__init__(hidden=hidden, vocab=vocab, seed=seed)
+        self.config = type("Cfg", (), {"model_type": "AMPLIFY"})()
+
+    def layer_norm_2(self, hidden):  # identity is enough for the unit test
+        return hidden
+
+    def __call__(self, input_ids, attention_mask=None, **kwargs):
+        assert (
+            attention_mask is not None
+            and attention_mask.dtype.is_floating_point
+        ), "AMPLIFY expects an additive attention_mask."
+        return super().__call__(input_ids, attention_mask=attention_mask, **kwargs)
+
+    def parameters(self):
+        import torch
+
+        return iter([torch.zeros(1, dtype=torch.float32)])
+
+
 class _TinyTokenizer:
     """Char-level tokenizer: AA -> id starting at 4 (0..3 reserved)."""
 
@@ -362,3 +392,28 @@ def test_fast_task_lists_include_conservation():
     assert "conservation_flip" in VERY_FAST_TASKS, "conservation_flip missing from VERY_FAST_TASKS"
     assert "ss3" in FAST_TASKS
     assert "ss3" in VERY_FAST_TASKS
+
+
+def test_amplify_residue_embeddings_use_additive_mask():
+    """Regression: AMPLIFY needs an ADDITIVE attention mask in the residue path.
+
+    A boolean mask raised ``AMPLIFY expects an additive attention_mask`` and
+    blanked SS3 / Residue Conservation for the AMPLIFY baseline. The fake
+    AMPLIFY encoder reproduces that assertion; a clean extraction proves the
+    residue path now converts the mask (mirroring the sequence-embed path)."""
+    enc = _FakeAmplifyEncoder(hidden=8)
+    tok = _TinyTokenizer()
+    samples = [_Sample("ACDEFG", [0, 1, 2, 0, 1, 2]), _Sample("AAAA", [0, 0, 0, 0])]
+    X, y = extract_residue_embeddings(
+        encoder=enc,
+        tokenizer=tok,
+        sequences=[s.sequence for s in samples],
+        labels=[s.labels for s in samples],
+        device="cpu",
+        batch_size=2,
+        max_length=64,
+    )
+    # 6 + 4 non-special residues, 8-dim hidden, all finite.
+    assert X.shape == (10, 8), f"expected (10, 8), got {X.shape}"
+    assert y.shape == (10,)
+    assert np.isfinite(X).all()
