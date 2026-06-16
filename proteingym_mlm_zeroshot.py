@@ -24,7 +24,7 @@ from pathlib import Path
 from scipy.stats import spearmanr
 from sklearn.metrics import roc_auc_score
 from plm.bench.benchmark_tasks import TASKS
-from plm.bench._hf_finetune_common import write_jsonl_record
+from plm.bench._hf_finetune_common import write_jsonl_record, safe_ckpt
 
 SUBSTITUTION_ZS = [
     "proteingym_dms_substitutions_zeroshot",
@@ -190,7 +190,9 @@ def main(argv=None):
     if refs is None:
         raise SystemExit(f"No MLM head for {args.model_name}")
 
-    out = Path(args.output_dir)
+    # Use a subdir so write_jsonl_record(.parent) resolves back to output_dir,
+    # matching the pattern in finetune_sequence/residue (picked up by collect glob).
+    out = Path(args.output_dir) / f"mlm_zs_{safe_ckpt(args.model_name)}"
     out.mkdir(parents=True, exist_ok=True)
 
     for task_key in args.tasks:
