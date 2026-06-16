@@ -149,8 +149,10 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length, max_as
             r, _ = spearmanr(ys, scores)
             per_assay.append(float(r) if not np.isnan(r) else 0.0)
         else:
+            # Clinical pathogenicity: pathogenic = deleterious = lower log P(mut).
+            # Negate so pathogenic variants rank high (ProteinGym convention).
             try:
-                per_assay.append(roc_auc_score(ys, scores))
+                per_assay.append(roc_auc_score(ys, [-s for s in scores]))
             except ValueError:
                 pass
 
