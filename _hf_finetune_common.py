@@ -115,9 +115,13 @@ def load_encoder_for_head(
 # left frozen (we measure the BODY's adaptability; the classifier head trains
 # separately via ``modules_to_save``).
 #
-# Proteva names verified in plm/model.py: attention ``wq/wk/wv/wo`` (EncoderBlock,
-# ~L1894-1901), SwiGLU FFN ``w12`` (packed gate+value) / ``w3`` (down) (~L1935-1936).
-PROTEVA_LORA_TARGETS = ["wq", "wk", "wv", "wo", "w12", "w3"]
+# Proteva — ALL body Linears (QLoRA best practice: adapt every linear projection,
+# not just attention). Verified by named_modules() on the epoch1 checkpoint:
+# 24× each of wq/wk/wv/wo + attn_gate (attention, incl. the --head-gate Linear)
+# and w12 (packed gate+value) / w3 (down) (SwiGLU FFN). The MLM ``decoder`` and
+# pretraining aux heads (di3_head/cons_head/…) are deliberately NOT listed — the
+# downstream classifier trains separately via ``modules_to_save``.
+PROTEVA_LORA_TARGETS = ["wq", "wk", "wv", "wo", "attn_gate", "w12", "w3"]
 # AMPLIFY (chandar-lab/AMPLIFY_120M remote code): SEPARATE attention projections
 # ``q``/``k``/``v``/``wo`` (NOT fused ``Wqkv``) + SwiGLU FFN ``w12``/``w3``.
 # Verified by named_modules() on the 120M checkpoint: 24× each of q/k/v/wo/w12/w3.

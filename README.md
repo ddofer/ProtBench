@@ -56,16 +56,51 @@ CUDA_VISIBLE_DEVICES=4 /data/prot/ProteinSentenceTransformers/.venv/bin/python \
     /data/proteva/plm/bench/protein_benchmark_suite.py --model_name <ckpt> --tasks stability
 ```
 
+## Unified harness + delta-vs-vanilla comparison
+
+For a full model report (the way the AMPLIFY-vanilla / step-0 / trained-epoch
+comparison is run), use the one-shot harness instead of the scripts below:
+
+```bash
+# probe (linear) + ProteinGym (cosine + MLM masked-marginal) + LoRA (val+test),
+# all collected into ONE long CSV. GPU arg must NOT be in manifest.lock.
+bash plm/scripts/run_full_bench.sh <ckpt-or-hf-id> "<notes>" <gpu>
+```
+
+Pipeline: `run_full_bench.sh` → `collect_bench_results.py` → the unified
+`results/bench_results_all.csv` (one row per model × task × probe × split ×
+metric; the dedup key is `(model, notes, task, probe, split, metric)` so a
+corrected re-run **overwrites** the stale row). Read it as a delta-vs-vanilla
+table with:
+
+```bash
+# pivot every (probe, task) to vanilla AMPLIFY + each model + Δ-vs-vanilla
+python plm/bench/compare_to_vanilla.py --split test            # all probes
+python plm/bench/compare_to_vanilla.py --split test --probe lora
+```
+
+The harness runs on proteva's own venv (`plm/.venv`, Python 3.12, `peft`
+already installed) — NOT the sibling venv described below, which applies only
+to calling `protein_benchmark_suite.py` directly.
+
 ## Fine-tuning scripts (residue + sequence; LoRA)
 
 Two on-demand HF-Trainer wrappers live alongside the linear-probe path:
 
 - `finetune_residue.py` — token classification (SS3, intrinsic disorder,
-  signal peptides). Modes: `probe` (frozen encoder, default), `full`.
+  signal peptides). Modes: `probe` (frozen, default), `full`, `lora`, `last_n`.
 - `finetune_sequence.py` — sequence-level fine-tuning for any task in
   `TASKS` whose `problem_type` is `binary / multiclass / regression`.
-  Modes: `probe` (default), `full`, `lora` (PEFT). LoRA flags:
-  `--lora_r 8 --lora_alpha 16 --lora_dropout 0.05 --lora_targets all-linear`.
+  Modes: `probe` (default), `full`, `lora` (PEFT), `last_n`.
+
+**LoRA config (modern PEFT best practice, set in `run_full_bench.sh`):**
+`--lora_r 32 --lora_alpha 64` (α = 2r), 1 epoch / keep-last (regression tasks
+overfit past 1 epoch), `lr 1e-4`. `target_modules` are resolved per model
+family in `_hf_finetune_common.py` to **all body Linears** — Proteva
+`wq/wk/wv/wo/attn_gate/w12/w3`, AMPLIFY `q/k/v/wo/w12/w3` (attention + SwiGLU
+FFN); the MLM decoder + pretraining aux heads stay frozen, the task classifier
+trains via `modules_to_save`. NOT `all-linear` (that would wrap the frozen
+heads).
 
 ```bash
 PY=/data/prot/ProteinSentenceTransformers/.venv/bin/python
@@ -80,10 +115,10 @@ CUDA_VISIBLE_DEVICES=4 $PY /data/proteva/plm/bench/finetune_residue.py \
 CUDA_VISIBLE_DEVICES=4 $PY /data/proteva/plm/bench/finetune_residue.py \
     --model_name chandar-lab/AMPLIFY_120M --task all
 
-# Sequence LoRA on stability:
+# Sequence LoRA on stability (best-practice r=32/alpha=64, 1 epoch):
 CUDA_VISIBLE_DEVICES=4 $PY /data/proteva/plm/bench/finetune_sequence.py \
     --model_name chandar-lab/AMPLIFY_120M \
-    --task stability --mode lora --lora_r 8 --lora_alpha 16
+    --task stability --mode lora --lora_r 32 --lora_alpha 64 --num_train_epochs 1
 ```
 
 **One-time setup** — `peft` and `seqeval` are not in the sibling venv.

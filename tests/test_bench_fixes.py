@@ -96,10 +96,28 @@ def test_lora_target_modules_dispatch_by_family():
     """Each known family resolves to its own list; unknown -> PEFT all-linear."""
     from _hf_finetune_common import lora_target_modules
 
-    assert lora_target_modules("proteva") == ["wq", "wk", "wv", "wo", "w12", "w3"]
+    # Proteva: ALL body linears (QLoRA best practice — not just attention).
+    # attn_gate is the --head-gate Linear; omitting it left a body Linear
+    # un-adapted. decoder/*_head (MLM + aux heads) stay excluded.
+    assert lora_target_modules("proteva") == ["wq", "wk", "wv", "wo", "attn_gate", "w12", "w3"]
     assert lora_target_modules("esm") == ["query", "key", "value", "dense"]
     assert lora_target_modules("AMPLIFY") == ["q", "k", "v", "wo", "w12", "w3"]  # case-insensitive
     assert lora_target_modules("something_else") == "all-linear"
+
+
+def test_proteva_lora_targets_cover_all_body_linears():
+    """Regression: the Proteva target list must include the attention gate.
+
+    Enumerating the encoder block (plm/model.py EncoderBlock) the body Linears
+    are wq/wk/wv/wo + attn_gate (attention) and w12/w3 (SwiGLU FFN). LoRA should
+    adapt every one (modern PEFT best practice), excluding only the MLM decoder
+    + pretraining aux heads (those are not in the list)."""
+    from _hf_finetune_common import PROTEVA_LORA_TARGETS
+
+    for body_linear in ("wq", "wk", "wv", "wo", "attn_gate", "w12", "w3"):
+        assert body_linear in PROTEVA_LORA_TARGETS, f"{body_linear} missing"
+    for excluded in ("decoder", "di3_head", "cons_head", "plddt_head"):
+        assert excluded not in PROTEVA_LORA_TARGETS
 
 
 # ---------------------------------------------------------------------------
