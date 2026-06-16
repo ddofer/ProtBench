@@ -2116,13 +2116,13 @@ def make_probe_model(
         if problem_type == "binary":
             return make_pipeline(
                 StandardScaler(),
-                LogisticRegression(solver="liblinear", random_state=BENCHMARK_SEED),
+                LogisticRegression(solver="liblinear", max_iter=1000, random_state=BENCHMARK_SEED),
             )
         if problem_type == "multiclass":
             return OneVsRestClassifier(
                 make_pipeline(
                     StandardScaler(),
-                    LogisticRegression(solver="liblinear", random_state=BENCHMARK_SEED),
+                    LogisticRegression(solver="liblinear", max_iter=1000, random_state=BENCHMARK_SEED),
                 ),
                 n_jobs=DEFAULT_OVR_N_JOBS,
             )

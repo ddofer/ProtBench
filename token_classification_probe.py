@@ -256,7 +256,9 @@ def fit_residue_linear_probe(
 
     # n_jobs deprecated in sklearn >=1.8; LogisticRegression now uses internal
     # OpenMP/loky parallelism without the kwarg.
+    # saga handles large n_samples (SS3: ~600k residues) where lbfgs stalls at 1000 iter
     probe = LogisticRegression(
+        solver="saga",
         max_iter=max_iter,
         random_state=seed,
     )
