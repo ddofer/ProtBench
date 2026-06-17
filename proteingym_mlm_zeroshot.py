@@ -233,7 +233,7 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
     # Build aa->token_id map for the 20 canonical amino acids
     aa2id = {aa: tokenizer.convert_tokens_to_ids(aa) for aa in "ACDEFGHIKLMNPQRSTVWY"}
 
-    per_assay, per_assay_auc, n_skipped = [], [], 0
+    per_assay, per_assay_auc, n_skipped, n_auc_fallback = [], [], 0, 0
     assays = np.unique(groups)
     if max_assays:
         assays = assays[:max_assays]
@@ -306,15 +306,25 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
             r, _ = spearmanr(ys, scores)
             per_assay.append(float(r) if not np.isnan(r) else 0.0)
             # SECONDARY AUC (ProteinGym also reports this). Use the OFFICIAL
-            # DMS_score_bin labels when available (leaderboard-faithful); fall back
-            # to a per-assay median split only if the bin column is absent/degenerate.
-            yb = [b for b in ys_bin if b is not None]
-            if len(yb) == len(scores) and 0 < int(np.nansum(yb)) < len(yb):
-                try:
-                    per_assay_auc.append(float(roc_auc_score(yb, scores)))
-                except ValueError:
-                    pass
-            else:
+            # DMS_score_bin labels when available (leaderboard-faithful). Pair each
+            # label with its score, dropping None/NaN, and require BOTH classes
+            # present; otherwise fall back to a per-assay median split and COUNT it
+            # so the provenance field stays honest.
+            official = None
+            if bin_labels is not None:
+                pairs = [(b, s) for b, s in zip(ys_bin, scores)
+                         if b is not None and not np.isnan(float(b))]
+                if len(pairs) == len(scores):
+                    yb = [int(round(float(b))) for b, _ in pairs]
+                    if len(set(yb)) == 2:
+                        try:
+                            per_assay_auc.append(float(roc_auc_score(yb, [s for _, s in pairs])))
+                            official = True
+                        except ValueError:
+                            official = None
+            if official is None:
+                if bin_labels is not None:
+                    n_auc_fallback += 1  # official labels unusable for this assay
                 arr_ys = np.array(ys)
                 binary = (arr_ys > np.median(arr_ys)).astype(int)
                 if 0 < int(binary.sum()) < len(binary):
@@ -330,6 +340,11 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
             except ValueError:
                 pass
 
+    # Honest provenance: if any assay fell back to a median split (official labels
+    # unusable, e.g. single-class after the variant cap), say so rather than
+    # claiming pure DMS_score_bin.
+    if auc_label_source == "dms_score_bin" and n_auc_fallback:
+        auc_label_source = f"dms_score_bin+median_fallback({n_auc_fallback})"
     return per_assay, per_assay_auc, n_skipped, auc_label_source
 
 
@@ -462,7 +477,7 @@ def main(argv=None):
         auc_str = f" auc={metric_dict['eval_auc']:.4f}" if per_assay_auc else ""
         print(
             f"{task_key}: {metric_key}={np.mean(per_assay):.4f}{auc_str} "
-            f"over {len(per_assay)} assays (indel skipped={n_skipped})"
+            f"over {len(per_assay)} assays (variants skipped={n_skipped})"
         )
         print(f"  -> JSONL written: {jsonl_path}")
 
