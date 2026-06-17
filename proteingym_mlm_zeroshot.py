@@ -188,14 +188,20 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
         if len(scores) < 2:
             continue
         if cfg.problem_type == "regression":
-            r, _ = spearmanr(ys, scores)
-            per_assay.append(float(r) if not np.isnan(r) else 0.0)
-            # AUC via median binarization — ProteinGym website convention
+            is_indel = task_key in INDEL_ZS
+            if not is_indel:
+                r, _ = spearmanr(ys, scores)
+                per_assay.append(float(r) if not np.isnan(r) else 0.0)
+            # AUC via median binarization (ProteinGym convention) for both DMS
+            # substitutions and DMS indels. For indels it is the primary metric.
             arr_ys = np.array(ys)
             binary = (arr_ys > np.median(arr_ys)).astype(int)
             if 0 < int(binary.sum()) < len(binary):
                 try:
-                    per_assay_auc.append(float(roc_auc_score(binary, scores)))
+                    auc_val = float(roc_auc_score(binary, scores))
+                    per_assay_auc.append(auc_val)
+                    if is_indel:
+                        per_assay.append(auc_val)
                 except ValueError:
                     pass
         else:
@@ -274,7 +280,7 @@ def main(argv=None):
             print(f"{task_key}: no scorable assays (skipped={n_skipped})")
             continue
 
-        metric_key = "eval_spearman" if cfg.problem_type == "regression" else "eval_auc"
+        metric_key = "eval_auc" if (task_key in INDEL_ZS or cfg.problem_type != "regression") else "eval_spearman"
         metric_dict = {
             metric_key: float(np.mean(per_assay)),
             "assays": len(per_assay),
