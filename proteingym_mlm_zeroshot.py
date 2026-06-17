@@ -52,21 +52,28 @@ def score_substitution(wt, mut, logP, aa2id):
 
 
 def pll_from_table(seq, logP, aa2id):
-    """Pseudo-log-likelihood of ``seq`` from its own masked-marginal table.
+    """Length-normalized pseudo-log-likelihood of ``seq`` from its masked table.
 
-    PLL = sum_i log P(seq[i] | seq with position i masked), over canonical-AA
-    positions. This is the encoder/masked-LM analogue of a sequence likelihood
-    (ESM-1v / ESM2 ProteinGym indel scoring): it needs no position alignment, so
-    an indel score is simply ``PLL(mutant) - PLL(WT)`` even when lengths differ.
-    Returns None if the sequence was truncated past the table.
+    mean-PLL = (1/L) * sum_i log P(seq[i] | seq with position i masked), over the
+    L canonical-AA positions. The encoder/masked-LM analogue of a sequence
+    likelihood (ESM-1v / ESM2; pseudo-perplexity = -mean-PLL). It needs no
+    position alignment, so an indel score is ``mean_PLL(mut) - mean_PLL(WT)``
+    even when lengths differ. The 1/L normalization is what makes the comparison
+    valid across different-length sequences — without it longer variants get a
+    systematically more-negative raw sum, conflating length with fitness
+    (Engelberg/Frey et al., PRX Life 2025, "Pseudo-perplexity in One Fell Swoop";
+    cf. Tranception's additive length term, Notin et al. ICML 2022).
+    Returns None if the sequence was truncated past the table or has no scorable
+    positions.
     """
     if len(seq) > logP.shape[0]:
         return None  # truncated; skip variant
-    s = 0.0
+    s, n = 0.0, 0
     for i, a in enumerate(seq):
         if a in aa2id:
             s += float(logP[i, aa2id[a]])
-    return s
+            n += 1
+    return (s / n) if n else None
 
 
 @torch.no_grad()
@@ -188,20 +195,18 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
         if len(scores) < 2:
             continue
         if cfg.problem_type == "regression":
-            is_indel = task_key in INDEL_ZS
-            if not is_indel:
-                r, _ = spearmanr(ys, scores)
-                per_assay.append(float(r) if not np.isnan(r) else 0.0)
-            # AUC via median binarization (ProteinGym convention) for both DMS
-            # substitutions and DMS indels. For indels it is the primary metric.
+            # ProteinGym leaderboard metric for DMS (substitutions AND indels) is
+            # Spearman on continuous fitness — use it as PRIMARY so our numbers
+            # are directly comparable to the published benchmark.
+            r, _ = spearmanr(ys, scores)
+            per_assay.append(float(r) if not np.isnan(r) else 0.0)
+            # SECONDARY: median-binarized AUC (kept so every benchmark also has an
+            # AUC, per the user's cross-benchmark request).
             arr_ys = np.array(ys)
             binary = (arr_ys > np.median(arr_ys)).astype(int)
             if 0 < int(binary.sum()) < len(binary):
                 try:
-                    auc_val = float(roc_auc_score(binary, scores))
-                    per_assay_auc.append(auc_val)
-                    if is_indel:
-                        per_assay.append(auc_val)
+                    per_assay_auc.append(float(roc_auc_score(binary, scores)))
                 except ValueError:
                     pass
         else:
@@ -280,7 +285,8 @@ def main(argv=None):
             print(f"{task_key}: no scorable assays (skipped={n_skipped})")
             continue
 
-        metric_key = "eval_auc" if (task_key in INDEL_ZS or cfg.problem_type != "regression") else "eval_spearman"
+        # ProteinGym primary: Spearman for DMS (regression), AUC for clinical (binary).
+        metric_key = "eval_spearman" if cfg.problem_type == "regression" else "eval_auc"
         metric_dict = {
             metric_key: float(np.mean(per_assay)),
             "assays": len(per_assay),
