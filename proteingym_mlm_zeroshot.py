@@ -261,10 +261,12 @@ def main(argv=None):
     # the cache to args.max_length so we score full-length via RoPE extrapolation
     # (theta=10000, AMPLIFY-derived; trained at 1024 so >1024 is extrapolation).
     # No-op for AMPLIFY (no such cap).
+    rope_extended_to = None
     try:
         from plm.hf.checkpoint_utils import extend_rope_cache
         prev = extend_rope_cache(model, args.max_length)
         if prev:
+            rope_extended_to = int(args.max_length)
             print(f"Extended Proteva RoPE cache {prev} -> {args.max_length} (extrapolation)")
     except Exception as e:
         print(f"extend_rope_cache skipped ({e}); falling back to clamp")
@@ -302,6 +304,8 @@ def main(argv=None):
         }
         if per_assay_auc:
             metric_dict["eval_auc"] = float(np.mean(per_assay_auc))
+        if rope_extended_to:
+            metric_dict["rope_extended_to"] = rope_extended_to  # >1024 = extrapolation
         rec = {
             "checkpoint": args.model_name,
             "task": task_key,
