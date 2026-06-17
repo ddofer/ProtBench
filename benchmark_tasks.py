@@ -49,6 +49,9 @@ class TaskConfig:
     eval_mode: str = (
         "standard"  # 'standard', 'proteingym_zeroshot', 'proteingym_supervised'
     )
+    bin_col: Optional[str] = (
+        None  # Official binary-label column for AUC (ProteinGym DMS_score_bin)
+    )
 
     def __post_init__(self):
         valid_types = {
@@ -166,6 +169,10 @@ def _proteingym_tasks(eval_mode: str) -> Dict[str, TaskConfig]:
             if is_zeroshot
             else {"seq": "mutated_sequence"}
         )
+        # DMS assays ship an official per-assay binary label (DMS_score_bin) — the
+        # ground truth the ProteinGym leaderboard AUC/MCC are computed against.
+        # Clinical sets use their annotation label directly (no bin col).
+        bin_col = "DMS_score_bin" if variant.startswith("dms_") else None
         tasks[key] = TaskConfig(
             name=f"ProteinGym {name_parts} ({mode_label})",
             dataset="OATML-Markslab/ProteinGym_v1",
@@ -177,6 +184,7 @@ def _proteingym_tasks(eval_mode: str) -> Dict[str, TaskConfig]:
             group_by=group_by,
             label_map=label_map,
             eval_mode=f"proteingym_{eval_mode}",
+            bin_col=bin_col,
         )
     return tasks
 

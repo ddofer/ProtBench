@@ -76,6 +76,52 @@ def pll_from_table(seq, logP, aa2id):
     return (s / n) if n else None
 
 
+def get_optimal_window(mut_pos, seq_len, model_window):
+    """ProteinGym/ESM mutation-centered window in RESIDUE space (scoring_utils.py).
+
+    Returns [start, end) residue indices so the mutated residue keeps ~half the
+    window of context on each side, clamped at the sequence ends. ``model_window``
+    is the model's residue capacity (native context minus the 2 special tokens),
+    so the cropped sequence always tokenizes within the trained length — no RoPE
+    extrapolation. Each mutation is windowed independently, so multi-mutants that
+    span >model_window are still scored correctly per-site.
+    """
+    half = model_window // 2
+    if seq_len <= model_window:
+        return 0, seq_len
+    if mut_pos < half:
+        return 0, model_window
+    if mut_pos >= seq_len - half:
+        return seq_len - model_window, seq_len
+    return max(0, mut_pos - half), min(seq_len, mut_pos + half)
+
+
+@torch.no_grad()
+def single_position_masked_logp(refs, tokenizer, seq, local_res_idx, device, max_length):
+    """log-softmax vocab row for ONE masked residue (``local_res_idx``-th residue
+    of ``seq``). One forward pass; used by the windowed long-sequence path.
+
+    ``seq`` is the already-cropped window, so ``local_res_idx`` is the mutated
+    position re-based into the crop. Returns the [V] log-prob vector (cpu) or None
+    if the position falls outside the (truncated) token range.
+    """
+    enc = tokenizer(seq, truncation=True, max_length=max_length, return_tensors="pt")
+    ids = enc["input_ids"][0]
+    am = enc.get("attention_mask", None)
+    am = am[0] if am is not None else None
+    special_set = set(refs.special_ids)
+    res_tok = [t for t, x in enumerate(ids.tolist()) if x not in special_set]
+    if local_res_idx >= len(res_tok):
+        return None
+    tpos = res_tok[local_res_idx]
+    b = ids.clone()
+    b[tpos] = refs.mask_token_id
+    b = b.unsqueeze(0).to(device)
+    bm = am.unsqueeze(0).to(device) if am is not None else None
+    lg = refs.forward_logits(b, bm)
+    return torch.log_softmax(lg.float(), dim=-1)[0, tpos].cpu()
+
+
 @torch.no_grad()
 def masked_marginal_logprob_table(refs, tokenizer, wt, device, max_length=2048, batch_size=64):
     """[L,V] log-softmax table; row i = log p(aa | WT with residue i masked).
@@ -118,9 +164,32 @@ def masked_marginal_logprob_table(refs, tokenizer, wt, device, max_length=2048, 
     return logP
 
 
+def _score_substitution_windowed(wt, mut, logp_at, aa2id):
+    """Substitution score = sum over mutated positions of logP(mut) - logP(wt).
+
+    ``logp_at(p)`` returns the [V] masked log-prob row for residue position ``p``
+    (a full-table slice for short WT, or a mutation-centered window for long WT);
+    returns None if that position is unscorable. Mutated positions are found by
+    diffing wt vs mut, so it works for single- and multi-mutants. Returns None
+    if any required position is unscorable.
+    """
+    s = 0.0
+    for p in range(len(wt)):
+        w, m = wt[p], mut[p]
+        if w == m or w not in aa2id or m not in aa2id:
+            continue
+        row = logp_at(p)
+        if row is None:
+            return None
+        s += float(row[aa2id[m]] - row[aa2id[w]])
+    return s
+
+
 def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
-               max_assays=None, max_variants_per_assay=None):
+               max_assays=None, max_variants_per_assay=None,
+               model_window=1022, indel_long_policy="skip"):
     cfg = TASKS[task_key]
+    is_indel = task_key in INDEL_ZS
     from datasets import load_dataset
 
     # Mirror protein_benchmark_suite.prepare_data for proteingym_zeroshot:
@@ -154,6 +223,13 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
     else:
         labels = labels_raw.astype(float)
 
+    # Official ProteinGym binary labels for DMS AUC (the leaderboard ground truth);
+    # None for clinical (which uses its own annotation) or if the column is absent.
+    bin_labels = None
+    if cfg.bin_col and cfg.bin_col in data.column_names:
+        bin_labels = np.asarray(data[cfg.bin_col], dtype=float)
+    auc_label_source = "dms_score_bin" if bin_labels is not None else "median"
+
     # Build aa->token_id map for the 20 canonical amino acids
     aa2id = {aa: tokenizer.convert_tokens_to_ids(aa) for aa in "ACDEFGHIKLMNPQRSTVWY"}
 
@@ -164,51 +240,88 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
 
     for g in assays:
         idx = np.where(groups == g)[0]
-        # Indel variants each need their OWN masked table (a per-mutant forward
-        # pass over its length) — cap them so a 4500-mutant DMS-indel assay
-        # doesn't dominate runtime. Substitutions share the WT table (cheap), so
-        # the cap only bites the indel path.
+        # Each long-sequence forward (per-mutant indel PLL, or per-site window) is
+        # its own pass — cap variants so a multi-thousand-variant assay doesn't
+        # dominate runtime. Short substitution assays share one WT table (cheap).
         if max_variants_per_assay and idx.size > max_variants_per_assay:
             idx = idx[:max_variants_per_assay]
         wt = wts[int(idx[0])]
-        logP = masked_marginal_logprob_table(refs, tokenizer, wt, device, max_length, batch_size)
-        wt_pll = pll_from_table(wt, logP, aa2id)
-        scores, ys = [], []
-        for i in idx:
-            mut = muts[int(i)]
-            if len(wt) == len(mut):
-                sc = score_substitution(wt, mut, logP, aa2id)
-            elif wt_pll is None:
-                sc = None  # WT truncated; can't form a PLL baseline
-            else:
-                # Indel: PLL(mutant) - PLL(WT) using the mutant's own masked
-                # table. Length-agnostic, so deletions/insertions are scorable.
-                mut_logP = masked_marginal_logprob_table(
-                    refs, tokenizer, mut, device, max_length, batch_size)
-                mut_pll = pll_from_table(mut, mut_logP, aa2id)
-                sc = None if mut_pll is None else (mut_pll - wt_pll)
-            if sc is None:
-                n_skipped += 1
-                continue
-            scores.append(sc)
-            ys.append(labels[int(i)])
+        scores, ys, ys_bin = [], [], []
+
+        if is_indel:
+            # Indel: length-normalized PLL(mut) - PLL(WT). No mutation position to
+            # window on (mutant == "N/A"), so long indels are skipped (default) or
+            # truncated to the native window (opt-in).
+            def _mean_pll(seq):
+                s = seq[:model_window] if indel_long_policy == "truncate" else seq
+                tbl = masked_marginal_logprob_table(refs, tokenizer, s, device, max_length, batch_size)
+                return pll_from_table(s, tbl, aa2id)
+            wt_pll = _mean_pll(wt)
+            for i in idx:
+                mut = muts[int(i)]
+                sc = None
+                if wt_pll is not None:
+                    mut_pll = _mean_pll(mut)
+                    sc = None if mut_pll is None else (mut_pll - wt_pll)
+                if sc is None:
+                    n_skipped += 1
+                    continue
+                scores.append(sc); ys.append(labels[int(i)])
+                ys_bin.append(bin_labels[int(i)] if bin_labels is not None else None)
+        else:
+            # Substitution: mutation-centered optimal-window masked-marginals.
+            # Short WT -> one shared full table; long WT -> per-site windowed
+            # forward (in-distribution, scores every variant — no skip).
+            short = len(wt) <= model_window
+            full_table = (masked_marginal_logprob_table(refs, tokenizer, wt, device, max_length, batch_size)
+                          if short else None)
+            pos_cache = {}
+
+            def logp_at(p):
+                if short:
+                    return full_table[p] if p < full_table.shape[0] else None
+                if p not in pos_cache:
+                    st, en = get_optimal_window(p, len(wt), model_window)
+                    pos_cache[p] = single_position_masked_logp(
+                        refs, tokenizer, wt[st:en], p - st, device, max_length)
+                return pos_cache[p]
+
+            for i in idx:
+                mut = muts[int(i)]
+                if len(wt) != len(mut):
+                    n_skipped += 1  # a true indel mis-filed in a substitution task
+                    continue
+                sc = _score_substitution_windowed(wt, mut, logp_at, aa2id)
+                if sc is None:
+                    n_skipped += 1
+                    continue
+                scores.append(sc); ys.append(labels[int(i)])
+                ys_bin.append(bin_labels[int(i)] if bin_labels is not None else None)
+
         if len(scores) < 2:
             continue
         if cfg.problem_type == "regression":
-            # ProteinGym leaderboard metric for DMS (substitutions AND indels) is
-            # Spearman on continuous fitness — use it as PRIMARY so our numbers
-            # are directly comparable to the published benchmark.
+            # ProteinGym leaderboard PRIMARY metric for DMS (subs AND indels) is
+            # Spearman on continuous fitness — directly comparable to the board.
             r, _ = spearmanr(ys, scores)
             per_assay.append(float(r) if not np.isnan(r) else 0.0)
-            # SECONDARY: median-binarized AUC (kept so every benchmark also has an
-            # AUC, per the user's cross-benchmark request).
-            arr_ys = np.array(ys)
-            binary = (arr_ys > np.median(arr_ys)).astype(int)
-            if 0 < int(binary.sum()) < len(binary):
+            # SECONDARY AUC (ProteinGym also reports this). Use the OFFICIAL
+            # DMS_score_bin labels when available (leaderboard-faithful); fall back
+            # to a per-assay median split only if the bin column is absent/degenerate.
+            yb = [b for b in ys_bin if b is not None]
+            if len(yb) == len(scores) and 0 < int(np.nansum(yb)) < len(yb):
                 try:
-                    per_assay_auc.append(float(roc_auc_score(binary, scores)))
+                    per_assay_auc.append(float(roc_auc_score(yb, scores)))
                 except ValueError:
                     pass
+            else:
+                arr_ys = np.array(ys)
+                binary = (arr_ys > np.median(arr_ys)).astype(int)
+                if 0 < int(binary.sum()) < len(binary):
+                    try:
+                        per_assay_auc.append(float(roc_auc_score(binary, scores)))
+                    except ValueError:
+                        pass
         else:
             # Clinical pathogenicity: pathogenic = deleterious = lower log P(mut).
             # Negate so pathogenic variants rank high (ProteinGym convention).
@@ -217,7 +330,7 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
             except ValueError:
                 pass
 
-    return per_assay, per_assay_auc, n_skipped
+    return per_assay, per_assay_auc, n_skipped, auc_label_source
 
 
 def main(argv=None):
@@ -229,11 +342,23 @@ def main(argv=None):
     ap.add_argument("--output_dir", default="/data/proteva/plm/results/bench/discrim_mlmzs")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--batch_size", type=int, default=64)
-    ap.add_argument("--max_length", type=int, default=2048)
+    ap.add_argument("--max_length", type=int, default=1024,
+                    help="token cap for a single forward; substitutions never "
+                         "exceed it (mutation-centered window), so 1024 = native.")
+    ap.add_argument("--model_window", type=int, default=None,
+                    help="residue window for long substitutions (default: "
+                         "encoder.max_position-2, i.e. native context minus specials)")
     ap.add_argument("--max_assays", type=int, default=None)
     ap.add_argument("--max_variants_per_assay", type=int, default=200,
-                    help="cap variants/assay (bounds the per-mutant PLL forward "
-                         "passes on large DMS-indel assays; subs are unaffected)")
+                    help="cap variants/assay (bounds per-mutant indel PLL + per-site "
+                         "windowed forwards; short-WT substitutions share one table)")
+    ap.add_argument("--indel_long_policy", choices=["skip", "truncate"], default="skip",
+                    help="indels longer than the window: skip (default) or truncate "
+                         "to the first model_window residues (approximation)")
+    ap.add_argument("--rope_extrapolate", action="store_true",
+                    help="OPT-IN: grow the Proteva RoPE cache to --max_length and "
+                         "score long sequences whole via extrapolation (OOD; the "
+                         "default mutation-centered window stays in-distribution)")
     ap.add_argument("--notes", default="")
     args = ap.parse_args(argv)
 
@@ -256,24 +381,32 @@ def main(argv=None):
     if refs is None:
         raise SystemExit(f"No MLM head for {args.model_name}")
 
-    # Proteva precomputes a RoPE cache for encoder.config.max_position (=1024);
-    # rather than clamp (which drops the 20-27% of clinical proteins >1024), GROW
-    # the cache to args.max_length so we score full-length via RoPE extrapolation
-    # (theta=10000, AMPLIFY-derived; trained at 1024 so >1024 is extrapolation).
-    # No-op for AMPLIFY (no such cap).
+    # Native residue capacity = encoder.max_position - 2 special tokens (Proteva
+    # trained at 1024 -> 1022; AMPLIFY has no cap -> default to args.max_length-2).
+    enc_cfg = getattr(getattr(model, "encoder", None), "config", None)
+    native_max = getattr(enc_cfg, "max_position", None)
+    model_window = args.model_window or ((int(native_max) - 2) if native_max else (args.max_length - 2))
+
+    # Default: stay IN-DISTRIBUTION. Long substitutions are handled by the
+    # mutation-centered window (<= model_window), so the forward never exceeds the
+    # trained length; cap max_length to the native context. RoPE extrapolation is
+    # OPT-IN only (--rope_extrapolate) for ablation — it is OOD (trained at 1024).
     rope_extended_to = None
-    try:
-        from plm.hf.checkpoint_utils import extend_rope_cache
-        prev = extend_rope_cache(model, args.max_length)
-        if prev:
-            rope_extended_to = int(args.max_length)
-            print(f"Extended Proteva RoPE cache {prev} -> {args.max_length} (extrapolation)")
-    except Exception as e:
-        print(f"extend_rope_cache skipped ({e}); falling back to clamp")
-        enc_cfg = getattr(getattr(model, "encoder", None), "config", None)
-        max_pos = getattr(enc_cfg, "max_position", None)
-        if max_pos and args.max_length > max_pos:
-            args.max_length = int(max_pos)
+    if args.rope_extrapolate:
+        try:
+            from plm.hf.checkpoint_utils import extend_rope_cache
+            prev = extend_rope_cache(model, args.max_length)
+            if prev:
+                rope_extended_to = int(args.max_length)
+                print(f"Extended Proteva RoPE cache {prev} -> {args.max_length} (extrapolation)")
+        except Exception as e:
+            print(f"extend_rope_cache skipped ({e}); clamping instead")
+            if native_max and args.max_length > native_max:
+                args.max_length = int(native_max)
+    elif native_max and args.max_length > native_max:
+        args.max_length = int(native_max)
+    print(f"window strategy: {'rope_extrapolation' if rope_extended_to else 'optimal-window'} "
+          f"(model_window={model_window} residues, max_length={args.max_length} tokens)")
 
     # Use a subdir so write_jsonl_record(.parent) resolves back to output_dir,
     # matching the pattern in finetune_sequence/residue (picked up by collect glob).
@@ -285,11 +418,13 @@ def main(argv=None):
             print(f"skip unknown task {task_key}")
             continue
         cfg = TASKS[task_key]
-        per_assay, per_assay_auc, n_skipped = _eval_task(
+        per_assay, per_assay_auc, n_skipped, auc_label_source = _eval_task(
             task_key, refs, tokenizer, device,
             args.batch_size, args.max_length,
             max_assays=args.max_assays,
             max_variants_per_assay=args.max_variants_per_assay,
+            model_window=model_window,
+            indel_long_policy=args.indel_long_policy,
         )
         if not per_assay:
             print(f"{task_key}: no scorable assays (skipped={n_skipped})")
@@ -300,10 +435,13 @@ def main(argv=None):
         metric_dict = {
             metric_key: float(np.mean(per_assay)),
             "assays": len(per_assay),
-            "variants_skipped_indel": n_skipped,
+            "variants_skipped": n_skipped,
+            "window_strategy": "rope_extrapolation" if rope_extended_to else "optimal_window",
+            "model_window": model_window,
         }
         if per_assay_auc:
             metric_dict["eval_auc"] = float(np.mean(per_assay_auc))
+            metric_dict["auc_label_source"] = auc_label_source if cfg.problem_type == "regression" else "annotation"
         if rope_extended_to:
             metric_dict["rope_extended_to"] = rope_extended_to  # >1024 = extrapolation
         rec = {
