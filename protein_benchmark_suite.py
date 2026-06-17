@@ -2114,9 +2114,14 @@ def make_probe_model(
         if problem_type == "regression":
             return make_pipeline(StandardScaler(), Ridge(alpha=1.0))
         if problem_type in {"binary", "multiclass"}:
+            # lbfgs = native multinomial (no OvR), quasi-Newton; with the
+            # StandardScaler it converges in ~100 iters even for 1195-class
+            # remote_homology. saga (stochastic) was ~750s/multiclass task here.
             return make_pipeline(
                 StandardScaler(),
-                LogisticRegression(solver="saga", random_state=BENCHMARK_SEED),
+                LogisticRegression(
+                    solver="lbfgs", max_iter=100, random_state=BENCHMARK_SEED
+                ),
             )
 
     if problem_type == "regression":

@@ -244,23 +244,23 @@ def fit_residue_linear_probe(
     y: np.ndarray,
     *,
     problem_type: str = "multiclass",
-    max_iter: int = 1000,
+    max_iter: int = 100,
     seed: int = 42,
 ):
     """Fit a per-residue LogisticRegression linear probe.
 
-    Per spec: linear probe only, no MLP. ``n_jobs=-1`` lets sklearn
-    parallelize the underlying solvers / OvR loops.
+    Per spec: linear probe only, no MLP. StandardScaler + lbfgs: scaling lets
+    lbfgs (native multinomial, quasi-Newton, multithreaded BLAS) converge in
+    ~100 iters even on SS3's ~600k residues — saga on raw (unscaled) features
+    was the prior bottleneck (~900s/task vs ~60-120s scaled-lbfgs).
     """
     from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.pipeline import make_pipeline
 
-    # n_jobs deprecated in sklearn >=1.8; LogisticRegression now uses internal
-    # OpenMP/loky parallelism without the kwarg.
-    # saga handles large n_samples (SS3: ~600k residues) where lbfgs stalls at 1000 iter
-    probe = LogisticRegression(
-        solver="saga",
-        max_iter=max_iter,
-        random_state=seed,
+    probe = make_pipeline(
+        StandardScaler(),
+        LogisticRegression(solver="lbfgs", max_iter=max_iter, random_state=seed),
     )
     probe.fit(X, y)
     return probe

@@ -99,9 +99,15 @@ def collect(probe_csvs: list[str], ft_jsonls: list[str], out_csv: str,
         with p.open() as f:
             for row in csv.DictReader(f):
                 task = row.get("Task", "")
-                rows.append(normalize_probe_row(
-                    row, _main_metric(task), _task_type(task), notes,
-                    runtime_map.get(("probe", row.get("EvalSplit", "").lower())), p.name))
+                rt = runtime_map.get(("probe", row.get("EvalSplit", "").lower()))
+                main = normalize_probe_row(
+                    row, _main_metric(task), _task_type(task), notes, rt, p.name)
+                rows.append(main)
+                # Regression tasks: also emit MSE as a second row (main metric is
+                # Spearman). dedup key includes metric_name, so this never collides.
+                if main["metric_name"] != "MSE" and row.get("MSE", "") not in ("", None):
+                    rows.append(normalize_probe_row(
+                        row, "MSE", _task_type(task), notes, rt, p.name))
     for jl in ft_jsonls:
         p = Path(jl)
         if not p.exists():
