@@ -79,9 +79,46 @@ python plm/bench/compare_to_vanilla.py --split test            # all probes
 python plm/bench/compare_to_vanilla.py --split test --probe lora
 ```
 
+**Humanized report (start here).** `report.py` is the one-command, DS-friendly
+view — run it any time to refresh two artifacts in `results/`:
+
+```bash
+python plm/bench/report.py            # writes results/BENCH_REPORT.md + bench_pivot.csv
+```
+
+- **`results/BENCH_REPORT.md`** — markdown a human reads: linear / LoRA / MLM
+  trajectory tables (vanilla → step0 → epoch1 → epoch3) with ↑/↓ vs vanilla,
+  plus per-model win/loss tallies, top lifts and top regressions.
+- **`results/bench_pivot.csv`** — wide task×model table for interactive work:
+  `pandas.read_csv("results/bench_pivot.csv")` and slice.
+
+`report.py` reuses `compare_to_vanilla.build_comparison`, so the baseline/Δ
+logic is single-source. `--probe`/`--split` restrict to one view.
+
 The harness runs on proteva's own venv (`plm/.venv`, Python 3.12, `peft`
 already installed) — NOT the sibling venv described below, which applies only
 to calling `protein_benchmark_suite.py` directly.
+
+### ProteinGym zero-shot — 4 benchmarks, MLM-family scoring
+
+`proteingym_mlm_zeroshot.py` scores all **4** ProteinGym benchmarks (default
+`--tasks` = all 4), so AUC is available for every one:
+
+| Benchmark | Scorer | Metric | Sign |
+|---|---|---|---|
+| DMS substitutions | masked-marginal Σ per-pos logP delta | Spearman (+ median-binarized AUC) | higher = fitter |
+| DMS indels | pseudo-log-likelihood `PLL(mut)−PLL(WT)` | AUC (median-binarized) | higher = fitter |
+| Clinical substitutions | masked-marginal | AUC | **negated** (pathogenic = lower logP) |
+| Clinical indels | pseudo-log-likelihood | AUC | **negated** |
+
+PLL = Σᵢ log P(seqᵢ \| seq with i masked) over the whole sequence — the
+encoder/masked-LM analogue of a sequence likelihood (ESM-1v/ESM2 style); it
+needs no position alignment, so indels are scorable. `--max_variants_per_assay`
+(default 200) bounds the per-mutant PLL forward passes on large DMS-indel
+assays (substitutions share the WT table and are unaffected). The cosine
+zero-shot path is a weak proxy (clinical AUC ~0.68 after the sign fix vs MLM
+~0.90) and is **default-off** (`PLM_BENCH_PGYM_COSINE=1` to restore — it is the
+only path that *also* re-scores indels via embedding cosine).
 
 ## Fine-tuning scripts (residue + sequence; LoRA)
 

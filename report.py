@@ -131,39 +131,53 @@ def write_pivot_csv(records, models, path: Path):
             w.writerow(row)
 
 
-def build_report(csv_path: str, split: str, baseline: str, probe=None) -> str:
+# Default views, in reading order: each is one (probe, split) the report covers.
+# linear+lora live on `test`; MLM zero-shot lives on its own `zeroshot` split.
+DEFAULT_VIEWS = [("linear", "test"), ("lora", "test"), ("mlm_zeroshot", "zeroshot")]
+
+
+def build_report(csv_path: str, baseline: str, views=None) -> str:
+    """One report covering several (probe, split) views, plus a combined pivot CSV."""
+    views = views or DEFAULT_VIEWS
     with Path(csv_path).open() as f:
         rows = list(csv.DictReader(f))
-    records = build_comparison(rows, baseline_substr=baseline, split=split)
-    if probe:
-        records = [r for r in records if r["probe_type"] == probe]
-    models = _ordered_models(records)
 
-    md = [f"# Proteva downstream benchmark report",
-          f"\n_Source: `{csv_path}` · split=`{split}` · baseline~=`{baseline}` · "
-          f"↑ = better than vanilla, ↓ = worse._\n"]
-    probes = sorted({r["probe_type"] for r in records})
-    for p in probes:
-        prec = [r for r in records if r["probe_type"] == p]
-        md.append(f"\n## probe = {p}\n")
-        md.append(_md_table(prec, models))
-    md.append("\n" + _insights(records, models))
+    md = ["# Proteva downstream benchmark report",
+          f"\n_Source: `{csv_path}` · baseline~=`{baseline}` · "
+          f"↑ = better than vanilla, ↓ = worse (MSE: lower is better, sign-corrected)._\n"]
+    all_records = []
+    for probe, split in views:
+        recs = [r for r in build_comparison(rows, baseline_substr=baseline, split=split)
+                if r["probe_type"] == probe]
+        if not recs:
+            md.append(f"\n## {probe} ({split}) — _no rows yet_\n")
+            continue
+        models = _ordered_models(recs)
+        md.append(f"\n## {probe} ({split} split)\n")
+        md.append(_md_table(recs, models))
+        md.append("\n" + _insights(recs, models))
+        all_records.extend(recs)
 
-    # Side artifact: wide pivot CSV for interactive DS use.
-    write_pivot_csv(records, models, RESULTS_DIR / "bench_pivot.csv")
+    # Side artifact: ONE wide pivot CSV across all views for interactive DS use.
+    write_pivot_csv(all_records, _ordered_models(all_records),
+                    RESULTS_DIR / "bench_pivot.csv")
     return "\n".join(md)
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--csv", default=DEFAULT_CSV)
-    ap.add_argument("--split", default="test")
-    ap.add_argument("--probe", default=None, help="filter to one probe_type")
+    ap.add_argument("--probe", default=None, help="restrict to one probe_type")
+    ap.add_argument("--split", default=None, help="restrict to one split")
     ap.add_argument("--baseline", default="AMPLIFY")
     ap.add_argument("--out", default=str(RESULTS_DIR / "BENCH_REPORT.md"))
     args = ap.parse_args(argv)
 
-    report = build_report(args.csv, args.split, args.baseline, args.probe)
+    views = DEFAULT_VIEWS
+    if args.probe or args.split:
+        views = [(args.probe or p, args.split or s) for p, s in DEFAULT_VIEWS
+                 if (not args.probe or p == args.probe)]
+    report = build_report(args.csv, args.baseline, views)
     Path(args.out).write_text(report + "\n")
     print(report)
     print(f"\n-> wrote {args.out}")
