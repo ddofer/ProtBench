@@ -30,6 +30,11 @@ SUBSTITUTION_ZS = [
     "proteingym_dms_substitutions_zeroshot",
     "proteingym_clinical_substitutions_zeroshot",
 ]
+INDEL_ZS = [
+    "proteingym_dms_indels_zeroshot",
+    "proteingym_clinical_indels_zeroshot",
+]
+ALL_ZS = SUBSTITUTION_ZS + INDEL_ZS
 
 
 def score_substitution(wt, mut, logP, aa2id):
@@ -43,6 +48,24 @@ def score_substitution(wt, mut, logP, aa2id):
         if w == m or w not in aa2id or m not in aa2id:
             continue
         s += float(logP[i, aa2id[m]] - logP[i, aa2id[w]])
+    return s
+
+
+def pll_from_table(seq, logP, aa2id):
+    """Pseudo-log-likelihood of ``seq`` from its own masked-marginal table.
+
+    PLL = sum_i log P(seq[i] | seq with position i masked), over canonical-AA
+    positions. This is the encoder/masked-LM analogue of a sequence likelihood
+    (ESM-1v / ESM2 ProteinGym indel scoring): it needs no position alignment, so
+    an indel score is simply ``PLL(mutant) - PLL(WT)`` even when lengths differ.
+    Returns None if the sequence was truncated past the table.
+    """
+    if len(seq) > logP.shape[0]:
+        return None  # truncated; skip variant
+    s = 0.0
+    for i, a in enumerate(seq):
+        if a in aa2id:
+            s += float(logP[i, aa2id[a]])
     return s
 
 
@@ -88,7 +111,8 @@ def masked_marginal_logprob_table(refs, tokenizer, wt, device, max_length=2048, 
     return logP
 
 
-def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length, max_assays=None):
+def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
+               max_assays=None, max_variants_per_assay=None):
     cfg = TASKS[task_key]
     from datasets import load_dataset
 
@@ -126,18 +150,36 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length, max_as
     # Build aa->token_id map for the 20 canonical amino acids
     aa2id = {aa: tokenizer.convert_tokens_to_ids(aa) for aa in "ACDEFGHIKLMNPQRSTVWY"}
 
-    per_assay, n_skipped = [], 0
+    per_assay, per_assay_auc, n_skipped = [], [], 0
     assays = np.unique(groups)
     if max_assays:
         assays = assays[:max_assays]
 
     for g in assays:
         idx = np.where(groups == g)[0]
+        # Indel variants each need their OWN masked table (a per-mutant forward
+        # pass over its length) — cap them so a 4500-mutant DMS-indel assay
+        # doesn't dominate runtime. Substitutions share the WT table (cheap), so
+        # the cap only bites the indel path.
+        if max_variants_per_assay and idx.size > max_variants_per_assay:
+            idx = idx[:max_variants_per_assay]
         wt = wts[int(idx[0])]
         logP = masked_marginal_logprob_table(refs, tokenizer, wt, device, max_length, batch_size)
+        wt_pll = pll_from_table(wt, logP, aa2id)
         scores, ys = [], []
         for i in idx:
-            sc = score_substitution(wt, muts[int(i)], logP, aa2id)
+            mut = muts[int(i)]
+            if len(wt) == len(mut):
+                sc = score_substitution(wt, mut, logP, aa2id)
+            elif wt_pll is None:
+                sc = None  # WT truncated; can't form a PLL baseline
+            else:
+                # Indel: PLL(mutant) - PLL(WT) using the mutant's own masked
+                # table. Length-agnostic, so deletions/insertions are scorable.
+                mut_logP = masked_marginal_logprob_table(
+                    refs, tokenizer, mut, device, max_length, batch_size)
+                mut_pll = pll_from_table(mut, mut_logP, aa2id)
+                sc = None if mut_pll is None else (mut_pll - wt_pll)
             if sc is None:
                 n_skipped += 1
                 continue
@@ -148,6 +190,14 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length, max_as
         if cfg.problem_type == "regression":
             r, _ = spearmanr(ys, scores)
             per_assay.append(float(r) if not np.isnan(r) else 0.0)
+            # AUC via median binarization — ProteinGym website convention
+            arr_ys = np.array(ys)
+            binary = (arr_ys > np.median(arr_ys)).astype(int)
+            if 0 < int(binary.sum()) < len(binary):
+                try:
+                    per_assay_auc.append(float(roc_auc_score(binary, scores)))
+                except ValueError:
+                    pass
         else:
             # Clinical pathogenicity: pathogenic = deleterious = lower log P(mut).
             # Negate so pathogenic variants rank high (ProteinGym convention).
@@ -156,18 +206,23 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length, max_as
             except ValueError:
                 pass
 
-    return per_assay, n_skipped
+    return per_assay, per_assay_auc, n_skipped
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--model_name", required=True)
-    ap.add_argument("--tasks", nargs="*", default=SUBSTITUTION_ZS)
+    ap.add_argument("--tasks", nargs="*", default=ALL_ZS,
+                    help="default: all 4 ProteinGym benchmarks (subs via masked-"
+                         "marginal, indels via pseudo-log-likelihood)")
     ap.add_argument("--output_dir", default="/data/proteva/plm/results/bench/discrim_mlmzs")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--max_length", type=int, default=2048)
     ap.add_argument("--max_assays", type=int, default=None)
+    ap.add_argument("--max_variants_per_assay", type=int, default=200,
+                    help="cap variants/assay (bounds the per-mutant PLL forward "
+                         "passes on large DMS-indel assays; subs are unaffected)")
     ap.add_argument("--notes", default="")
     args = ap.parse_args(argv)
 
@@ -209,27 +264,31 @@ def main(argv=None):
             print(f"skip unknown task {task_key}")
             continue
         cfg = TASKS[task_key]
-        per_assay, n_skipped = _eval_task(
+        per_assay, per_assay_auc, n_skipped = _eval_task(
             task_key, refs, tokenizer, device,
             args.batch_size, args.max_length,
             max_assays=args.max_assays,
+            max_variants_per_assay=args.max_variants_per_assay,
         )
         if not per_assay:
             print(f"{task_key}: no scorable assays (skipped={n_skipped})")
             continue
 
         metric_key = "eval_spearman" if cfg.problem_type == "regression" else "eval_auc"
+        metric_dict = {
+            metric_key: float(np.mean(per_assay)),
+            "assays": len(per_assay),
+            "variants_skipped_indel": n_skipped,
+        }
+        if per_assay_auc:
+            metric_dict["eval_auc"] = float(np.mean(per_assay_auc))
         rec = {
             "checkpoint": args.model_name,
             "task": task_key,
             "mode": "mlm_zeroshot",
             "split": "zeroshot",
             "model_type": getattr(getattr(model, "config", None), "model_type", None),
-            "metric": {
-                metric_key: float(np.mean(per_assay)),
-                "assays": len(per_assay),
-                "variants_skipped_indel": n_skipped,
-            },
+            "metric": metric_dict,
             "n_train": 0,
             "n_eval": len(per_assay),
             "notes": args.notes,
@@ -238,8 +297,9 @@ def main(argv=None):
         # write_jsonl_record(out_dir, prefix, ckpt, record) -> writes to
         # out_dir.parent / f"mlm_zeroshot_{safe_ckpt(model_name)}.jsonl"
         jsonl_path = write_jsonl_record(out, "mlm_zeroshot", args.model_name, rec)
+        auc_str = f" auc={metric_dict['eval_auc']:.4f}" if per_assay_auc else ""
         print(
-            f"{task_key}: {metric_key}={np.mean(per_assay):.4f} "
+            f"{task_key}: {metric_key}={np.mean(per_assay):.4f}{auc_str} "
             f"over {len(per_assay)} assays (indel skipped={n_skipped})"
         )
         print(f"  -> JSONL written: {jsonl_path}")

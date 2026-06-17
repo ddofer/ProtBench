@@ -119,9 +119,14 @@ def collect(probe_csvs: list[str], ft_jsonls: list[str], out_csv: str,
                     continue
                 rec = json.loads(line)
                 task = rec.get("task", "")
+                rt = runtime_map.get((rec.get("mode", ""), rec.get("split", "").lower()))
                 rows.append(normalize_ft_record(
-                    rec, _main_metric(task), _task_type(task),
-                    runtime_map.get((rec.get("mode", ""), rec.get("split", "").lower())), p.name))
+                    rec, _main_metric(task), _task_type(task), rt, p.name))
+                # Regression MLM tasks also carry eval_auc (median-binarized).
+                # Emit as a second row; dedup key includes metric_name → no collision.
+                m = rec.get("metric", {}) or {}
+                if "eval_auc" in {str(k).lower() for k in m} and _main_metric(task).lower() != "auc":
+                    rows.append(normalize_ft_record(rec, "AUC", _task_type(task), rt, p.name))
     out = Path(out_csv)
     merged = {_dedup_key(r): r for r in _read_existing(out)}
     for r in rows:
