@@ -256,14 +256,22 @@ def main(argv=None):
     if refs is None:
         raise SystemExit(f"No MLM head for {args.model_name}")
 
-    # Clamp max_length to the encoder's positional capacity. Proteva precomputes
-    # a RoPE cache for encoder.config.max_position (=1024); a longer sequence
-    # hits a cos/sin size mismatch in _apply_rope. AMPLIFY has no such cap.
-    enc_cfg = getattr(getattr(model, "encoder", None), "config", None)
-    max_pos = getattr(enc_cfg, "max_position", None)
-    if max_pos and args.max_length > max_pos:
-        print(f"Clamping max_length {args.max_length} -> {max_pos} (encoder.max_position)")
-        args.max_length = int(max_pos)
+    # Proteva precomputes a RoPE cache for encoder.config.max_position (=1024);
+    # rather than clamp (which drops the 20-27% of clinical proteins >1024), GROW
+    # the cache to args.max_length so we score full-length via RoPE extrapolation
+    # (theta=10000, AMPLIFY-derived; trained at 1024 so >1024 is extrapolation).
+    # No-op for AMPLIFY (no such cap).
+    try:
+        from plm.hf.checkpoint_utils import extend_rope_cache
+        prev = extend_rope_cache(model, args.max_length)
+        if prev:
+            print(f"Extended Proteva RoPE cache {prev} -> {args.max_length} (extrapolation)")
+    except Exception as e:
+        print(f"extend_rope_cache skipped ({e}); falling back to clamp")
+        enc_cfg = getattr(getattr(model, "encoder", None), "config", None)
+        max_pos = getattr(enc_cfg, "max_position", None)
+        if max_pos and args.max_length > max_pos:
+            args.max_length = int(max_pos)
 
     # Use a subdir so write_jsonl_record(.parent) resolves back to output_dir,
     # matching the pattern in finetune_sequence/residue (picked up by collect glob).
