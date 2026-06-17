@@ -131,11 +131,22 @@ def collect(probe_csvs: list[str], ft_jsonls: list[str], out_csv: str,
     merged = {_dedup_key(r): r for r in _read_existing(out)}
     for r in rows:
         merged[_dedup_key(r)] = r
+    # Collapse notes-drift: the dedup key includes `notes`, so two runs of the
+    # SAME (model, task, probe, split, metric) under edited notes (e.g. a fixed
+    # LoRA config, or a re-scored MLM run) would BOTH survive and double the cell.
+    # Keep one row per logical cell — latest `date` wins (ties keep the row seen
+    # later, i.e. the most recent collect). This is what "overwrite stale" means.
+    final: dict[tuple, dict] = {}
+    for r in merged.values():
+        k = (r["model"], r["task"], r["probe_type"], r["split"], r["metric_name"])
+        cur = final.get(k)
+        if cur is None or str(r.get("date", "")) >= str(cur.get("date", "")):
+            final[k] = r
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=OUT_COLUMNS)
         w.writeheader()
-        for r in merged.values():
+        for r in final.values():
             w.writerow({k: r.get(k, "") for k in OUT_COLUMNS})
     return len(rows)
 
