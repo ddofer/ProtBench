@@ -2871,8 +2871,13 @@ def evaluate_task(
                     corr, _ = spearmanr(y_g, s_g)
                     group_metrics.append(float(corr) if not np.isnan(corr) else 0.0)
                 else:
+                    # Clinical pathogenicity: pathogenic = deleterious = mutant
+                    # embedding FURTHER from WT = LOWER cosine. Negate so
+                    # pathogenic ranks high (same sign convention as the MLM
+                    # masked-marginal path). Raw cosine gives an inverted AUC
+                    # (~0.32 → 0.68 after the flip).
                     try:
-                        group_metrics.append(roc_auc_score(y_g, s_g))
+                        group_metrics.append(roc_auc_score(y_g, -s_g))
                     except ValueError:
                         pass
 

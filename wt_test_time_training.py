@@ -317,8 +317,10 @@ def run_tta_zeroshot(
             if np.isfinite(corr):
                 metrics.append(float(corr))
         else:
+            # Pathogenic = lower cosine to WT → negate (same sign convention as
+            # the cosine + MLM zero-shot paths).
             try:
-                metrics.append(float(roc_auc_score(y, sims)))
+                metrics.append(float(roc_auc_score(y, -sims)))
             except ValueError:
                 pass
     return metrics
