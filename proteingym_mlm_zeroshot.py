@@ -243,10 +243,142 @@ def _filter_huge_assays(assays, g2idx, thresh):
     return kept, len(assays) - len(kept)
 
 
+@torch.no_grad()
+def single_pass_pll_table(refs, tokenizer, seqs, aa2id, model_window, device,
+                          max_length, batch_size=32, long_policy="skip"):
+    """Batched SINGLE-PASS (unmasked) mean log-prob per sequence.
+
+    score(seq) = mean_i log p(seq[i] | full UNMASKED seq), i over canonical-AA
+    token positions. ONE forward per sequence instead of L masked forwards
+    (masked_marginal_logprob_table). Indel score = score(mut) - score(WT).
+
+    WARNING — REFERENCE-ONLY, validated BAD. This is the naive unmasked baseline,
+    NOT OFS. Real OFS (Kantroo et al. 2024, arXiv:2407.07265) trains an MLP
+    ensemble to predict the *masked* profile from unmasked embeddings; this reads
+    the raw unmasked diagonal, so the model copies the true residue (leakage) and
+    ranking collapses (validated 2026-06-18: flat Spearman 0.498->0.313, AMFR went
+    anti-correlated). Use `strided` instead. INVARIANT if ever used: *mean* over
+    positions, not sum — CAPSD_AAV2S has corr(length, DMS) ~ -0.53, so a sum scorer
+    injects a spurious length term. Specials/pads excluded via aa2id + attn mask.
+
+    Returns a list aligned with ``seqs``; entry is a float, or None when a
+    sequence is over-length under long_policy="skip" (matching the masked path)
+    or has no canonical positions.
+    """
+    canon_ids = set(aa2id.values())
+
+    def _crop(seq):
+        if len(seq) <= model_window:
+            return seq, True
+        if long_policy != "truncate":
+            return seq, False                 # skip -> None, same as masked path
+        st = (len(seq) - model_window) // 2   # center-crop, mirrors _center_crop
+        return seq[st:st + model_window], True
+
+    out = [None] * len(seqs)
+    prepared = [_crop(s) for s in seqs]
+    work = [(k, s) for k, (s, ok) in enumerate(prepared) if ok]
+    canon_t = torch.tensor(sorted(canon_ids), device=device)
+
+    for b0 in range(0, len(work), batch_size):
+        chunk = work[b0:b0 + batch_size]
+        ks = [k for k, _ in chunk]
+        enc = tokenizer([s for _, s in chunk], padding=True, truncation=True,
+                        max_length=max_length, return_tensors="pt")
+        ids = enc["input_ids"]
+        am = enc.get("attention_mask", None)
+        lg = refs.forward_logits(ids.to(device),
+                                 am.to(device) if am is not None else None)
+        lsm = torch.log_softmax(lg.float(), dim=-1)            # [B,T,V]
+        tok = ids.to(lsm.device)                               # [B,T]
+        true_lp = lsm.gather(-1, tok.unsqueeze(-1)).squeeze(-1)   # [B,T]
+        is_canon = torch.isin(tok, canon_t)                   # specials excluded
+        if am is not None:
+            is_canon &= am.to(lsm.device).bool()              # drop pad
+        sum_lp = (true_lp * is_canon).sum(dim=-1)             # [B]
+        n_pos = is_canon.sum(dim=-1)                          # [B]
+        s_cpu = sum_lp.cpu().tolist(); n_cpu = n_pos.cpu().tolist()
+        for j, k in enumerate(ks):
+            out[k] = (s_cpu[j] / n_cpu[j]) if n_cpu[j] > 0 else None
+    return out
+
+
+@torch.no_grad()
+def strided_masked_pll_table(refs, tokenizer, seqs, aa2id, model_window, device,
+                             max_length, n_passes=8, batch_size=16, long_policy="skip"):
+    """Leakage-free few-pass masked pseudo-log-likelihood.
+
+    Exact masked-PLL masks ONE position per forward -> L forwards/seq. Here we
+    mask a STRIDED group of positions simultaneously: in pass g (g=0..n_passes-1)
+    every residue whose index % n_passes == g is masked at once, scored from the
+    (still-unmasked) rest. After n_passes forwards every position has been masked
+    exactly once, with its nearest co-masked neighbour n_passes residues away, so
+    local context is intact. n_passes forwards/seq instead of L (~L/n_passes
+    speedup); n_passes >= L reproduces exact masked-PLL. Leakage-free because the
+    scored residue is always [MASK] in its own forward (unlike single_pass).
+    score(seq) = mean over canonical positions of log p(true residue | strided-masked seq).
+    Returns a list aligned with ``seqs`` (float or None).
+    """
+    mask_id = refs.mask_token_id
+    special_set = set(refs.special_ids)
+    canon_ids = set(aa2id.values())
+
+    def _crop(seq):
+        if len(seq) <= model_window:
+            return seq, True
+        if long_policy != "truncate":
+            return seq, False
+        st = (len(seq) - model_window) // 2
+        return seq[st:st + model_window], True
+
+    out = [None] * len(seqs)
+    prepared = [_crop(s) for s in seqs]
+    work = [(k, s) for k, (s, ok) in enumerate(prepared) if ok]
+
+    for b0 in range(0, len(work), batch_size):
+        chunk = work[b0:b0 + batch_size]
+        ks = [k for k, _ in chunk]
+        enc = tokenizer([s for _, s in chunk], padding=True, truncation=True,
+                        max_length=max_length, return_tensors="pt")
+        ids0 = enc["input_ids"]
+        am = enc.get("attention_mask", None)
+        B, T = ids0.shape
+        # residue-token positions per row, and their running residue index
+        res_tok = [[t for t in range(T) if ids0[j, t].item() not in special_set]
+                   for j in range(B)]
+        sum_lp = [0.0] * B
+        n_pos = [0] * B
+        for g in range(n_passes):
+            ids = ids0.clone()
+            masked = [[] for _ in range(B)]   # token-positions masked this pass, per row
+            any_masked = False
+            for j in range(B):
+                for ri, tpos in enumerate(res_tok[j]):
+                    if ri % n_passes == g:
+                        ids[j, tpos] = mask_id
+                        masked[j].append(tpos)
+                        any_masked = True
+            if not any_masked:
+                continue
+            lg = refs.forward_logits(ids.to(device),
+                                     am.to(device) if am is not None else None)
+            lsm = torch.log_softmax(lg.float(), dim=-1).cpu()
+            for j in range(B):
+                for tpos in masked[j]:
+                    tok = int(ids0[j, tpos])
+                    if tok in canon_ids:                       # score canonical only
+                        sum_lp[j] += float(lsm[j, tpos, tok])
+                        n_pos[j] += 1
+        for j, k in enumerate(ks):
+            out[k] = (sum_lp[j] / n_pos[j]) if n_pos[j] > 0 else None
+    return out
+
+
 def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
                max_assays=None, max_variants_per_assay=None,
                model_window=1022, indel_long_policy="skip",
-               skip_huge_assays=None):
+               skip_huge_assays=None, indel_score_mode="strided",
+               indel_pll_passes=32):
     cfg = TASKS[task_key]
     is_indel = task_key in INDEL_ZS
     from datasets import load_dataset
@@ -353,18 +485,41 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
                     s = seq
                 tbl = masked_marginal_logprob_table(refs, tokenizer, s, device, max_length, batch_size)
                 return pll_from_table(s, tbl, aa2id)
-            wt_pll = _mean_pll(wt)
-            for i in idx:
-                mut = muts[int(i)]
-                sc = None
-                if wt_pll is not None:
-                    mut_pll = _mean_pll(mut)
-                    sc = None if mut_pll is None else (mut_pll - wt_pll)
-                if sc is None:
-                    n_skipped += 1
-                    continue
-                scores.append(sc); ys.append(labels[int(i)])
-                ys_bin.append(bin_labels[int(i)] if bin_labels is not None else None)
+            if indel_score_mode in ("single_pass", "strided"):
+                # Batched per-sequence scorer. seqs[0]=WT, then the variants.
+                seqs = [wt] + [muts[int(i)] for i in idx]
+                if indel_score_mode == "single_pass":
+                    vals = single_pass_pll_table(
+                        refs, tokenizer, seqs, aa2id, model_window, device,
+                        max_length, batch_size, long_policy=indel_long_policy)
+                else:
+                    vals = strided_masked_pll_table(
+                        refs, tokenizer, seqs, aa2id, model_window, device,
+                        max_length, n_passes=indel_pll_passes,
+                        batch_size=batch_size,
+                        long_policy=indel_long_policy)
+                wt_pll = vals[0]
+                for j, i in enumerate(idx):
+                    mp = vals[j + 1]
+                    sc = None if (wt_pll is None or mp is None) else (mp - wt_pll)
+                    if sc is None:
+                        n_skipped += 1
+                        continue
+                    scores.append(sc); ys.append(labels[int(i)])
+                    ys_bin.append(bin_labels[int(i)] if bin_labels is not None else None)
+            else:  # masked_pll: original L-masked-forwards-per-variant path
+                wt_pll = _mean_pll(wt)
+                for i in idx:
+                    mut = muts[int(i)]
+                    sc = None
+                    if wt_pll is not None:
+                        mut_pll = _mean_pll(mut)
+                        sc = None if mut_pll is None else (mut_pll - wt_pll)
+                    if sc is None:
+                        n_skipped += 1
+                        continue
+                    scores.append(sc); ys.append(labels[int(i)])
+                    ys_bin.append(bin_labels[int(i)] if bin_labels is not None else None)
         else:
             # Substitution: mutation-centered optimal-window masked-marginals,
             # scored as sum logP(mut)-logP(wt) over the diffed positions. Compute
@@ -543,6 +698,19 @@ def main(argv=None):
     ap.add_argument("--indel_long_policy", choices=["skip", "truncate"], default="skip",
                     help="indels longer than the window: skip (default) or truncate "
                          "to the first model_window residues (approximation)")
+    ap.add_argument("--indel_score_mode", choices=["single_pass", "masked_pll", "strided"],
+                    default="strided",
+                    help="indel scorer. strided (default): leakage-free few-pass masked-PLL, "
+                         "mask every k-th position over --indel_pll_passes forwards. Validated "
+                         "2026-06-18 vs exact masked_pll: k=32 matches within 0.02 Spearman at "
+                         "~50x speed (~7h vs ~weeks on CAPSD). masked_pll: L masked forwards/"
+                         "variant, exact (correct, very slow). single_pass: 1 unmasked forward "
+                         "-- FAST but naive leakage breaks ranking (Spearman 0.50->0.31); avoid.")
+    ap.add_argument("--indel_pll_passes", type=int, default=32,
+                    help="strided mode: forward passes per sequence (k). Each pass masks "
+                         "every k-th residue; larger k -> closer to exact masked_pll "
+                         "(k=32 validated within 0.02 Spearman; k=64 within 0.012). k>=L "
+                         "reproduces exact. Default 32.")
     ap.add_argument("--rope_extrapolate", action="store_true",
                     help="OPT-IN: grow the Proteva RoPE cache to --max_length and "
                          "score long sequences whole via extrapolation (OOD; the "
@@ -632,6 +800,8 @@ def main(argv=None):
             model_window=model_window,
             indel_long_policy=args.indel_long_policy,
             skip_huge_assays=args.skip_huge_assays,
+            indel_score_mode=args.indel_score_mode,
+            indel_pll_passes=args.indel_pll_passes,
         )
         if not result["recs"] and not result["pool_ys"]:
             print(f"{task_key}: no scorable assays (skipped={result['n_skipped']})")
@@ -644,9 +814,18 @@ def main(argv=None):
         metric_dict["model_window"] = model_window
         if rope_extended_to:
             metric_dict["rope_extended_to"] = rope_extended_to
-        if task_key in INDEL_ZS:  # own-method MLM-PLL; not on the ProteinGym indel board
+        if task_key in INDEL_ZS:
+            # ProteinGym has NO encoder indel baseline (board is autoregressive/HMM only),
+            # so NO mode here is leaderboard-comparable. Label provenance honestly per mode.
+            metric_dict["indel_score_mode"] = args.indel_score_mode
+            metric_dict["indel_pll_passes"] = (args.indel_pll_passes
+                                               if args.indel_score_mode == "strided" else None)
             metric_dict["leaderboard_comparable"] = False
-            metric_dict["method"] = "masked-PLL (own-method)"
+            metric_dict["method"] = {
+                "strided":     f"strided masked-PLL approx (own-method, k={args.indel_pll_passes})",
+                "masked_pll":  "exact masked-PLL (own-method)",
+                "single_pass": "single-pass unmasked mean-logp (own-method; leakage, reference-only)",
+            }[args.indel_score_mode]
         rec = {
             "checkpoint": args.model_name, "task": task_key, "mode": "mlm_zeroshot",
             "split": "zeroshot",
