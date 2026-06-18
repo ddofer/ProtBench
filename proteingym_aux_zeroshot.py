@@ -169,6 +169,98 @@ def _zscore(x):
     return (x - x.mean()) / sd if sd > 1e-8 else np.zeros_like(x)
 
 
+def _profile_llr(diffs, profile_at, aa2id):
+    """Unmasked WT-marginal LLR over the PSSM-distilled MLM head ("pssm_marginal").
+
+    The Proteva MLM head is trained to emit the MSA PSSM profile (PSSM distilled
+    into ``out.logits``; no separate head). For a variant with mutated positions
+    ``diffs`` = ``[(pos, wt_aa, mut_aa), ...]`` the score is the log-likelihood
+    ratio summed over those positions, read from a SINGLE unmasked WT forward:
+
+        sum_p  profile_logp[p][mut] - profile_logp[p][wt]
+
+    (the softmax log-Z cancels in the difference, so a full-vocab log-softmax row
+    is fine). ``profile_at(p)`` returns the (V,) unmasked log-prob row at residue
+    ``p`` or ``None`` if unavailable (long-WT windows). Non-canonical AAs are
+    skipped (contribute 0, matching cons_weighted_mlm); returns ``None`` if any
+    needed position's profile row is missing.
+    """
+    total = 0.0
+    for (p, w_aa, m_aa) in diffs:
+        if w_aa not in aa2id or m_aa not in aa2id:
+            continue
+        row = profile_at(p)
+        if row is None:
+            return None
+        total += float(row[aa2id[m_aa]] - row[aa2id[w_aa]])
+    return total
+
+
+def _combine_weighted(term_arrays, weights):
+    """Weighted ensemble: z-score each per-assay term, then weighted-sum.
+
+    ``term_arrays`` is a list of K raw per-variant score lists (same length);
+    ``weights`` is K floats (need not sum to 1). Returns a python list of the
+    combined per-variant scores. Each term is z-scored within the assay first so
+    terms on different scales (LLR vs symKL) combine comparably.
+    """
+    zs = np.vstack([_zscore(t) for t in term_arrays])      # (K, n)
+    w = np.asarray(weights, dtype=np.float64)
+    return list(w @ zs)
+
+
+def _simplex_grid(K, step=0.1):
+    """All weight vectors of length ``K`` on the probability simplex, grid ``step``.
+
+    e.g. K=3, step=0.5 -> (1,0,0),(.5,.5,0),(.5,0,.5),(0,1,0),(0,.5,.5),(0,0,1).
+    Used by :func:`_best_simplex_weights` for the in-sample weight ceiling.
+    """
+    n = int(round(1.0 / step))
+    pts = []
+
+    def rec(k, rem, acc):
+        if k == K - 1:
+            pts.append([*acc, rem / n])
+            return
+        for i in range(rem + 1):
+            rec(k + 1, rem - i, [*acc, i / n])
+
+    rec(0, n, [])
+    return pts
+
+
+def _best_simplex_weights(per_assay_terms, per_assay_ys, step=0.1):
+    """In-sample "cheat" weight ceiling for the seq ensemble.
+
+    Grid-searches simplex weights (sum to 1, granularity ``step``) over the K
+    terms to MAXIMISE the mean per-assay Spearman. Weights are fit on the same
+    assays they're scored on (deliberately in-sample -- it is an upper bound on
+    what any fixed weighting could achieve, NOT a held-out result). Each term is
+    z-scored within its assay before weighting (same convention as the shipped
+    ensemble). ``per_assay_terms[a]`` is a (K, n_a) raw-term array; returns
+    ``(best_weights_tuple, best_mean_spearman)``.
+    """
+    if not per_assay_terms:
+        return None, float("nan")
+    K = per_assay_terms[0].shape[0]
+    zt = [np.vstack([_zscore(t[k]) for k in range(K)]) for t in per_assay_terms]
+    best_w, best = None, -np.inf
+    for w in _simplex_grid(K, step):
+        wv = np.asarray(w, dtype=np.float64)
+        rs = []
+        for terms_z, y in zip(zt, per_assay_ys):
+            ens = wv @ terms_z
+            if np.std(ens) < 1e-12:
+                continue
+            r, _ = spearmanr(y, ens)
+            if not np.isnan(r):
+                rs.append(r)
+        m = float(np.mean(rs)) if rs else -np.inf
+        if m > best:
+            best, best_w = m, tuple(w)
+    return best_w, best
+
+
 def _opt_int(s):
     """argparse type: int, or None for 'None'/'none'/''/0/negative (disable cap)."""
     if s is None or str(s).strip().lower() in ("none", "", "null"):
@@ -183,12 +275,14 @@ def _opt_int(s):
 @torch.no_grad()
 def _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
                  aa2id, device, max_length, model_window, batch_size,
-                 di3_window, compute_di3):
+                 di3_window, compute_di3, ensemble_weights=(1.0, 1.0, 1.0)):
     """Score one assay; return per-variant {score_name: [values]} + labels.
 
-    All variants share one WT aux forward (di3 + cons) and one masked-marginal
-    table (mlm). ``di3_sad`` additionally does one unmasked forward per DISTINCT
-    mutant sequence (batched, capped, windowed). Returns None if <2 scorable.
+    All variants share one WT aux forward (di3 + cons + the unmasked profile)
+    and one masked-marginal table (mlm). ``pssm_marginal`` reuses the WT aux
+    forward's profile (no extra cost); ``di3_sad`` additionally does one unmasked
+    forward per DISTINCT mutant sequence (batched, capped, windowed). Returns
+    None if <2 scorable.
     """
     wt_bytes = np.frombuffer(wt.encode("latin-1"), dtype=np.uint8)
 
@@ -214,25 +308,39 @@ def _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
     # we crop a window per needed position (same policy as the MLM table). For
     # cons/di3 of a SHORT protein the single full forward suffices; for long WT
     # we fall back to per-position windows only where needed.
+    # The same unmasked WT forward that yields di3/cons also yields the per-
+    # position profile (out.logits = the PSSM-distilled head); keep it for the
+    # fast ``pssm_marginal`` (WT-marginal LLR). ``prof_at(p)`` -> (V,) log-prob
+    # row at residue p, or None where unavailable (long-WT windows).
     wt_cons = None
     if len(wt) <= model_window:
-        di3_full, cons_full, _ = _aux_forward(model, tokenizer, [wt], device, max_length)[0]
+        di3_full, cons_full, mlm_full = _aux_forward(model, tokenizer, [wt], device, max_length)[0]
         wt_cons = cons_full.numpy()
         wt_di3_full = di3_full  # (L,20)
+        _Lp = mlm_full.shape[0]
+
+        def prof_at(p, _prof=mlm_full, _Lp=_Lp):
+            return _prof[p] if 0 <= p < _Lp else None
     else:
         wt_di3_full = None  # long-WT: di3 windows computed lazily per mutant below
-        # cons weights need a per-position value; compute via windows over `need`.
+        # cons weights AND the profile need a per-position value; compute via
+        # windows over `need`.
         cons_arr = np.zeros(len(wt), dtype=np.float64)
         seen = np.zeros(len(wt), dtype=bool)
+        prof_rows = {}
         triples = [(p, *get_optimal_window(p, len(wt), model_window)) for p in sorted(need)]
         for b0 in range(0, len(triples), batch_size):
             chunk = triples[b0:b0 + batch_size]
             res = _aux_forward(model, tokenizer, [wt[st:en] for _, st, en in chunk],
                                device, max_length)
-            for (p, st, en), (_d, c, _m) in zip(chunk, res):
+            for (p, st, en), (_d, c, m) in zip(chunk, res):
                 cons_arr[p] = float(c[p - st]); seen[p] = True
+                prof_rows[p] = m[p - st]
         cons_arr[~seen] = cons_arr[seen].mean() if seen.any() else 0.0
         wt_cons = cons_arr
+
+        def prof_at(p, _rows=prof_rows):
+            return _rows.get(p)
 
     cons_w = _cons_weights(wt_cons)
 
@@ -341,7 +449,8 @@ def _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
                 di3_sad[i] = float(acc[slot])
 
     # --- 4. assemble per-variant scores --------------------------------------
-    out_scores = {"mlm_marginal": [], "cons_weighted_mlm": [], "di3_sad": []}
+    out_scores = {"mlm_marginal": [], "cons_weighted_mlm": [], "di3_sad": [],
+                  "pssm_marginal": []}
     ys, ys_bin, kept = [], [], []
     for i in idx:
         ii = int(i)
@@ -364,9 +473,14 @@ def _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
             cw += cons_w[p] * float(row[aa2id[m_aa]] - row[aa2id[w_aa]])
         if not ok:
             continue
+        # pssm_marginal (unmasked WT-marginal LLR over the PSSM-distilled head).
+        pssm = _profile_llr(diffs[ii], prof_at, aa2id)
+        if pssm is None:
+            continue
         out_scores["mlm_marginal"].append(mlm)
         out_scores["cons_weighted_mlm"].append(cw)
         out_scores["di3_sad"].append(di3_sad.get(ii, np.nan) if compute_di3 else np.nan)
+        out_scores["pssm_marginal"].append(pssm)
         ys.append(labels[ii])
         ys_bin.append(bin_labels[ii] if bin_labels is not None else None)
         kept.append(ii)
@@ -374,18 +488,35 @@ def _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
     if len(kept) < 2:
         return None
 
-    # ensemble: z-score each term across this assay's variants, sum.
+    # ensemble: z-score each term across this assay's variants, sum (incl di3).
     terms = [_zscore(out_scores["mlm_marginal"]),
              _zscore(out_scores["cons_weighted_mlm"])]
     if compute_di3 and np.isfinite(out_scores["di3_sad"]).all():
         terms.append(_zscore(out_scores["di3_sad"]))
     out_scores["ensemble"] = list(np.sum(terms, axis=0))
 
-    return {"scores": out_scores, "ys": ys, "ys_bin": ys_bin, "n": len(kept)}
+    # ensemble_seq: the FAST seq-only alternate — mlm + cons + pssm, no di3
+    # (weighted z-score sum). One masked table + one unmasked WT forward; cost is
+    # independent of #variants, so it runs at mlm speed even with di3 disabled.
+    seq_terms = np.vstack([out_scores["mlm_marginal"],
+                           out_scores["cons_weighted_mlm"],
+                           out_scores["pssm_marginal"]])
+    out_scores["ensemble_seq"] = _combine_weighted(
+        [out_scores["mlm_marginal"], out_scores["cons_weighted_mlm"],
+         out_scores["pssm_marginal"]], ensemble_weights)
+
+    return {"scores": out_scores, "ys": ys, "ys_bin": ys_bin, "n": len(kept),
+            "seq_terms": seq_terms}
 
 
-def _assay_metrics(name, score_vals, ys, ys_bin, problem_type, bin_present):
-    """Per-assay Spearman (+ optional AUC) for one score over one assay."""
+def _assay_metrics(name, score_vals, ys, ys_bin, problem_type, bin_present,
+                   negate_auc=False):
+    """Per-assay Spearman (+ optional AUC) for one score over one assay.
+
+    ``negate_auc`` negates the score before the AUC (clinical pathogenicity: bin
+    label 1 = pathogenic = deleterious = LOW LLR, so pathogenic must rank HIGH —
+    matches proteingym_mlm_zeroshot). DMS bin label 1 = high fitness, no flip.
+    """
     sv = np.asarray(score_vals, dtype=np.float64)
     if not np.isfinite(sv).all() or np.unique(sv[np.isfinite(sv)]).size < 2:
         return None
@@ -393,7 +524,8 @@ def _assay_metrics(name, score_vals, ys, ys_bin, problem_type, bin_present):
     primary = float(r) if not np.isnan(r) else 0.0
     auc = None
     if bin_present:
-        pairs = [(b, s) for b, s in zip(ys_bin, sv)
+        sv_auc = -sv if negate_auc else sv
+        pairs = [(b, s) for b, s in zip(ys_bin, sv_auc)
                  if b is not None and not np.isnan(float(b))]
         if len(pairs) == len(sv):
             yb = [int(round(float(b))) for b, _ in pairs]
@@ -410,7 +542,7 @@ def _assay_metrics(name, score_vals, ys, ys_bin, problem_type, bin_present):
 # --------------------------------------------------------------------------- #
 def _eval_task(task_key, model, tokenizer, refs, device, batch_size, max_length,
                model_window, max_assays, max_variants_per_assay, di3_window,
-               only_assays=None, compute_di3=True):
+               only_assays=None, compute_di3=True, ensemble_weights=(1.0, 1.0, 1.0)):
     cfg = TASKS[task_key]
     from datasets import load_dataset
 
@@ -425,11 +557,21 @@ def _eval_task(task_key, model, tokenizer, refs, device, batch_size, max_length,
     mut_col, wt_col = cfg.input_map["mutant"], cfg.input_map["wt"]
     muts = list(data[mut_col])
     wts = data[wt_col]
-    labels = np.asarray(data[cfg.label_col], dtype=object).astype(float)
+    # clinical_substitutions has a STRING annotation label -> map to {0,1}; DMS
+    # ships a float DMS_score directly.
+    label_map = getattr(cfg, "label_map", None)
+    if label_map:
+        labels = np.asarray([label_map.get(str(x), np.nan) for x in data[cfg.label_col]],
+                            dtype=float)
+    else:
+        labels = np.asarray(data[cfg.label_col], dtype=object).astype(float)
     groups = np.asarray(data[cfg.group_by])
     bin_labels = None
     if cfg.bin_col and cfg.bin_col in data.column_names:
         bin_labels = np.asarray(data[cfg.bin_col], dtype=float)
+    elif getattr(cfg, "problem_type", None) == "binary":
+        # clinical: the {0,1} annotation IS the binary label -> enables per-assay AUC.
+        bin_labels = labels
 
     aa2id = {aa: tokenizer.convert_tokens_to_ids(aa) for aa in _AA_LETTERS}
 
@@ -443,10 +585,13 @@ def _eval_task(task_key, model, tokenizer, refs, device, batch_size, max_length,
     if max_assays:
         assays = assays[:max_assays]
 
-    SCORE_NAMES = ["mlm_marginal", "di3_sad", "cons_weighted_mlm", "ensemble"]
+    # pssm_marginal + ensemble_seq are the new fast seq-only scores.
+    SCORE_NAMES = ["mlm_marginal", "di3_sad", "cons_weighted_mlm", "pssm_marginal",
+                   "ensemble", "ensemble_seq"]
     recs = {s: [] for s in SCORE_NAMES}
     timings = {s: 0.0 for s in SCORE_NAMES}
     per_assay_n = []
+    seq_terms_all, seq_ys_all = [], []  # for the in-sample weight ceiling
 
     n_assays_total = len(assays)
     for k_assay, g in enumerate(assays, start=1):
@@ -458,7 +603,7 @@ def _eval_task(task_key, model, tokenizer, refs, device, batch_size, max_length,
         t_all0 = time.time()
         res = _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
                            aa2id, device, max_length, model_window, batch_size,
-                           di3_window, compute_di3)
+                           di3_window, compute_di3, ensemble_weights=ensemble_weights)
         elapsed = time.time() - t_all0
         # Lightweight progress so long full-data runs aren't opaque.
         print(f"[aux] assay {k_assay}/{n_assays_total} {str(g):<45s} "
@@ -469,20 +614,31 @@ def _eval_task(task_key, model, tokenizer, refs, device, batch_size, max_length,
         # crude attribution: di3 dominates the per-mutant forwards; split the
         # measured wall-clock by counting distinct mutants vs the shared tables.
         timings["di3_sad"] += elapsed  # whole-assay (di3 is the marginal extra cost)
-        for s in ["mlm_marginal", "cons_weighted_mlm", "ensemble"]:
+        for s in ["mlm_marginal", "cons_weighted_mlm", "pssm_marginal",
+                  "ensemble", "ensemble_seq"]:
             timings[s] += 0.0
         per_assay_n.append(res["n"])
+        seq_terms_all.append(res["seq_terms"])
+        seq_ys_all.append(np.asarray(res["ys"], dtype=np.float64))
 
         for s in SCORE_NAMES:
             m = _assay_metrics(s, res["scores"][s], res["ys"], res["ys_bin"],
-                               cfg.problem_type, bin_labels is not None)
+                               cfg.problem_type, bin_labels is not None,
+                               negate_auc=(cfg.problem_type == "binary"))
             if m is not None:
                 m["assay"] = str(g)
                 m["n"] = res["n"]
                 recs[s].append(m)
 
+    # "Cheat" ceiling: best fixed simplex weights over (mlm,cons,pssm), fit
+    # in-sample on these assays (upper bound, NOT held out — see docstring).
+    best_w, best_sp = _best_simplex_weights(seq_terms_all, seq_ys_all, step=0.1)
+
     return {"task": task_key, "recs": recs, "timings": timings,
-            "n_assays": len(per_assay_n)}
+            "n_assays": len(per_assay_n),
+            "ensemble_weights": list(ensemble_weights),
+            "best_seq_weights": list(best_w) if best_w is not None else None,
+            "best_seq_spearman": best_sp}
 
 
 def main(argv=None):
@@ -509,10 +665,19 @@ def main(argv=None):
                     help="half-width k of the symKL window around each mutated site.")
     ap.add_argument("--no_di3", action="store_true",
                     help="skip the expensive di3_sad per-mutant forwards; run only "
-                         "the cheap mlm_marginal + cons_weighted_mlm + ensemble path.")
+                         "the cheap mlm_marginal + cons_weighted_mlm + pssm_marginal "
+                         "+ ensemble_seq path (fully fast, mlm-speed).")
+    ap.add_argument("--ensemble_weights", type=str, default="1,1,1",
+                    help="3 comma-separated weights (mlm,cons,pssm) for the fast "
+                         "ensemble_seq (terms z-scored first; need not sum to 1). "
+                         "Default equal. The report also prints the in-sample best "
+                         "weights as a ceiling.")
     ap.add_argument("--sanity_check", action="store_true", default=True,
                     help="verify the canon AA token-id map recovers WT residues.")
     args = ap.parse_args(argv)
+    ens_w = tuple(float(x) for x in str(args.ensemble_weights).split(","))
+    if len(ens_w) != 3:
+        raise SystemExit(f"--ensemble_weights needs 3 values (mlm,cons,pssm), got {ens_w}")
 
     from plm.bench.protein_benchmark_suite import load_model
     from plm.bench.wt_test_time_training import resolve_mlm_head
@@ -554,7 +719,7 @@ def main(argv=None):
                             args.batch_size, args.max_length, model_window,
                             args.max_assays, args.max_variants_per_assay,
                             args.di3_window, only_assays=args.assays,
-                            compute_di3=not args.no_di3)
+                            compute_di3=not args.no_di3, ensemble_weights=ens_w)
         _report(task_key, result, args, out)
     return 0
 
@@ -609,10 +774,19 @@ def _report(task_key, result, args, out):
     base = summary.get("mlm_marginal", {}).get("mean_spearman", float("nan"))
     print(f"  (baseline mlm_marginal mean Spearman = {base:.4f}; "
           f"aux lift = score - baseline)")
+    # ensemble_seq weight ceiling (in-sample upper bound; the shipped ensemble_seq
+    # uses --ensemble_weights, default equal).
+    bw, bsp = result.get("best_seq_weights"), result.get("best_seq_spearman")
+    if bw is not None:
+        print(f"  ensemble_seq weights used (mlm,cons,pssm) = "
+              f"{tuple(result.get('ensemble_weights'))}; in-sample BEST = "
+              f"{tuple(round(x, 2) for x in bw)} -> Spearman {bsp:.4f} (ceiling, not held out)")
     (out / f"summary_{Path(args.model_name).name}__{task_key}.json").write_text(
         json.dumps({"task": task_key, "model": args.model_name,
                     "summary": summary, "di3_window": args.di3_window,
-                    "max_variants_per_assay": args.max_variants_per_assay}, indent=2))
+                    "max_variants_per_assay": args.max_variants_per_assay,
+                    "ensemble_weights": result.get("ensemble_weights"),
+                    "best_seq_weights": bw, "best_seq_spearman": bsp}, indent=2))
     print(f"  -> JSONL: {jsonl_path}")
 
 
