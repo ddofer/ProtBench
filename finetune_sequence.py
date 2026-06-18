@@ -285,18 +285,31 @@ def _build_compute_metrics(cfg: TaskConfig):
 
     def cm(eval_pred):
         preds_logits, labels = eval_pred
-        preds = np.argmax(preds_logits, axis=-1)
+        logits = np.array(preds_logits, dtype=np.float64)
+        preds = np.argmax(logits, axis=-1)
+        labels = np.array(labels)
         out: Dict[str, float] = {
             "Accuracy": float(accuracy_score(labels, preds)),
             "F1_Macro": float(f1_score(labels, preds, average="macro", zero_division=0)),
         }
-        if pt == "binary":
-            num_labels = np.array(preds_logits).shape[-1]
-            if num_labels == 2 and len(set(labels)) > 1:
-                logits = np.array(preds_logits)
-                exp = np.exp(logits - logits.max(axis=-1, keepdims=True))
-                probs = exp / exp.sum(axis=-1, keepdims=True)
-                out["AUC"] = float(roc_auc_score(labels, probs[:, 1]))
+        # AUC: binary uses the positive-class prob; multiclass uses one-vs-rest
+        # macro AUC (matches the linear probe's reporting so LoRA is comparable).
+        num_labels = logits.shape[-1]
+        if len(np.unique(labels)) > 1:
+            exp = np.exp(logits - logits.max(axis=-1, keepdims=True))
+            probs = exp / exp.sum(axis=-1, keepdims=True)
+            try:
+                if num_labels == 2:
+                    out["AUC"] = float(roc_auc_score(labels, probs[:, 1]))
+                else:
+                    # explicit labels so classes absent from a given eval split
+                    # don't shift the column mapping; skip if still degenerate.
+                    out["AUC"] = float(
+                        roc_auc_score(labels, probs, multi_class="ovr",
+                                      average="macro", labels=np.arange(num_labels))
+                    )
+            except ValueError:
+                pass  # a class with no positive eval samples -> AUC undefined
         return out
 
     return cm
