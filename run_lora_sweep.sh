@@ -3,14 +3,14 @@
 # Trainer's tqdm bar is visible live (the old /tmp scripts piped to log files,
 # which kills the bar). Each window also tees to a log.
 #
-#   FlashAttention-2 (proteva): PROTEVA_FT_FLASH=fa2-varlen routes the padded
-#   batch through model.py's varlen path (mask -> cu_seqlens, unpad, FA2, scatter
-#   — validated parity + finite backward). It forces bf16 attention, so it is set
-#   ONLY for classification tasks; regression keeps --fp32 + dense SDPA (the fp32
-#   forward is needed to rank fine fitness differences).
+#   Attention: dense SDPA (the head's default). FlashAttention-2 was tested and
+#   is SLOWER for these padded FT batches (the varlen path's per-layer GPU sync +
+#   unpad overhead beat its kernel savings, and the FFN runs full-length anyway),
+#   so it is not used. See hf/sequence_classification.py:_FINETUNE_FLASH_MODE.
 #
 #   batch 64 + lr 3e-4 are the argparse defaults now (sqrt-scaled from the old
 #   batch-8 / lr-1e-4); max 10 epochs + early-stop patience 1 are passed below.
+#   Regression tasks override to --fp32 + r16/a32; classification uses r64/a64.
 #
 # Usage:  bash bench/run_lora_sweep.sh <model_tag> [gpu]
 #   model_tag in {vanilla,step0,epoch1,epoch3}   (vanilla has no seq-cls head)
@@ -32,17 +32,17 @@ declare -A MODEL=(
 )
 MDL=${MODEL[$TAG]:?unknown tag}
 
-# Regression -> fp32 + flash OFF (ranking needs the fp32 forward). r16/a32.
-# Everything else -> bf16 classification + flash fa2-varlen. r64/a64.
+# Regression -> --fp32 (ranking needs the fp32 forward) + r16/a32.
+# Everything else -> bf16 classification + r64/a64.
 REGR="beta_lactamase_peer fluorescence enzyme_catalytic_efficiency variant_effect chezod_disorder"
 SEQ_TASKS="remote_homology solubility peptide_hla ec_classification subcellular_loc signalp_binary metal_ion_binding profet_np_sp_cleaved beta_lactamase_peer fluorescence enzyme_catalytic_efficiency variant_effect"
 
 SESSION="lora_$TAG"
 tmux new-session -d -s "$SESSION" 2>/dev/null || true
 for t in $SEQ_TASKS; do
-  if [[ " $REGR " == *" $t "* ]]; then PREC="--fp32"; FLASH="off"; R=16; A=32
-  else PREC=""; FLASH="fa2-varlen"; R=64; A=64; fi
-  CMD="PROTEVA_FT_FLASH=$FLASH CUDA_VISIBLE_DEVICES=$GPU $PY $BENCH/finetune_sequence.py \
+  if [[ " $REGR " == *" $t "* ]]; then PREC="--fp32"; R=16; A=32
+  else PREC=""; R=64; A=64; fi
+  CMD="CUDA_VISIBLE_DEVICES=$GPU $PY $BENCH/finetune_sequence.py \
     --model_name '$MDL' --task $t --mode lora \
     --num_train_epochs 10 --learning_rate 3e-4 $PREC \
     --lora_r $R --lora_alpha $A --early_stop --early_stop_patience 1 \
