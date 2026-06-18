@@ -23,7 +23,6 @@ import numpy as np
 import transformers
 from transformers import (
     AutoModelForTokenClassification,
-    AutoTokenizer,
     DataCollatorForTokenClassification,
     Trainer,
 )
@@ -52,7 +51,7 @@ logger = logging.getLogger(__name__)
 _SS3_ALPHABET = "HEC"
 _DISORDER_ALPHABET = "01"
 
-_RESIDUE_TASKS = ("ss3", "disorder", "signal_peptide")
+_RESIDUE_TASKS = ("ss3", "disorder", "signal_peptide", "conservation_flip")
 
 
 def _decode_labels(task: str, label_str: Any) -> List[int]:
@@ -62,6 +61,15 @@ def _decode_labels(task: str, label_str: Any) -> List[int]:
         return decode_string_label(str(label_str), _DISORDER_ALPHABET)
     if task == "signal_peptide":
         return decode_csv_label(str(label_str))
+    if task == "conservation_flip":
+        # Per-residue integer class labels: already-tokenized list, or a
+        # comma-separated / digit string (mirrors the linear suite's decoder).
+        if isinstance(label_str, (list, tuple)):
+            return [int(x) for x in label_str]
+        s = str(label_str)
+        if "," in s:
+            return [int(t) for t in s.split(",") if t.strip()]
+        return [int(c) for c in s if c.isdigit()]
     raise ValueError(f"Unknown residue task: {task}")
 
 

@@ -1,24 +1,18 @@
-"""Canonical MLM masked-marginal ProteinGym zero-shot (ESM-1v style).
+"""Canonical MLM ProteinGym zero-shot (ESM-1v style).
 
-Substitutions only (indels skipped). Output JSONL read by collect_bench_results.
+Scores all four ProteinGym ZS tasks: substitutions via masked-marginal
+(sum of per-position logP(mut)-logP(wt) from the WT masked table) and indels
+via length-normalized pseudo-log-likelihood delta (mean PLL(mut) - PLL(WT)).
+Long sequences use a mutation-centered optimal window to stay in-distribution.
+Output JSONL is read by collect_bench_results.
 
-Deviations from the reference template:
-- load_model_and_tokenizer does not exist; uses load_model() from
-  protein_benchmark_suite which returns (model_obj, is_sbert, device).
-  For AMPLIFY model_obj = (tokenizer, model).
-- resolve_mlm_head(model, tokenizer) takes two arguments (confirmed in
-  wt_test_time_training.py line 68). Returns MLMHeadRefs with .forward_logits
-  and .mask_token_id; there is no separate mlm module.
-- masked_marginal_logprob_table calls refs.forward_logits(input_ids, mask)
-  instead of mlm(input_ids=...).
-- write_jsonl_record signature is (out_dir, prefix, ckpt, record) — 4 args.
-  Note: writes to out_dir.parent / f"{prefix}_{safe_ckpt(ckpt)}.jsonl".
-- Data loading mirrors protein_benchmark_suite.prepare_data for proteingym_zeroshot:
-  load with data_dir kwarg, take train_split, columns from cfg.input_map
-  ("mutant"->mutated_sequence, "wt"->target_seq), label_col, group_by.
+Uses load_model() from protein_benchmark_suite (returns (model_obj, is_sbert,
+device); for AMPLIFY model_obj=(tokenizer, model)) and resolve_mlm_head(model,
+tokenizer) -> MLMHeadRefs(.forward_logits, .mask_token_id). Data loading mirrors
+protein_benchmark_suite.prepare_data for proteingym_zeroshot.
 """
 from __future__ import annotations
-import argparse, time
+import argparse, json, time
 import numpy as np, torch
 from pathlib import Path
 from scipy.stats import spearmanr
@@ -35,6 +29,32 @@ INDEL_ZS = [
     "proteingym_clinical_indels_zeroshot",
 ]
 ALL_ZS = SUBSTITUTION_ZS + INDEL_ZS
+
+
+def _detect_native_context(model, tokenizer, fallback=1024):
+    """The model's trained context length (tokens), read from config — NOT
+    hardcoded — so each encoder windows at ITS OWN native length: Proteva 1024
+    (encoder.config.max_position, its continued-pretraining length), vanilla
+    AMPLIFY 2048 (config.max_length). Tries, in priority order, the encoder's
+    max_position, then the model config's max_position_embeddings / n_positions /
+    max_length, then the tokenizer's model_max_length. Each candidate is sanity-
+    bounded to [16, 1e6] to reject HF's int-sentinel (1e30) model_max_length and
+    bogus values; falls back to ``fallback`` only if nothing sane is found.
+    """
+    cands = []
+    enc = getattr(model, "encoder", None)
+    ecfg = getattr(enc, "config", None)
+    cfg = getattr(model, "config", None)
+    for obj, attr in [(ecfg, "max_position"),
+                      (cfg, "max_position_embeddings"),
+                      (cfg, "n_positions"),
+                      (cfg, "max_length"),
+                      (cfg, "max_position"),
+                      (tokenizer, "model_max_length")]:
+        v = getattr(obj, attr, None) if obj is not None else None
+        if isinstance(v, int) and 16 <= v <= 1_000_000:
+            cands.append(int(v))
+    return cands[0] if cands else fallback
 
 
 def score_substitution(wt, mut, logP, aa2id):
@@ -68,6 +88,8 @@ def pll_from_table(seq, logP, aa2id):
     """
     if len(seq) > logP.shape[0]:
         return None  # truncated; skip variant
+    if hasattr(logP, "numpy"):
+        logP = logP.numpy()  # torch->numpy: per-position float() is ~100x cheaper
     s, n = 0.0, 0
     for i, a in enumerate(seq):
         if a in aa2id:
@@ -97,33 +119,49 @@ def get_optimal_window(mut_pos, seq_len, model_window):
 
 
 @torch.no_grad()
-def single_position_masked_logp(refs, tokenizer, seq, local_res_idx, device, max_length):
-    """log-softmax vocab row for ONE masked residue (``local_res_idx``-th residue
-    of ``seq``). One forward pass; used by the windowed long-sequence path.
+def windowed_logp_table(refs, tokenizer, wt, positions, model_window, device,
+                        max_length, batch_size=32):
+    """Batched mutation-centered windowed masked-marginals for the long-WT path.
 
-    ``seq`` is the already-cropped window, so ``local_res_idx`` is the mutated
-    position re-based into the crop. Returns the [V] log-prob vector (cpu) or None
-    if the position falls outside the (truncated) token range.
+    For each residue position in ``positions``, score it from a window centered on
+    it (``get_optimal_window``) with that residue masked, batching B windows per
+    forward. The long-WT path is the ProteinGym bottleneck: ~WT-length batch-1
+    forwards per assay otherwise (16/217 DMS-subs assays exceed the context).
+    Returns ``{pos: [V] log-prob row (cpu)}``; positions outside the (truncated)
+    token range are omitted, so a later ``logp_at`` lookup returns None and the
+    variant is skipped.
     """
-    enc = tokenizer(seq, truncation=True, max_length=max_length, return_tensors="pt")
-    ids = enc["input_ids"][0]
-    am = enc.get("attention_mask", None)
-    am = am[0] if am is not None else None
+    out = {}
     special_set = set(refs.special_ids)
-    res_tok = [t for t, x in enumerate(ids.tolist()) if x not in special_set]
-    if local_res_idx >= len(res_tok):
-        return None
-    tpos = res_tok[local_res_idx]
-    b = ids.clone()
-    b[tpos] = refs.mask_token_id
-    b = b.unsqueeze(0).to(device)
-    bm = am.unsqueeze(0).to(device) if am is not None else None
-    lg = refs.forward_logits(b, bm)
-    return torch.log_softmax(lg.float(), dim=-1)[0, tpos].cpu()
+    triples = [(p, *get_optimal_window(p, len(wt), model_window)) for p in positions]
+    for b0 in range(0, len(triples), batch_size):
+        chunk = triples[b0:b0 + batch_size]
+        seqs = [wt[st:en] for (_p, st, en) in chunk]
+        enc = tokenizer(seqs, padding=True, truncation=True,
+                        max_length=max_length, return_tensors="pt")
+        ids = enc["input_ids"]
+        am = enc.get("attention_mask", None)
+        keep = []  # (batch_row, pos, tpos)
+        for j, (p, st, en) in enumerate(chunk):
+            local_idx = p - st
+            res_tok = [t for t, x in enumerate(ids[j].tolist()) if x not in special_set]
+            if local_idx >= len(res_tok):
+                continue  # outside truncated range -> omit (logp_at -> None)
+            tpos = res_tok[local_idx]
+            ids[j, tpos] = refs.mask_token_id
+            keep.append((j, p, tpos))
+        if not keep:
+            continue
+        lg = refs.forward_logits(ids.to(device),
+                                 am.to(device) if am is not None else None)
+        lsm = torch.log_softmax(lg.float(), dim=-1).cpu()
+        for (j, p, tpos) in keep:
+            out[p] = lsm[j, tpos].numpy()  # numpy row: fast scalar indexing in the scorer
+    return out
 
 
 @torch.no_grad()
-def masked_marginal_logprob_table(refs, tokenizer, wt, device, max_length=2048, batch_size=64):
+def masked_marginal_logprob_table(refs, tokenizer, wt, device, max_length=1024, batch_size=64):
     """[L,V] log-softmax table; row i = log p(aa | WT with residue i masked).
 
     Uses refs.forward_logits (MLMHeadRefs callable) instead of a bare model
@@ -158,13 +196,16 @@ def masked_marginal_logprob_table(refs, tokenizer, wt, device, max_length=2048, 
         # forward_logits returns [B, T, V]
         lg = refs.forward_logits(batch_ids, batch_mask)
         lsm = torch.log_softmax(lg.float(), dim=-1)
-        for j, tpos in enumerate(chunk):
-            logP[start + j] = lsm[j, tpos].cpu()
+        # Gather each row's masked position on-GPU, then ONE transfer to CPU
+        # (a per-position .cpu() does B syncs/batch -> dominates the build).
+        idx_b = torch.arange(B, device=lsm.device)
+        idx_t = torch.as_tensor(chunk, device=lsm.device)
+        logP[start:start + B] = lsm[idx_b, idx_t].cpu()
 
     return logP
 
 
-def _score_substitution_windowed(wt, mut, logp_at, aa2id):
+def _score_substitution_windowed(wt, mut, logp_at, aa2id, wt_bytes=None):
     """Substitution score = sum over mutated positions of logP(mut) - logP(wt).
 
     ``logp_at(p)`` returns the [V] masked log-prob row for residue position ``p``
@@ -172,11 +213,21 @@ def _score_substitution_windowed(wt, mut, logp_at, aa2id):
     returns None if that position is unscorable. Mutated positions are found by
     diffing wt vs mut, so it works for single- and multi-mutants. Returns None
     if any required position is unscorable.
+
+    The diff is vectorized (numpy byte compare) so the per-variant cost is
+    O(#mutations), not O(len(wt)) — critical when scoring all ~2.5M ProteinGym
+    variants. ``wt_bytes`` (the WT as uint8, constant per assay) is precomputed by
+    the caller to avoid re-encoding the WT for every variant.
     """
+    if len(wt) != len(mut):
+        return None
+    if wt_bytes is None:
+        wt_bytes = np.frombuffer(wt.encode("latin-1"), dtype=np.uint8)
+    mut_bytes = np.frombuffer(mut.encode("latin-1"), dtype=np.uint8)
     s = 0.0
-    for p in range(len(wt)):
+    for p in np.nonzero(wt_bytes != mut_bytes)[0].tolist():
         w, m = wt[p], mut[p]
-        if w == m or w not in aa2id or m not in aa2id:
+        if w not in aa2id or m not in aa2id:
             continue
         row = logp_at(p)
         if row is None:
@@ -185,15 +236,22 @@ def _score_substitution_windowed(wt, mut, logp_at, aa2id):
     return s
 
 
+def _filter_huge_assays(assays, g2idx, thresh):
+    """Drop assays with more than ``thresh`` variants (indel runtime scales with
+    variant count). Returns (kept_assays, n_dropped)."""
+    kept = np.asarray([a for a in assays if len(g2idx[str(a)]) <= thresh])
+    return kept, len(assays) - len(kept)
+
+
 def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
                max_assays=None, max_variants_per_assay=None,
-               model_window=1022, indel_long_policy="skip"):
+               model_window=1022, indel_long_policy="skip",
+               skip_huge_assays=None):
     cfg = TASKS[task_key]
     is_indel = task_key in INDEL_ZS
     from datasets import load_dataset
 
-    # Mirror protein_benchmark_suite.prepare_data for proteingym_zeroshot:
-    # pass data_dir kwarg and take the train split.
+    # Mirror protein_benchmark_suite.prepare_data: data_dir kwarg + train split.
     load_kwargs = {}
     if cfg.data_dir:
         load_kwargs["data_dir"] = cfg.data_dir
@@ -212,7 +270,12 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
 
     mut_col = cfg.input_map["mutant"]   # "mutated_sequence"
     wt_col  = cfg.input_map["wt"]       # "target_seq"
-    muts    = data[mut_col]
+    # Materialize muts to a Python list ONCE. data[col] is a lazy HF Arrow Column;
+    # per-element column[i] is ~3ms (Arrow lookup), and muts is indexed per variant
+    # (millions of times) -> it dominated runtime. list() pays ~20s once, then each
+    # access is ~1us (2500x faster). wts is accessed only once per assay (217x), so
+    # it stays lazy (materializing it would waste ~20s for no gain).
+    muts    = list(data[mut_col])
     wts     = data[wt_col]
     labels_raw = np.asarray(data[cfg.label_col], dtype=object)
     groups  = np.asarray(data[cfg.group_by])
@@ -228,18 +291,34 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
     bin_labels = None
     if cfg.bin_col and cfg.bin_col in data.column_names:
         bin_labels = np.asarray(data[cfg.bin_col], dtype=float)
-    auc_label_source = "dms_score_bin" if bin_labels is not None else "median"
 
     # Build aa->token_id map for the 20 canonical amino acids
     aa2id = {aa: tokenizer.convert_tokens_to_ids(aa) for aa in "ACDEFGHIKLMNPQRSTVWY"}
 
-    per_assay, per_assay_auc, n_skipped, n_auc_fallback = [], [], 0, 0
+    # Per-assay records (keyed by assay id) so aggregation is a separate, offline
+    # step — flat vs ProteinGym hierarchical vs pooled can be recomputed without
+    # rescoring. pool_* accumulate raw (label, -score) across genes for the pooled
+    # clinical-indel AUC (ProteinGym pools genes there; per-gene counts too small).
+    recs, pool_ys, pool_scores, n_skipped = [], [], [], 0
+    # Build the assay -> row-indices map in ONE pass (O(N)); a per-assay
+    # np.where(groups==g) is O(N) each -> O(N*assays) over ~2.5M rows.
+    from collections import defaultdict
+    g2idx = defaultdict(list)
+    for _i, _g in enumerate(groups.tolist()):
+        g2idx[str(_g)].append(_i)
     assays = np.unique(groups)
     if max_assays:
         assays = assays[:max_assays]
+    if is_indel and max_variants_per_assay is None and skip_huge_assays:
+        # Only meaningful for indels (subs share one WT table, so variant count
+        # doesn't drive runtime).
+        assays, n_dropped = _filter_huge_assays(assays, g2idx, skip_huge_assays)
+        if n_dropped:
+            print(f"skip_huge_assays={skip_huge_assays}: dropped {n_dropped} "
+                  f"indel assay(s) over the variant cap")
 
     for g in assays:
-        idx = np.where(groups == g)[0]
+        idx = np.asarray(g2idx[str(g)], dtype=int)
         # Each long-sequence forward (per-mutant indel PLL, or per-site window) is
         # its own pass — cap variants so a multi-thousand-variant assay doesn't
         # dominate runtime. Short substitution assays share one WT table (cheap).
@@ -252,8 +331,26 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
             # Indel: length-normalized PLL(mut) - PLL(WT). No mutation position to
             # window on (mutant == "N/A"), so long indels are skipped (default) or
             # truncated to the native window (opt-in).
+            def _center_crop(seq, w):
+                # Center crop keeps the edit region centered for most indels; the old
+                # head crop (seq[:w]) truncated WT and mutant at different absolute
+                # offsets, so PLL(mut)-PLL(WT) compared non-corresponding subsequences.
+                if len(seq) <= w:
+                    return seq
+                st = (len(seq) - w) // 2
+                return seq[st:st + w]
             def _mean_pll(seq):
-                s = seq[:model_window] if indel_long_policy == "truncate" else seq
+                # Skip the wasted full-length table build for over-length seqs under
+                # the default "skip" policy: pll_from_table returns None for them
+                # anyway, but the old code first built+discarded a ~max_length table
+                # (~21% of clinical_indels forwards, and the 44GB long-seq spikes).
+                # Behavior-identical to the old code under "skip".
+                if len(seq) > model_window:
+                    if indel_long_policy != "truncate":
+                        return None
+                    s = _center_crop(seq, model_window)
+                else:
+                    s = seq
                 tbl = masked_marginal_logprob_table(refs, tokenizer, s, device, max_length, batch_size)
                 return pll_from_table(s, tbl, aa2id)
             wt_pll = _mean_pll(wt)
@@ -269,29 +366,36 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
                 scores.append(sc); ys.append(labels[int(i)])
                 ys_bin.append(bin_labels[int(i)] if bin_labels is not None else None)
         else:
-            # Substitution: mutation-centered optimal-window masked-marginals.
-            # Short WT -> one shared full table; long WT -> per-site windowed
-            # forward (in-distribution, scores every variant — no skip).
-            short = len(wt) <= model_window
-            full_table = (masked_marginal_logprob_table(refs, tokenizer, wt, device, max_length, batch_size)
-                          if short else None)
-            pos_cache = {}
+            # Substitution: mutation-centered optimal-window masked-marginals,
+            # scored as sum logP(mut)-logP(wt) over the diffed positions. Compute
+            # logP ONLY at positions some variant mutates (the union). For a dense
+            # DMS that is every residue (== a full table, no waste); for SPARSE
+            # clinical assays (~25 variants over a long WT) it is a handful, vs a
+            # full L-forward table per assay — ~1.8M needless forwards across the
+            # 2525 clinical assays otherwise. windowed_logp_table centers a window
+            # on each position; for short WT the window is the whole sequence, so
+            # the value equals the full-table row (verified) — one path, short+long.
+            wt_bytes = np.frombuffer(wt.encode("latin-1"), dtype=np.uint8)
+            need = set()
+            for i in idx:
+                mut = muts[int(i)]
+                if len(mut) != len(wt):
+                    continue
+                mb = np.frombuffer(mut.encode("latin-1"), dtype=np.uint8)
+                need.update(int(p) for p in np.nonzero(wt_bytes != mb)[0])
+            pos_cache = windowed_logp_table(
+                refs, tokenizer, wt, sorted(need), model_window,
+                device, max_length, batch_size)
 
             def logp_at(p):
-                if short:
-                    return full_table[p] if p < full_table.shape[0] else None
-                if p not in pos_cache:
-                    st, en = get_optimal_window(p, len(wt), model_window)
-                    pos_cache[p] = single_position_masked_logp(
-                        refs, tokenizer, wt[st:en], p - st, device, max_length)
-                return pos_cache[p]
+                return pos_cache.get(p)
 
             for i in idx:
                 mut = muts[int(i)]
                 if len(wt) != len(mut):
                     n_skipped += 1  # a true indel mis-filed in a substitution task
                     continue
-                sc = _score_substitution_windowed(wt, mut, logp_at, aa2id)
+                sc = _score_substitution_windowed(wt, mut, logp_at, aa2id, wt_bytes=wt_bytes)
                 if sc is None:
                     n_skipped += 1
                     continue
@@ -301,16 +405,14 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
         if len(scores) < 2:
             continue
         if cfg.problem_type == "regression":
-            # ProteinGym leaderboard PRIMARY metric for DMS (subs AND indels) is
-            # Spearman on continuous fitness — directly comparable to the board.
+            # ProteinGym PRIMARY for DMS is Spearman on continuous fitness.
             r, _ = spearmanr(ys, scores)
-            per_assay.append(float(r) if not np.isnan(r) else 0.0)
-            # SECONDARY AUC (ProteinGym also reports this). Use the OFFICIAL
-            # DMS_score_bin labels when available (leaderboard-faithful). Pair each
-            # label with its score, dropping None/NaN, and require BOTH classes
-            # present; otherwise fall back to a per-assay median split and COUNT it
-            # so the provenance field stays honest.
-            official = None
+            primary = float(r) if not np.isnan(r) else 0.0
+            # SECONDARY AUC via the OFFICIAL DMS_score_bin only. No median-split
+            # fallback: ProteinGym drops single-class assays (emits NaN) rather
+            # than inventing a label, so a fabricated label would drift the AUC
+            # mean from the board. Assay with no usable bin label -> auc=None.
+            sec_auc = None
             if bin_labels is not None:
                 pairs = [(b, s) for b, s in zip(ys_bin, scores)
                          if b is not None and not np.isnan(float(b))]
@@ -318,34 +420,92 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
                     yb = [int(round(float(b))) for b, _ in pairs]
                     if len(set(yb)) == 2:
                         try:
-                            per_assay_auc.append(float(roc_auc_score(yb, [s for _, s in pairs])))
-                            official = True
+                            sec_auc = float(roc_auc_score(yb, [s for _, s in pairs]))
                         except ValueError:
-                            official = None
-            if official is None:
-                if bin_labels is not None:
-                    n_auc_fallback += 1  # official labels unusable for this assay
-                arr_ys = np.array(ys)
-                binary = (arr_ys > np.median(arr_ys)).astype(int)
-                if 0 < int(binary.sum()) < len(binary):
-                    try:
-                        per_assay_auc.append(float(roc_auc_score(binary, scores)))
-                    except ValueError:
-                        pass
+                            sec_auc = None
+            recs.append({"assay": str(g), "primary": primary, "auc": sec_auc, "n": len(scores)})
         else:
-            # Clinical pathogenicity: pathogenic = deleterious = lower log P(mut).
-            # Negate so pathogenic variants rank high (ProteinGym convention).
+            # Clinical pathogenicity: pathogenic = deleterious = lower log P(mut),
+            # so negate (pathogenic ranks high). Feed EVERY gene into the pool (a
+            # single-class gene still contributes to the pooled-both-class AUC used
+            # for clinical INDELS); keep a per-gene AUC for clinical SUBS.
+            neg = [-s for s in scores]
+            pool_ys.extend(ys); pool_scores.extend(neg)
             try:
-                per_assay.append(roc_auc_score(ys, [-s for s in scores]))
+                a = float(roc_auc_score(ys, neg))
+                recs.append({"assay": str(g), "primary": a, "auc": a, "n": len(scores)})
             except ValueError:
-                pass
+                pass  # single-class gene: no per-gene AUC, but it still feeds the pool
 
-    # Honest provenance: if any assay fell back to a median split (official labels
-    # unusable, e.g. single-class after the variant cap), say so rather than
-    # claiming pure DMS_score_bin.
-    if auc_label_source == "dms_score_bin" and n_auc_fallback:
-        auc_label_source = f"dms_score_bin+median_fallback({n_auc_fallback})"
-    return per_assay, per_assay_auc, n_skipped, auc_label_source
+    return {"task": task_key, "recs": recs,
+            "pool_ys": pool_ys, "pool_scores": pool_scores, "n_skipped": n_skipped}
+
+
+DMS_REF_DEFAULT = "/data/proteva/plm/bench/data/proteingym_ref/DMS_substitutions.csv"
+
+
+def _hier_mean(recs, field, ref_path):
+    """ProteinGym hierarchical mean (performance_DMS_benchmarks.py:296-309):
+    per-assay -> mean within (UniProt_ID, functional category) -> mean within
+    category -> mean across the 5 categories. Unweights proteins/functions with
+    many assays. Needs DMS_substitutions.csv (DMS_id -> UniProt_ID,
+    coarse_selection_type). Returns None if the ref is unavailable."""
+    import pandas as pd
+    ref = pd.read_csv(ref_path).set_index("DMS_id")[["UniProt_ID", "coarse_selection_type"]]
+    rows = []
+    for a in recs:
+        v = a.get(field)
+        if v is None or a["assay"] not in ref.index:
+            continue
+        rows.append((ref.loc[a["assay"], "UniProt_ID"],
+                     ref.loc[a["assay"], "coarse_selection_type"], float(v)))
+    if not rows:
+        return None
+    df = pd.DataFrame(rows, columns=["up", "cat", "v"])
+    per_cat = df.groupby(["up", "cat"])["v"].mean().reset_index().groupby("cat")["v"].mean()
+    return float(per_cat.mean())
+
+
+def aggregate_proteingym(result, dms_ref_path=DMS_REF_DEFAULT):
+    """Leaderboard-faithful aggregation of per-assay records:
+      DMS subs   -> hierarchical mean (UniProt_ID -> functional category) [board].
+      DMS indels -> flat assay-mean (own-method MLM-PLL; not on the board).
+      Clinical subs   -> per-gene mean AUC [board].
+      Clinical indels -> ONE pooled AUC across all genes [board].
+    Also reports the flat mean alongside the hierarchical for transparency."""
+    task = result["task"]; cfg = TASKS[task]; recs = result["recs"]
+    out = {"assays": len(recs), "variants_skipped": result["n_skipped"]}
+    if task == "proteingym_clinical_indels_zeroshot":
+        try:
+            out["eval_auc"] = float(roc_auc_score(result["pool_ys"], result["pool_scores"]))
+        except ValueError:
+            out["eval_auc"] = None
+        out["aggregation"] = "pooled"; out["n_pooled_variants"] = len(result["pool_ys"])
+        return out
+    if cfg.problem_type == "regression":
+        prim = [a["primary"] for a in recs]
+        aucs = [a["auc"] for a in recs if a["auc"] is not None]
+        out["eval_spearman_flat"] = float(np.mean(prim)) if prim else None
+        out["eval_auc_flat"] = float(np.mean(aucs)) if aucs else None
+        if task == "proteingym_dms_substitutions_zeroshot":
+            try:
+                out["eval_spearman"] = _hier_mean(recs, "primary", dms_ref_path)
+                out["eval_auc"] = _hier_mean(recs, "auc", dms_ref_path)
+                out["aggregation"] = "hierarchical(UniProt->category)"
+            except Exception as e:  # ref CSV missing/bad -> fall back to flat, say so
+                out["eval_spearman"] = out["eval_spearman_flat"]
+                out["eval_auc"] = out["eval_auc_flat"]
+                out["aggregation"] = f"flat(hierarchical-unavailable: {type(e).__name__})"
+        else:  # dms_indels: own-method, flat
+            out["eval_spearman"] = out["eval_spearman_flat"]
+            out["eval_auc"] = out["eval_auc_flat"]
+            out["aggregation"] = "flat(own-method)"
+        return out
+    # clinical subs: per-gene mean AUC
+    prim = [a["primary"] for a in recs if a["primary"] is not None]
+    out["eval_auc"] = float(np.mean(prim)) if prim else None
+    out["aggregation"] = "per_gene_mean"
+    return out
 
 
 def main(argv=None):
@@ -357,16 +517,29 @@ def main(argv=None):
     ap.add_argument("--output_dir", default="/data/proteva/plm/results/bench/discrim_mlmzs")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--batch_size", type=int, default=64)
-    ap.add_argument("--max_length", type=int, default=1024,
-                    help="token cap for a single forward; substitutions never "
-                         "exceed it (mutation-centered window), so 1024 = native.")
+    ap.add_argument("--max_length", type=int, default=None,
+                    help="token cap for a single forward (default: the model's "
+                         "native context, auto-detected — 1024 Proteva / 2048 "
+                         "AMPLIFY; substitutions are windowed to never exceed it).")
     ap.add_argument("--model_window", type=int, default=None,
                     help="residue window for long substitutions (default: "
                          "encoder.max_position-2, i.e. native context minus specials)")
+    ap.add_argument("--dms_ref", default=DMS_REF_DEFAULT,
+                    help="ProteinGym DMS_substitutions.csv for the hierarchical "
+                         "DMS aggregation (DMS_id -> UniProt_ID, functional category)")
     ap.add_argument("--max_assays", type=int, default=None)
-    ap.add_argument("--max_variants_per_assay", type=int, default=200,
-                    help="cap variants/assay (bounds per-mutant indel PLL + per-site "
-                         "windowed forwards; short-WT substitutions share one table)")
+    ap.add_argument("--skip_huge_assays", type=int, default=None, metavar="N",
+                    help="Skip indel assays with more than N variants. Off by default "
+                         "(run all assays, leaderboard-faithful). In very-fast mode "
+                         "pass --skip_huge_assays 10000 to skip CAPSD_AAV2S "
+                         "(225k + 25k variants) which alone account for ~80%% of "
+                         "DMS-indels compute. Has no effect on substitution tasks.")
+    ap.add_argument("--max_variants_per_assay", type=int, default=None,
+                    help="cap variants/assay (default None = ALL variants, "
+                         "leaderboard-faithful). Substitutions share one WT table so "
+                         "all-variants is ~free; only per-mutant indel PLL + per-site "
+                         "windowed forwards scale with this. Set a value only to bound "
+                         "a slow indel run.")
     ap.add_argument("--indel_long_policy", choices=["skip", "truncate"], default="skip",
                     help="indels longer than the window: skip (default) or truncate "
                          "to the first model_window residues (approximation)")
@@ -374,6 +547,10 @@ def main(argv=None):
                     help="OPT-IN: grow the Proteva RoPE cache to --max_length and "
                          "score long sequences whole via extrapolation (OOD; the "
                          "default mutation-centered window stays in-distribution)")
+    ap.add_argument("--bf16", action="store_true",
+                    help="load model in bfloat16 (forwards bf16; logits upcast to fp32 "
+                         "before log_softmax, so scores are safe). ~1.5-2x faster + half "
+                         "memory on indels — own-method, fp32 weights not needed.")
     ap.add_argument("--notes", default="")
     args = ap.parse_args(argv)
 
@@ -382,7 +559,10 @@ def main(argv=None):
     from protein_benchmark_suite import load_model
     from wt_test_time_training import resolve_mlm_head
 
-    model_obj, is_sbert, device = load_model(args.model_name, device=args.device)
+    import torch as _torch
+    _dt = _torch.bfloat16 if args.bf16 else None
+    model_obj, is_sbert, device = load_model(args.model_name, device=args.device,
+                                             torch_dtype=_dt)
     if is_sbert:
         raise SystemExit(
             f"Model {args.model_name!r} loaded as SentenceTransformer — "
@@ -390,17 +570,28 @@ def main(argv=None):
         )
     tokenizer, model = model_obj
     model.eval()
+    if args.bf16:
+        # Keep dense SDPA even in bf16 (avoid the fa2-varlen backend the bf16 runtime
+        # would otherwise select); logits are upcast to fp32 before log_softmax.
+        try:
+            model.encoder.config.flash_attn_mode = "off"
+        except Exception:
+            pass
 
     # resolve_mlm_head(model, tokenizer) -> MLMHeadRefs with .forward_logits + .mask_token_id
     refs = resolve_mlm_head(model, tokenizer)
     if refs is None:
         raise SystemExit(f"No MLM head for {args.model_name}")
 
-    # Native residue capacity = encoder.max_position - 2 special tokens (Proteva
-    # trained at 1024 -> 1022; AMPLIFY has no cap -> default to args.max_length-2).
-    enc_cfg = getattr(getattr(model, "encoder", None), "config", None)
-    native_max = getattr(enc_cfg, "max_position", None)
-    model_window = args.model_window or ((int(native_max) - 2) if native_max else (args.max_length - 2))
+    # Native context (tokens) read from the model — NOT hardcoded: Proteva 1024,
+    # vanilla AMPLIFY 2048. model_window = native residue capacity (native - 2
+    # special tokens). max_length defaults to the native context so each model
+    # uses its full trained window (AMPLIFY scores up to 2048 whole; only WT >
+    # native-2 is windowed). --max_length / --model_window override this.
+    native_max = _detect_native_context(model, tokenizer)
+    if args.max_length is None:
+        args.max_length = native_max
+    model_window = args.model_window or (native_max - 2)
 
     # Default: stay IN-DISTRIBUTION. Long substitutions are handled by the
     # mutation-centered window (<= model_window), so the forward never exceeds the
@@ -433,53 +624,46 @@ def main(argv=None):
             print(f"skip unknown task {task_key}")
             continue
         cfg = TASKS[task_key]
-        per_assay, per_assay_auc, n_skipped, auc_label_source = _eval_task(
+        result = _eval_task(
             task_key, refs, tokenizer, device,
             args.batch_size, args.max_length,
             max_assays=args.max_assays,
             max_variants_per_assay=args.max_variants_per_assay,
             model_window=model_window,
             indel_long_policy=args.indel_long_policy,
+            skip_huge_assays=args.skip_huge_assays,
         )
-        if not per_assay:
-            print(f"{task_key}: no scorable assays (skipped={n_skipped})")
+        if not result["recs"] and not result["pool_ys"]:
+            print(f"{task_key}: no scorable assays (skipped={result['n_skipped']})")
             continue
 
-        # ProteinGym primary: Spearman for DMS (regression), AUC for clinical (binary).
-        metric_key = "eval_spearman" if cfg.problem_type == "regression" else "eval_auc"
-        metric_dict = {
-            metric_key: float(np.mean(per_assay)),
-            "assays": len(per_assay),
-            "variants_skipped": n_skipped,
-            "window_strategy": "rope_extrapolation" if rope_extended_to else "optimal_window",
-            "model_window": model_window,
-        }
-        if per_assay_auc:
-            metric_dict["eval_auc"] = float(np.mean(per_assay_auc))
-            metric_dict["auc_label_source"] = auc_label_source if cfg.problem_type == "regression" else "annotation"
+        # Leaderboard-faithful aggregation (hierarchical DMS / pooled clinical-indel
+        # / per-gene clinical-subs); flat means kept alongside for transparency.
+        metric_dict = aggregate_proteingym(result, dms_ref_path=args.dms_ref)
+        metric_dict["window_strategy"] = "rope_extrapolation" if rope_extended_to else "optimal_window"
+        metric_dict["model_window"] = model_window
         if rope_extended_to:
-            metric_dict["rope_extended_to"] = rope_extended_to  # >1024 = extrapolation
+            metric_dict["rope_extended_to"] = rope_extended_to
+        if task_key in INDEL_ZS:  # own-method MLM-PLL; not on the ProteinGym indel board
+            metric_dict["leaderboard_comparable"] = False
+            metric_dict["method"] = "masked-PLL (own-method)"
         rec = {
-            "checkpoint": args.model_name,
-            "task": task_key,
-            "mode": "mlm_zeroshot",
+            "checkpoint": args.model_name, "task": task_key, "mode": "mlm_zeroshot",
             "split": "zeroshot",
             "model_type": getattr(getattr(model, "config", None), "model_type", None),
-            "metric": metric_dict,
-            "n_train": 0,
-            "n_eval": len(per_assay),
-            "notes": args.notes,
-            "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "metric": metric_dict, "n_train": 0, "n_eval": len(result["recs"]),
+            "notes": args.notes, "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
-        # write_jsonl_record(out_dir, prefix, ckpt, record) -> writes to
-        # out_dir.parent / f"mlm_zeroshot_{safe_ckpt(model_name)}.jsonl"
         jsonl_path = write_jsonl_record(out, "mlm_zeroshot", args.model_name, rec)
-        auc_str = f" auc={metric_dict['eval_auc']:.4f}" if per_assay_auc else ""
-        print(
-            f"{task_key}: {metric_key}={np.mean(per_assay):.4f}{auc_str} "
-            f"over {len(per_assay)} assays (variants skipped={n_skipped})"
-        )
-        print(f"  -> JSONL written: {jsonl_path}")
+        # Per-assay sidecar -> re-aggregate (flat/hierarchical/pooled) offline,
+        # never rescore. Keyed by DMS_id so it joins the reference CSV.
+        (out / f"per_assay_{task_key}.json").write_text(json.dumps(
+            {"task": task_key, "checkpoint": args.model_name, "recs": result["recs"]}))
+        prim_key = "eval_spearman" if cfg.problem_type == "regression" else "eval_auc"
+        print(f"{task_key}: {prim_key}={metric_dict.get(prim_key)} auc={metric_dict.get('eval_auc')} "
+              f"agg={metric_dict['aggregation']} over {len(result['recs'])} assays "
+              f"(skipped={result['n_skipped']})")
+        print(f"  -> JSONL: {jsonl_path}")
 
     return 0
 

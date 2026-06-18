@@ -25,7 +25,6 @@ import numpy as np
 import transformers
 from transformers import (
     AutoModelForSequenceClassification,
-    AutoTokenizer,
     DataCollatorWithPadding,
     Trainer,
 )
