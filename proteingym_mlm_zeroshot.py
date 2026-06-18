@@ -243,6 +243,21 @@ def _filter_huge_assays(assays, g2idx, thresh):
     return kept, len(assays) - len(kept)
 
 
+def _crop_or_skip(seq, model_window, long_policy):
+    """Center-crop an over-length sequence (truncate policy) or signal skip.
+
+    Returns (seq, ok). ok=False (skip -> None) when too long under any policy
+    other than "truncate". Center-crop mirrors the exact path's _center_crop.
+    Shared by the single_pass and strided per-sequence scorers.
+    """
+    if len(seq) <= model_window:
+        return seq, True
+    if long_policy != "truncate":
+        return seq, False
+    st = (len(seq) - model_window) // 2
+    return seq[st:st + model_window], True
+
+
 @torch.no_grad()
 def single_pass_pll_table(refs, tokenizer, seqs, aa2id, model_window, device,
                           max_length, batch_size=32, long_policy="skip"):
@@ -266,17 +281,8 @@ def single_pass_pll_table(refs, tokenizer, seqs, aa2id, model_window, device,
     or has no canonical positions.
     """
     canon_ids = set(aa2id.values())
-
-    def _crop(seq):
-        if len(seq) <= model_window:
-            return seq, True
-        if long_policy != "truncate":
-            return seq, False                 # skip -> None, same as masked path
-        st = (len(seq) - model_window) // 2   # center-crop, mirrors _center_crop
-        return seq[st:st + model_window], True
-
     out = [None] * len(seqs)
-    prepared = [_crop(s) for s in seqs]
+    prepared = [_crop_or_skip(s, model_window, long_policy) for s in seqs]
     work = [(k, s) for k, (s, ok) in enumerate(prepared) if ok]
     canon_t = torch.tensor(sorted(canon_ids), device=device)
 
@@ -322,17 +328,8 @@ def strided_masked_pll_table(refs, tokenizer, seqs, aa2id, model_window, device,
     mask_id = refs.mask_token_id
     special_set = set(refs.special_ids)
     canon_ids = set(aa2id.values())
-
-    def _crop(seq):
-        if len(seq) <= model_window:
-            return seq, True
-        if long_policy != "truncate":
-            return seq, False
-        st = (len(seq) - model_window) // 2
-        return seq[st:st + model_window], True
-
     out = [None] * len(seqs)
-    prepared = [_crop(s) for s in seqs]
+    prepared = [_crop_or_skip(s, model_window, long_policy) for s in seqs]
     work = [(k, s) for k, (s, ok) in enumerate(prepared) if ok]
 
     for b0 in range(0, len(work), batch_size):
