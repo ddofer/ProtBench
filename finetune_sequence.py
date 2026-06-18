@@ -53,15 +53,44 @@ def _select_by_column(ds_split, column: str, values: Tuple[str, ...]):
     return ds_split.filter(lambda r, c=column, vs=vset: r[c] in vs)
 
 
-def _load_task_splits(cfg: TaskConfig, max_train_samples: int | None):
-    from datasets import load_dataset
+def _resolve_local_dataset_path(dataset_name: str):
+    """Resolve a dataset specifier to a local path if it exists (mirrors probe logic)."""
+    from pathlib import Path
 
-    load_kwargs: Dict[str, Any] = {}
-    if cfg.dataset_config:
-        load_kwargs["name"] = cfg.dataset_config
-    if cfg.data_dir:
-        load_kwargs["data_dir"] = cfg.data_dir
-    ds = load_dataset(cfg.dataset, trust_remote_code=True, **load_kwargs)
+    dataset_path = Path(dataset_name).expanduser()
+    candidates = [dataset_path]
+    if not dataset_path.is_absolute():
+        candidates.append(Path(__file__).resolve().parent / dataset_path)
+    for p in candidates:
+        if p.is_dir():
+            return p.resolve()
+    return None
+
+
+def _load_task_splits(cfg: TaskConfig, max_train_samples: int | None):
+    from datasets import load_dataset, load_from_disk
+
+    local_path = _resolve_local_dataset_path(cfg.dataset)
+    if local_path is not None:
+        # Local Arrow/DatasetDict on disk — use load_from_disk with CheZOD fallback
+        try:
+            ds = load_from_disk(str(local_path))
+        except (FileNotFoundError, OSError, ValueError):
+            if local_path.name == "chezod":
+                # Import the same raw-JSON fallback the probe uses
+                import sys
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                from protein_benchmark_suite import _load_chezod_from_raw
+                ds = _load_chezod_from_raw(local_path)
+            else:
+                raise
+    else:
+        load_kwargs: Dict[str, Any] = {}
+        if cfg.dataset_config:
+            load_kwargs["name"] = cfg.dataset_config
+        if cfg.data_dir:
+            load_kwargs["data_dir"] = cfg.data_dir
+        ds = load_dataset(cfg.dataset, **load_kwargs)
 
     train = ds[cfg.train_split]
     eval_split = None
@@ -89,28 +118,46 @@ def _load_task_splits(cfg: TaskConfig, max_train_samples: int | None):
             train = train_sh.select(range(n_train))
             test_split = train_sh.select(range(n_train, n))
 
+    # ``full_train`` is kept unsampled so _label_meta can build the complete label
+    # vocabulary (val/test may contain classes absent from the sampled train rows).
+    full_train = train
     if max_train_samples is not None and train is not None:
         train = train.select(range(min(len(train), max_train_samples)))
 
-    return train, eval_split, test_split
+    return train, eval_split, test_split, full_train
 
 
-def _parse_label(val: Any, problem_type: str):
+def _parse_label(val: Any, problem_type: str, force_str: bool = False):
+    """Parse a raw label value.
+
+    Regression → float.  Classification:
+    * ``force_str=True`` (for string-typed label columns like EC / subcellular_loc):
+        always return str(val) — caller maps to int via label2id.
+    * ``force_str=False`` (default, for int-typed columns like remote_homology):
+        unwrap list/tuple then return int if possible, else str.
+
+    The caller is responsible for mapping str labels to contiguous indices via
+    the ``label2id`` dict built in ``_label_meta``.
+    """
     if problem_type == "regression":
         if isinstance(val, (list, tuple)):
             return float(val[0])
         return float(val)
     if isinstance(val, (list, tuple)):
         val = val[0]
+    if force_str:
+        return str(val)
     try:
         return int(val)
     except (ValueError, TypeError):
-        return val
+        return str(val)
 
 
 def _tokenize_splits(
     train, eval_split, test_split, cfg: TaskConfig, tokenizer, max_length: int,
     normalize_targets: bool = False,
+    label2id: Dict[str, Any] | None = None,
+    force_str: bool = False,
 ):
     seq_col = cfg.input_map.get("seq")
     if seq_col is None:
@@ -141,9 +188,14 @@ def _tokenize_splits(
         if cfg.remove_sequence_whitespace:
             seqs = ["".join(s.split()) for s in seqs]
         enc = tokenizer(seqs, truncation=True, max_length=max_length)
-        labels = [_parse_label(v, cfg.problem_type) for v in batch[label_col]]
+        labels = [_parse_label(v, cfg.problem_type, force_str=force_str) for v in batch[label_col]]
         if label_mean is not None:
             labels = [(x - label_mean) / label_std for x in labels]
+        # Map parsed labels to contiguous int indices via label2id.
+        # label2id keys are str (HF compat): convert parsed value to str before lookup.
+        # The vocab was built from ALL splits so every label is guaranteed in label2id.
+        if label2id is not None and cfg.problem_type != "regression":
+            labels = [label2id[str(lbl)] for lbl in labels]
         enc["labels"] = labels
         return enc
 
@@ -160,17 +212,74 @@ def _tokenize_splits(
     return out
 
 
-def _label_meta(cfg: TaskConfig, train_split) -> Dict[str, Any]:
+def _label_meta(cfg: TaskConfig, train_split, *extra_splits) -> Dict[str, Any]:
+    """Build label metadata for the classification head.
+
+    ``extra_splits`` (val / test) are included when building the label
+    vocabulary so that classes exclusive to eval splits don't cause KeyError
+    during tokenization — they are rare but possible for very small train
+    sample caps (``--max_train_samples``) on large multiclass tasks.
+
+    Detects whether the label column stores strings (EC / subcellular_loc) or
+    native ints (remote_homology), and builds the mapping accordingly:
+
+    * Native-int column: preserves original indices (0..N-1 contiguous or dense
+      enough), label2id is identity int→int.
+    * String column: sorts unique string labels alphabetically and builds a
+      contiguous 0..N-1 str→int mapping.  label2id keys are str so that HF
+      model-config validation accepts them.
+    """
     if cfg.problem_type == "regression":
         return {"num_labels": 1, "id2label": None, "label2id": None, "problem_type_hf": "regression"}
-    raw = train_split[cfg.label_col]
-    parsed = [_parse_label(v, cfg.problem_type) for v in raw]
-    classes = sorted(set(parsed))
-    num_labels = max(classes) + 1 if all(isinstance(c, int) for c in classes) else len(classes)
-    id2label = {i: f"L{i}" for i in range(num_labels)}
-    label2id = {v: k for k, v in id2label.items()}
+
+    # Detect whether the raw label column contains strings or native ints
+    # by peeking at the dataset features (avoids depending on sample content).
+    import datasets as _ds_mod
+    raw_feature = train_split.features.get(cfg.label_col)
+    _raw_is_string = (
+        isinstance(raw_feature, _ds_mod.Value) and raw_feature.dtype == "string"
+    ) or (
+        isinstance(raw_feature, _ds_mod.ClassLabel)  # ClassLabel → int already handled
+        and False  # ClassLabel is always int, let it fall through to int path
+    )
+    # Also treat it as string if the first few raw values are non-int Python objects
+    if not _raw_is_string:
+        sample_vals = train_split[cfg.label_col][:10]
+        _raw_is_string = any(isinstance(v, str) for v in sample_vals)
+
+    force_str = _raw_is_string
+
+    all_splits = [train_split] + [s for s in extra_splits if s is not None]
+    parsed_all: list = []
+    for sp in all_splits:
+        parsed_all.extend([_parse_label(v, cfg.problem_type, force_str=force_str) for v in sp[cfg.label_col]])
+
+    classes = sorted(set(parsed_all), key=lambda x: (isinstance(x, str), str(x) if isinstance(x, str) else x))
+    if all(isinstance(c, int) for c in classes):
+        # Native-int labels (e.g. remote_homology 0..N-1): use max+1 so sparse
+        # ranges work; id2label/label2id keys are int for internal use but HF
+        # config wants str keys — store int keys, convert in load_encoder_for_head
+        # call where they are set on the config object (HF accepts int keys on the
+        # config dataclass; the validation error was for label2id with int keys).
+        num_labels = max(classes) + 1
+        id2label = {i: str(i) for i in range(num_labels)}
+        label2id = {str(i): i for i in range(num_labels)}  # str keys for HF compat
+        _int_labels = True
+    else:
+        # String labels: build stable sorted contiguous str→int mapping
+        num_labels = len(classes)
+        id2label = {i: str(c) for i, c in enumerate(classes)}
+        label2id = {str(c): i for i, c in enumerate(classes)}  # str keys
+        _int_labels = False
     hf_pt = "single_label_classification"
-    return {"num_labels": num_labels, "id2label": id2label, "label2id": label2id, "problem_type_hf": hf_pt}
+    return {
+        "num_labels": num_labels,
+        "id2label": id2label,
+        "label2id": label2id,
+        "problem_type_hf": hf_pt,
+        "_int_labels": _int_labels,
+        "_force_str": force_str,
+    }
 
 
 def _build_compute_metrics(cfg: TaskConfig):
@@ -257,14 +366,22 @@ def main(argv=None) -> int:
             f"only supports {_SUPPORTED_PROBLEM_TYPES}."
         )
 
-    train, eval_split, test_split = _load_task_splits(cfg, args.max_train_samples)
+    train, eval_split, test_split, full_train = _load_task_splits(cfg, args.max_train_samples)
     if train is None:
         raise SystemExit(f"No train split for task {args.task}")
 
-    label_meta = _label_meta(cfg, train)
+    # Build label vocabulary from all available splits combined so that labels
+    # exclusive to val/test (absent from --max_train_samples train subset, or
+    # even from the full train) are still in label2id and don't cause KeyError
+    # during tokenization of eval splits.
+    label_meta = _label_meta(cfg, full_train, eval_split, test_split)
     tokenizer = load_tokenizer(args.model_name)
-    tokenized = _tokenize_splits(train, eval_split, test_split, cfg, tokenizer, args.max_length,
-                                normalize_targets=args.normalize_targets)
+    tokenized = _tokenize_splits(
+        train, eval_split, test_split, cfg, tokenizer, args.max_length,
+        normalize_targets=args.normalize_targets,
+        label2id=label_meta["label2id"],
+        force_str=label_meta.get("_force_str", False),
+    )
 
     model = load_encoder_for_head(
         args.model_name,
