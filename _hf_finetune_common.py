@@ -116,12 +116,15 @@ def load_encoder_for_head(
 # separately via ``modules_to_save``).
 #
 # Proteva — ALL body Linears (QLoRA best practice: adapt every linear projection,
-# not just attention). Verified by named_modules() on the epoch1 checkpoint:
-# 24× each of wq/wk/wv/wo + attn_gate (attention, incl. the --head-gate Linear)
-# and w12 (packed gate+value) / w3 (down) (SwiGLU FFN). The MLM ``decoder`` and
-# pretraining aux heads (di3_head/cons_head/…) are deliberately NOT listed — the
-# downstream classifier trains separately via ``modules_to_save``.
-PROTEVA_LORA_TARGETS = ["wq", "wk", "wv", "wo", "attn_gate", "w12", "w3"]
+# not just attention) PLUS the value embeddings. Verified by named_modules() on
+# the checkpoint: 24× each of wq/wk/wv/wo + attn_gate (attention, incl. the
+# --head-gate Linear) and w12 (packed gate+value) / w3 (down) (SwiGLU FFN), plus
+# ve_first/ve_last (the value-embedding nn.Embeddings — PEFT wraps these with
+# LoRA Embedding adapters). The MLM ``decoder`` and pretraining aux heads
+# (di3_head/cons_head/…) are deliberately NOT listed — the downstream classifier
+# trains separately via ``modules_to_save``.
+PROTEVA_LORA_TARGETS = ["wq", "wk", "wv", "wo", "attn_gate", "w12", "w3",
+                        "ve_first", "ve_last"]
 # AMPLIFY (chandar-lab/AMPLIFY_120M remote code): SEPARATE attention projections
 # ``q``/``k``/``v``/``wo`` (NOT fused ``Wqkv``) + SwiGLU FFN ``w12``/``w3``.
 # Verified by named_modules() on the 120M checkpoint: 24× each of q/k/v/wo/w12/w3.
@@ -306,9 +309,9 @@ def add_common_finetune_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max_length", type=int, default=512)
     parser.add_argument("--max_train_samples", type=int, default=None)
     parser.add_argument("--num_train_epochs", type=float, default=3.0)
-    parser.add_argument("--per_device_train_batch_size", type=int, default=8)
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=16)
-    parser.add_argument("--learning_rate", type=float, default=5e-5)
+    parser.add_argument("--per_device_train_batch_size", type=int, default=64)
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=64)
+    parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--logging_steps", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)
