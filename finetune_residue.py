@@ -12,6 +12,7 @@ verified row counts.
 from __future__ import annotations
 
 import argparse
+import ast
 import logging
 import sys
 import time
@@ -40,6 +41,7 @@ from _hf_finetune_common import (  # noqa: E402
     decode_string_label,
     load_encoder_for_head,
     load_tokenizer,
+    resolve_local_dataset_path,
     safe_ckpt,
     write_jsonl_record,
 )
@@ -64,8 +66,6 @@ def _decode_disorder_label(label_str: Any) -> List[int]:
     Falls back to the simple ``_DISORDER_ALPHABET`` char-index decoder if the
     raw value is already a compact '0'/'1' string (backwards-compatibility).
     """
-    import ast
-
     if isinstance(label_str, (list, tuple)):
         # Already a real list (future-proof if HF fixes the stored type)
         return [int(round(float(x))) for x in label_str]
@@ -75,8 +75,11 @@ def _decode_disorder_label(label_str: Any) -> List[int]:
         try:
             items = ast.literal_eval(s)
             return [int(round(float(x))) for x in items]
-        except (ValueError, SyntaxError):
-            pass
+        except (ValueError, SyntaxError) as exc:
+            raise ValueError(
+                f"_decode_disorder_label: failed to parse '['-prefixed string "
+                f"(first 120 chars): {s[:120]!r}"
+            ) from exc
     # Fallback: compact alphabet string '010110...'
     return [_DISORDER_ALPHABET.index(c) for c in s if c in _DISORDER_ALPHABET]
 
@@ -116,24 +119,10 @@ def _build_label_meta(task: str, all_label_lists: List[List[int]]) -> Dict[str, 
     return {"num_labels": len(names), "id2label": id2label, "label2id": label2id, "names": names}
 
 
-def _resolve_local_dataset_path(dataset_name: str):
-    """Resolve a dataset specifier to a local path if it exists (mirrors probe logic)."""
-    from pathlib import Path as _Path
-
-    dataset_path = _Path(dataset_name).expanduser()
-    candidates = [dataset_path]
-    if not dataset_path.is_absolute():
-        candidates.append(_Path(__file__).resolve().parent / dataset_path)
-    for p in candidates:
-        if p.is_dir():
-            return p.resolve()
-    return None
-
-
 def _prepare_dataset(cfg: TaskConfig, task: str, args: argparse.Namespace):
     from datasets import load_dataset, load_from_disk
 
-    local_path = _resolve_local_dataset_path(cfg.dataset)
+    local_path = resolve_local_dataset_path(cfg.dataset)
     if local_path is not None:
         try:
             ds = load_from_disk(str(local_path))

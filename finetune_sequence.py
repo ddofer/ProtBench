@@ -37,6 +37,7 @@ from _hf_finetune_common import (  # noqa: E402
     build_training_args,
     load_encoder_for_head,
     load_tokenizer,
+    resolve_local_dataset_path,
     safe_ckpt,
     write_jsonl_record,
 )
@@ -53,24 +54,10 @@ def _select_by_column(ds_split, column: str, values: Tuple[str, ...]):
     return ds_split.filter(lambda r, c=column, vs=vset: r[c] in vs)
 
 
-def _resolve_local_dataset_path(dataset_name: str):
-    """Resolve a dataset specifier to a local path if it exists (mirrors probe logic)."""
-    from pathlib import Path
-
-    dataset_path = Path(dataset_name).expanduser()
-    candidates = [dataset_path]
-    if not dataset_path.is_absolute():
-        candidates.append(Path(__file__).resolve().parent / dataset_path)
-    for p in candidates:
-        if p.is_dir():
-            return p.resolve()
-    return None
-
-
 def _load_task_splits(cfg: TaskConfig, max_train_samples: int | None):
     from datasets import load_dataset, load_from_disk
 
-    local_path = _resolve_local_dataset_path(cfg.dataset)
+    local_path = resolve_local_dataset_path(cfg.dataset)
     if local_path is not None:
         # Local Arrow/DatasetDict on disk — use load_from_disk with CheZOD fallback
         try:
@@ -264,20 +251,17 @@ def _label_meta(cfg: TaskConfig, train_split, *extra_splits) -> Dict[str, Any]:
         num_labels = max(classes) + 1
         id2label = {i: str(i) for i in range(num_labels)}
         label2id = {str(i): i for i in range(num_labels)}  # str keys for HF compat
-        _int_labels = True
     else:
         # String labels: build stable sorted contiguous str→int mapping
         num_labels = len(classes)
         id2label = {i: str(c) for i, c in enumerate(classes)}
         label2id = {str(c): i for i, c in enumerate(classes)}  # str keys
-        _int_labels = False
     hf_pt = "single_label_classification"
     return {
         "num_labels": num_labels,
         "id2label": id2label,
         "label2id": label2id,
         "problem_type_hf": hf_pt,
-        "_int_labels": _int_labels,
         "_force_str": force_str,
     }
 

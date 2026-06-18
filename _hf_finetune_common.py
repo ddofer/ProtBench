@@ -393,6 +393,18 @@ def build_training_args(
     return TrainingArguments(**kw)
 
 
+def resolve_local_dataset_path(dataset_name: str):
+    """Resolve a dataset specifier to a local path if it exists (mirrors probe logic)."""
+    dataset_path = Path(dataset_name).expanduser()
+    candidates = [dataset_path]
+    if not dataset_path.is_absolute():
+        candidates.append(Path(__file__).resolve().parent / dataset_path)
+    for p in candidates:
+        if p.is_dir():
+            return p.resolve()
+    return None
+
+
 def write_jsonl_record(output_dir: Path, prefix: str, ckpt: str, record: Dict[str, Any]) -> Path:
     jsonl_path = output_dir.parent / f"{prefix}_{safe_ckpt(ckpt)}.jsonl"
     with jsonl_path.open("a") as f:
