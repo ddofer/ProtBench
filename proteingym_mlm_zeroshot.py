@@ -311,7 +311,8 @@ def single_pass_pll_table(refs, tokenizer, seqs, aa2id, model_window, device,
 
 @torch.no_grad()
 def strided_masked_pll_table(refs, tokenizer, seqs, aa2id, model_window, device,
-                             max_length, n_passes=8, batch_size=16, long_policy="skip"):
+                             max_length, n_passes=8, batch_size=16, long_policy="skip",
+                             progress_label="", progress_every=20):
     """Leakage-free few-pass masked pseudo-log-likelihood.
 
     Exact masked-PLL masks ONE position per forward -> L forwards/seq. Here we
@@ -332,7 +333,18 @@ def strided_masked_pll_table(refs, tokenizer, seqs, aa2id, model_window, device,
     prepared = [_crop_or_skip(s, model_window, long_policy) for s in seqs]
     work = [(k, s) for k, (s, ok) in enumerate(prepared) if ok]
 
-    for b0 in range(0, len(work), batch_size):
+    import time as _t
+    nb = (len(work) + batch_size - 1) // batch_size
+    _t0 = _t.time()
+    for bi, b0 in enumerate(range(0, len(work), batch_size)):
+        if progress_label and (bi % progress_every == 0 or bi == nb - 1):
+            done = min(b0 + batch_size, len(work)); el = _t.time() - _t0
+            tail = ""
+            if el > 2:                      # skip rate on first batch (el~=0 -> bogus)
+                rate = done / el
+                tail = f" {rate:.0f} seq/s ETA {(len(work)-done)/rate/60:.0f}m"
+            print(f"    [{progress_label}] {done}/{len(work)} seqs "
+                  f"({100*done//max(1,len(work))}%){tail}", flush=True)
         chunk = work[b0:b0 + batch_size]
         ks = [k for k, _ in chunk]
         enc = tokenizer([s for _, s in chunk], padding=True, truncation=True,
@@ -446,8 +458,10 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
             print(f"skip_huge_assays={skip_huge_assays}: dropped {n_dropped} "
                   f"indel assay(s) over the variant cap")
 
-    for g in assays:
+    for _ai, g in enumerate(assays, 1):
         idx = np.asarray(g2idx[str(g)], dtype=int)
+        if is_indel:
+            print(f"[indel assay {_ai}/{len(assays)}] {g}: {idx.size} variants", flush=True)
         # Each long-sequence forward (per-mutant indel PLL, or per-site window) is
         # its own pass — cap variants so a multi-thousand-variant assay doesn't
         # dominate runtime. Short substitution assays share one WT table (cheap).
@@ -494,7 +508,8 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
                         refs, tokenizer, seqs, aa2id, model_window, device,
                         max_length, n_passes=indel_pll_passes,
                         batch_size=batch_size,
-                        long_policy=indel_long_policy)
+                        long_policy=indel_long_policy,
+                        progress_label=f"{_ai}/{len(assays)} {str(g)[:24]}")
                 wt_pll = vals[0]
                 for j, i in enumerate(idx):
                     mp = vals[j + 1]
