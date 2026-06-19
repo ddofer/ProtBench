@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 _SS3_ALPHABET = "HEC"
 _DISORDER_ALPHABET = "01"
 
-_RESIDUE_TASKS = ("ss3", "disorder", "signal_peptide", "conservation_flip")
+_RESIDUE_TASKS = ("ss3", "disorder", "signal_peptide", "conservation_flip", "disprot")
 
 
 def _decode_disorder_label(label_str: Any) -> List[int]:
@@ -89,6 +89,11 @@ def _decode_labels(task: str, label_str: Any) -> List[int]:
         return decode_string_label(str(label_str), _SS3_ALPHABET)
     if task == "disorder":
         return _decode_disorder_label(label_str)
+    if task == "disprot":
+        # DisProt/CAID: disorder_labels is already a list[int] 0/1 (prep_disprot.py).
+        if isinstance(label_str, (list, tuple)):
+            return [int(round(float(x))) for x in label_str]
+        return _decode_disorder_label(label_str)  # defensive (stringified fallback)
     if task == "signal_peptide":
         return decode_csv_label(str(label_str))
     if task == "conservation_flip":
@@ -106,8 +111,8 @@ def _decode_labels(task: str, label_str: Any) -> List[int]:
 def _build_label_meta(task: str, all_label_lists: List[List[int]]) -> Dict[str, Any]:
     if task == "ss3":
         names = list(_SS3_ALPHABET)
-    elif task == "disorder":
-        names = list(_DISORDER_ALPHABET)
+    elif task in ("disorder", "disprot"):
+        names = list(_DISORDER_ALPHABET)  # binary 0/1 (ordered/disordered)
     else:  # signal_peptide — infer from data
         max_id = 0
         for labs in all_label_lists:
