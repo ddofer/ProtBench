@@ -86,9 +86,10 @@ FAST_TASKS = [
     # "antibiotic_resistance",
     "ppi_bernett",
     # go_mf excluded: multilabel task, not counted in paper wins
-    "chezod_disorder",
+    # chezod_disorder DISABLED 2026-06-19 -> replaced by disprot (residue-level)
     "ss3",
     "conservation_flip",
+    "disprot",
 ]
 
 # Curated very-fast / low-variance subset (2026-06-03) for high-ROI scout
@@ -432,14 +433,19 @@ TASKS: Dict[str, TaskConfig] = {
         problem_type="regression",
         main_metric="Spearman",
     ),
-    "chezod_disorder": TaskConfig(
-        name="CheZoD Disorder (Mean Z-Score)",
-        dataset="data/chezod",
-        input_map={"seq": "sequence"},
-        label_col="disorder_mean",
-        problem_type="regression",
-        main_metric="Spearman",
-    ),
+    # DISABLED 2026-06-19: the old CheZoD mean-Z disorder task is no longer run or
+    # evaluated. Superseded by `disprot` (curated DisProt/CAID per-residue disorder,
+    # token_classification) — a residue-level target instead of a sequence-level
+    # mean Z-score. Kept commented for provenance; removing it from TASKS drops it
+    # from DEFAULT_TASKS and makes --tasks chezod_disorder an invalid choice.
+    # "chezod_disorder": TaskConfig(
+    #     name="CheZoD Disorder (Mean Z-Score)",
+    #     dataset="data/chezod",
+    #     input_map={"seq": "sequence"},
+    #     label_col="disorder_mean",
+    #     problem_type="regression",
+    #     main_metric="Spearman",
+    # ),
     "beta_lactamase_peer": TaskConfig(
         name="beta-lactamase-PEER",
         dataset="SaProtHub/Dataset-Beta_Lactamase-PEER",
@@ -542,6 +548,22 @@ TASKS: Dict[str, TaskConfig] = {
         main_metric="F1_Macro",
         split_column="stage",
         validation_column_values=("valid",),
+    ),
+    # Per-residue intrinsic disorder, built from DisProt curated region spans
+    # (union of regions = disordered). Distinct from the NetSurfP `disorder`
+    # task above (PDB-missing-coordinate mask) — DisProt is the manually
+    # curated CAID-style target. Local Arrow dataset built by
+    # scripts/prep_disprot.py from LiteFold/DisProt. MCC is the CAID headline
+    # metric for this imbalanced binary task.
+    "disprot": TaskConfig(
+        name="Intrinsic Disorder (DisProt)",
+        dataset="data/disprot",
+        input_map={"seq": "sequence"},
+        label_col="disorder_labels",
+        problem_type="token_classification",
+        main_metric="MCC",
+        validation_split="validation",
+        test_split="test",
     ),
     # =========================================================================
     # ProteinGym — Zero-Shot (cosine similarity WT vs mutant, per-assay Spearman/AUC)
