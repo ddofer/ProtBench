@@ -1,11 +1,11 @@
-"""Proteva trunk + AUX-head ProteinGym zero-shot DMS-substitution scorer.
+"""Proteva trunk + AUX-head ProteinGym zero-shot substitution scorer.
 
 A SEPARATE scorer that runs *alongside* the canonical MLM-marginal scorer
 (:mod:`plm.bench.proteingym_mlm_zeroshot`). It reuses that module's
 native-context windowing (``get_optimal_window``), masked-marginal log-prob
 tables (``windowed_logp_table`` / ``masked_marginal_logprob_table``), the needed-
 positions union, and the ProteinGym DMS-substitution data loading verbatim, then
-adds THREE Proteva-only aux scores derived from the trained aux heads:
+adds FOUR Proteva-only aux scores derived from the trained aux heads:
 
   1. ``mlm_marginal``     — the canonical masked-marginal LLR (leaderboard-
                             comparable baseline; identical code path to the MLM
@@ -18,12 +18,17 @@ adds THREE Proteva-only aux scores derived from the trained aux heads:
   3. ``cons_weighted_mlm``— VESPA-style conservation-weighted MLM LLR, using the
                             scalar per-position ``out.cons_pred`` (low = conserved)
                             to up-weight conserved sites. ~Zero extra forwards.
+    4. ``pssm_head``        — WT-marginal LLR from the dedicated distilled PSSM
+                                                        head (``out.pssm_logits``) when present.
 
 and an ``ensemble`` that z-scores the three terms per assay and sums them.
 
-Substitutions only (DMS_substitutions). CPU- and GPU-capable; the smoke test runs
-on CPU. No existing file is modified.
+Substitutions only (DMS_substitutions + clinical_substitutions). CPU- and
+GPU-capable; the smoke test runs on CPU. Indel tasks are not supported in this
+aux-head scorer because its per-position substitution LLR path assumes equal
+WT/mutant length.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -47,21 +52,29 @@ from scipy.stats import spearmanr
 from sklearn.metrics import roc_auc_score
 
 from plm.bench.benchmark_tasks import TASKS
+
 # Reuse the canonical MLM scorer's primitives verbatim (no reimplementation).
 from plm.bench.proteingym_mlm_zeroshot import (
+    DMS_REF_DEFAULT,
     _detect_native_context,
+    _hier_mean,
     get_optimal_window,
     windowed_logp_table,
     _score_substitution_windowed,
 )
+
 # Reuse the collator-derived canonical AA->token-id lookup (the correct one;
 # NOT the stale CANON_TOKEN_IDS in uc30_aux_loader.py).
 from plm.bench.zero_shot_dms import aa_token_id_lookup
 
 _AA_LETTERS = "ACDEFGHIKLMNPQRSTVWY"
+_AA20_TO_IDX = {aa: i for i, aa in enumerate(_AA_LETTERS)}
 
-# Tasks this scorer supports (substitution DMS only).
-SUBSTITUTION_ZS = ["proteingym_dms_substitutions_zeroshot"]
+# Tasks this scorer supports (substitutions only).
+SUPPORTED_AUX_TASKS = [
+    "proteingym_dms_substitutions_zeroshot",
+    "proteingym_clinical_substitutions_zeroshot",
+]
 
 
 # --------------------------------------------------------------------------- #
@@ -75,25 +88,37 @@ def _aux_forward(model, tokenizer, seqs, device, max_length):
       - ``di3_logp``: (T_res, 20) log-softmax over 3Di structure states, sliced to
         the residue tokens (BOS/EOS dropped), CPU float32.
       - ``cons``: (T_res,) scalar conservation prediction (low = conserved), CPU.
-      - ``mlm_logp``: (T_res, 20) log-softmax over the 20 canonical-AA decoder
-        columns (the "PSSM profile"), CPU — used only for the canon sanity check.
+            - ``mlm_logp``: (T_res, V) log-softmax over decoder logits ``out.logits``.
+            - ``pssm_head_logp``: (T_res, V) log-softmax over ``out.pssm_logits`` when
+                present, else ``None``.
     Sequences are right-padded; per-sequence residue lengths recover the true crop.
     """
-    enc = tokenizer(list(seqs), padding=True, truncation=True,
-                    max_length=max_length, return_tensors="pt")
+    enc = tokenizer(
+        list(seqs), padding=True, truncation=True, max_length=max_length, return_tensors="pt"
+    )
     ids = enc["input_ids"]
     am = enc.get("attention_mask", None)
-    out = model(input_ids=ids.to(device),
-                attention_mask=am.to(device) if am is not None else None)
-    di3 = torch.log_softmax(out.di3_logits.float(), dim=-1).cpu()      # (B,T,20)
-    cons = out.cons_pred.float().squeeze(-1).cpu()                     # (B,T)
-    mlm = torch.log_softmax(out.logits.float(), dim=-1).cpu()          # (B,T,V)
+    out = model(input_ids=ids.to(device), attention_mask=am.to(device) if am is not None else None)
+    di3 = torch.log_softmax(out.di3_logits.float(), dim=-1).cpu()  # (B,T,20)
+    cons = out.cons_pred.float().squeeze(-1).cpu()  # (B,T)
+    mlm = torch.log_softmax(out.logits.float(), dim=-1).cpu()  # (B,T,V)
+    pssm_logits = getattr(out, "pssm_logits", None)
+    pssm_head = (
+        torch.log_softmax(pssm_logits.float(), dim=-1).cpu() if pssm_logits is not None else None
+    )
     special = set(int(x) for x in (getattr(tokenizer, "all_special_ids", []) or []))
     res = []
     ids_list = ids.tolist()
     for b, row in enumerate(ids_list):
         keep = [t for t, x in enumerate(row) if x not in special]
-        res.append((di3[b, keep], cons[b, keep], mlm[b, keep]))
+        res.append(
+            (
+                di3[b, keep],
+                cons[b, keep],
+                mlm[b, keep],
+                pssm_head[b, keep] if pssm_head is not None else None,
+            )
+        )
     return res
 
 
@@ -117,23 +142,23 @@ def _aux_di3_forward_gpu(model, tokenizer, seqs, device, max_length):
     Identical residue selection to :func:`_aux_forward` (same special-id drop), so
     ``di3[b, :lengths[b]]`` equals that function's per-seq ``di3_logp`` exactly.
     """
-    enc = tokenizer(list(seqs), padding=True, truncation=True,
-                    max_length=max_length, return_tensors="pt")
+    enc = tokenizer(
+        list(seqs), padding=True, truncation=True, max_length=max_length, return_tensors="pt"
+    )
     ids = enc["input_ids"]
     am = enc.get("attention_mask", None)
-    out = model(input_ids=ids.to(device),
-                attention_mask=am.to(device) if am is not None else None)
-    di3_all = torch.log_softmax(out.di3_logits.float(), dim=-1)        # (B,T,20) device
+    out = model(input_ids=ids.to(device), attention_mask=am.to(device) if am is not None else None)
+    di3_all = torch.log_softmax(out.di3_logits.float(), dim=-1)  # (B,T,20) device
     special = set(int(x) for x in (getattr(tokenizer, "all_special_ids", []) or []))
     ids_list = ids.tolist()
     keeps = [[t for t, x in enumerate(row) if x not in special] for row in ids_list]
     lengths = torch.tensor([len(k) for k in keeps], dtype=torch.long, device=device)
     B = di3_all.shape[0]
     Tmax = int(lengths.max().item()) if B else 0
-    di3 = di3_all.new_zeros((B, Tmax, 20))                             # (B,Tmax,20) device
+    di3 = di3_all.new_zeros((B, Tmax, 20))  # (B,Tmax,20) device
     for b, keep in enumerate(keeps):
         if keep:
-            di3[b, :len(keep)] = di3_all[b, keep]
+            di3[b, : len(keep)] = di3_all[b, keep]
     return di3, lengths
 
 
@@ -186,7 +211,7 @@ def _profile_llr(diffs, profile_at, aa2id):
     needed position's profile row is missing.
     """
     total = 0.0
-    for (p, w_aa, m_aa) in diffs:
+    for p, w_aa, m_aa in diffs:
         if w_aa not in aa2id or m_aa not in aa2id:
             continue
         row = profile_at(p)
@@ -194,6 +219,19 @@ def _profile_llr(diffs, profile_at, aa2id):
             return None
         total += float(row[aa2id[m_aa]] - row[aa2id[w_aa]])
     return total
+
+
+def _select_profile_index_map(row_width, default_map):
+    """Select AA indexing for a profile row width.
+
+    Args:
+        row_width: Last-dimension width of the profile row.
+        default_map: Token-id map for full-vocab heads.
+
+    Returns:
+        Canonical AA->index map for 20-way heads; otherwise ``default_map``.
+    """
+    return _AA20_TO_IDX if int(row_width) == 20 else default_map
 
 
 def _combine_weighted(term_arrays, weights):
@@ -204,7 +242,7 @@ def _combine_weighted(term_arrays, weights):
     combined per-variant scores. Each term is z-scored within the assay first so
     terms on different scales (LLR vs symKL) combine comparably.
     """
-    zs = np.vstack([_zscore(t) for t in term_arrays])      # (K, n)
+    zs = np.vstack([_zscore(t) for t in term_arrays])  # (K, n)
     w = np.asarray(weights, dtype=np.float64)
     return list(w @ zs)
 
@@ -273,9 +311,24 @@ def _opt_int(s):
 # Per-assay scoring.
 # --------------------------------------------------------------------------- #
 @torch.no_grad()
-def _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
-                 aa2id, device, max_length, model_window, batch_size,
-                 di3_window, compute_di3, ensemble_weights=(1.0, 1.0, 1.0)):
+def _score_assay(
+    model,
+    tokenizer,
+    refs,
+    wt,
+    idx,
+    muts,
+    labels,
+    bin_labels,
+    aa2id,
+    device,
+    max_length,
+    model_window,
+    batch_size,
+    di3_window,
+    compute_di3,
+    ensemble_weights=(1.0, 1.0, 1.0),
+):
     """Score one assay; return per-variant {score_name: [values]} + labels.
 
     All variants share one WT aux forward (di3 + cons + the unmasked profile)
@@ -298,7 +351,8 @@ def _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
         diffs[int(i)] = [(p, wt[p], mut[p]) for p in dpos]
         need.update(dpos)
     pos_cache = windowed_logp_table(
-        refs, tokenizer, wt, sorted(need), model_window, device, max_length, batch_size)
+        refs, tokenizer, wt, sorted(need), model_window, device, max_length, batch_size
+    )
 
     def logp_at(p):
         return pos_cache.get(p)
@@ -309,17 +363,28 @@ def _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
     # cons/di3 of a SHORT protein the single full forward suffices; for long WT
     # we fall back to per-position windows only where needed.
     # The same unmasked WT forward that yields di3/cons also yields the per-
-    # position profile (out.logits = the PSSM-distilled head); keep it for the
-    # fast ``pssm_marginal`` (WT-marginal LLR). ``prof_at(p)`` -> (V,) log-prob
-    # row at residue p, or None where unavailable (long-WT windows).
+    # position profile from out.logits; keep it for the fast ``pssm_marginal``
+    # (WT-marginal LLR). ``prof_at(p)`` -> (V,) log-prob row at residue p, or
+    # None where unavailable (long-WT windows).
+    # If the dedicated ``out.pssm_logits`` head exists, also expose
+    # ``pssm_head_at(p)`` for a separate WT-marginal LLR (``pssm_head``).
     wt_cons = None
+    has_pssm_head = False
     if len(wt) <= model_window:
-        di3_full, cons_full, mlm_full = _aux_forward(model, tokenizer, [wt], device, max_length)[0]
+        di3_full, cons_full, mlm_full, pssm_head_full = _aux_forward(
+            model, tokenizer, [wt], device, max_length
+        )[0]
         wt_cons = cons_full.numpy()
         wt_di3_full = di3_full  # (L,20)
         _Lp = mlm_full.shape[0]
+        has_pssm_head = pssm_head_full is not None
 
         def prof_at(p, _prof=mlm_full, _Lp=_Lp):
+            return _prof[p] if 0 <= p < _Lp else None
+
+        def pssm_head_at(p, _prof=pssm_head_full, _Lp=_Lp):
+            if _prof is None:
+                return None
             return _prof[p] if 0 <= p < _Lp else None
     else:
         wt_di3_full = None  # long-WT: di3 windows computed lazily per mutant below
@@ -328,21 +393,37 @@ def _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
         cons_arr = np.zeros(len(wt), dtype=np.float64)
         seen = np.zeros(len(wt), dtype=bool)
         prof_rows = {}
+        pssm_head_rows = {}
         triples = [(p, *get_optimal_window(p, len(wt), model_window)) for p in sorted(need)]
         for b0 in range(0, len(triples), batch_size):
-            chunk = triples[b0:b0 + batch_size]
-            res = _aux_forward(model, tokenizer, [wt[st:en] for _, st, en in chunk],
-                               device, max_length)
-            for (p, st, en), (_d, c, m) in zip(chunk, res):
-                cons_arr[p] = float(c[p - st]); seen[p] = True
+            chunk = triples[b0 : b0 + batch_size]
+            res = _aux_forward(
+                model, tokenizer, [wt[st:en] for _, st, en in chunk], device, max_length
+            )
+            for (p, st, en), (_d, c, m, h) in zip(chunk, res):
+                cons_arr[p] = float(c[p - st])
+                seen[p] = True
                 prof_rows[p] = m[p - st]
+                if h is not None:
+                    pssm_head_rows[p] = h[p - st]
+                    has_pssm_head = True
         cons_arr[~seen] = cons_arr[seen].mean() if seen.any() else 0.0
         wt_cons = cons_arr
 
         def prof_at(p, _rows=prof_rows):
             return _rows.get(p)
 
+        def pssm_head_at(p, _rows=pssm_head_rows):
+            return _rows.get(p)
+
     cons_w = _cons_weights(wt_cons)
+    pssm_head_aa2id = aa2id
+    if has_pssm_head:
+        for p in sorted(need):
+            row = pssm_head_at(p)
+            if row is not None:
+                pssm_head_aa2id = _select_profile_index_map(row.shape[-1], aa2id)
+                break
 
     # --- 3. di3_sad: per distinct-mutant unmasked forward (GPU-vectorized) ----
     di3_sad = {}  # i -> score
@@ -366,7 +447,7 @@ def _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
         # symKL + per-variant window-sum runs on-device; only the final per-variant
         # scalar scores are pulled to CPU (once per assay, below).
         for b0 in range(0, len(distinct), batch_size):
-            chunk = distinct[b0:b0 + batch_size]
+            chunk = distinct[b0 : b0 + batch_size]
             crops = []
             for mseq in chunk:
                 i0 = seq2idxs[mseq][0]
@@ -376,33 +457,35 @@ def _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
 
             # Mutant di3 over each crop, ON device: (B, Tm, 20) + residue lengths.
             q_mut, len_mut = _aux_di3_forward_gpu(
-                model, tokenizer, [m[st:en] for m, st, en in crops], device, max_length)
+                model, tokenizer, [m[st:en] for m, st, en in crops], device, max_length
+            )
             B, Tm, _ = q_mut.shape
 
             # WT di3 over the SAME crops, aligned into (B, Tw, 20) + lengths. Short
             # WT slices the cached full forward; long WT batches the re-forward.
             if wt_di3_dev is not None:
-                len_wt = torch.tensor([en - st for (_m, st, en) in crops],
-                                      dtype=torch.long, device=device)
+                len_wt = torch.tensor(
+                    [en - st for (_m, st, en) in crops], dtype=torch.long, device=device
+                )
                 Tw = int(len_wt.max().item()) if B else 0
                 q_wt = q_mut.new_zeros((B, Tw, 20))
                 for b, (_m, st, en) in enumerate(crops):
-                    q_wt[b, :en - st] = wt_di3_dev[st:en]
+                    q_wt[b, : en - st] = wt_di3_dev[st:en]
             else:
                 q_wt, len_wt = _aux_di3_forward_gpu(
-                    model, tokenizer, [wt[st:en] for (_m, st, en) in crops],
-                    device, max_length)
+                    model, tokenizer, [wt[st:en] for (_m, st, en) in crops], device, max_length
+                )
                 Tw = q_wt.shape[1]
 
             # Effective per-row length = min(mut, wt) (the old code truncated to the
             # shorter crop before symKL). symKL per position on a common T.
-            n = torch.minimum(len_mut, len_wt)                         # (B,)
+            n = torch.minimum(len_mut, len_wt)  # (B,)
             T = min(Tm, Tw)
-            sk = _sym_kl(q_wt[:, :T], q_mut[:, :T])                    # (B,T) device
+            sk = _sym_kl(q_wt[:, :T], q_mut[:, :T])  # (B,T) device
             # Mask positions beyond the effective length so window sums match the
             # old `kl = _sym_kl(...[:n])` (anything >= n[b] contributes 0).
-            ar = torch.arange(T, device=device).unsqueeze(0)          # (1,T)
-            valid = ar < n.unsqueeze(1).clamp(max=T)                  # (B,T)
+            ar = torch.arange(T, device=device).unsqueeze(0)  # (1,T)
+            valid = ar < n.unsqueeze(1).clamp(max=T)  # (B,T)
             sk = sk * valid
             # Prefix sum: window [lo, hi) sum = csum[b,hi] - csum[b,lo].
             csum = torch.zeros((B, T + 1), dtype=sk.dtype, device=device)
@@ -421,7 +504,7 @@ def _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
                 for i in seq2idxs[mseq]:
                     slot = len(batch_vars)
                     batch_vars.append(i)
-                    for (p, _w, _m) in diffs[i]:
+                    for p, _w, _m in diffs[i]:
                         lp = p - st
                         if 0 <= lp < neff:
                             lo = lp - di3_window
@@ -442,15 +525,20 @@ def _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
                 los_t = torch.tensor(los, dtype=torch.long, device=device)
                 his_t = torch.tensor(his, dtype=torch.long, device=device)
                 slot_t = torch.tensor(var_slot, dtype=torch.long, device=device)
-                wsum = csum[rows_t, his_t] - csum[rows_t, los_t]      # per-pair sums
-                acc.index_add_(0, slot_t, wsum)                      # sum per variant
-            acc = (-acc).cpu()                                        # negate; one xfer
+                wsum = csum[rows_t, his_t] - csum[rows_t, los_t]  # per-pair sums
+                acc.index_add_(0, slot_t, wsum)  # sum per variant
+            acc = (-acc).cpu()  # negate; one xfer
             for slot, i in enumerate(batch_vars):
                 di3_sad[i] = float(acc[slot])
 
     # --- 4. assemble per-variant scores --------------------------------------
-    out_scores = {"mlm_marginal": [], "cons_weighted_mlm": [], "di3_sad": [],
-                  "pssm_marginal": []}
+    out_scores = {
+        "mlm_marginal": [],
+        "cons_weighted_mlm": [],
+        "di3_sad": [],
+        "pssm_marginal": [],
+        "pssm_head": [],
+    }
     ys, ys_bin, kept = [], [], []
     for i in idx:
         ii = int(i)
@@ -463,7 +551,7 @@ def _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
         # cons-weighted MLM (per-position weighted LLR over the same rows).
         cw = 0.0
         ok = True
-        for (p, w_aa, m_aa) in diffs[ii]:
+        for p, w_aa, m_aa in diffs[ii]:
             if w_aa not in aa2id or m_aa not in aa2id:
                 continue
             row = logp_at(p)
@@ -477,10 +565,18 @@ def _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
         pssm = _profile_llr(diffs[ii], prof_at, aa2id)
         if pssm is None:
             continue
+        # pssm_head (dedicated distilled head WT-marginal LLR) if available;
+        # fallback to pssm_marginal so this score remains defined on older ckpts.
+        pssm_head = _profile_llr(diffs[ii], pssm_head_at, pssm_head_aa2id)
+        if pssm_head is None and not has_pssm_head:
+            pssm_head = pssm
+        if pssm_head is None:
+            continue
         out_scores["mlm_marginal"].append(mlm)
         out_scores["cons_weighted_mlm"].append(cw)
         out_scores["di3_sad"].append(di3_sad.get(ii, np.nan) if compute_di3 else np.nan)
         out_scores["pssm_marginal"].append(pssm)
+        out_scores["pssm_head"].append(pssm_head)
         ys.append(labels[ii])
         ys_bin.append(bin_labels[ii] if bin_labels is not None else None)
         kept.append(ii)
@@ -489,8 +585,7 @@ def _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
         return None
 
     # ensemble: z-score each term across this assay's variants, sum (incl di3).
-    terms = [_zscore(out_scores["mlm_marginal"]),
-             _zscore(out_scores["cons_weighted_mlm"])]
+    terms = [_zscore(out_scores["mlm_marginal"]), _zscore(out_scores["cons_weighted_mlm"])]
     if compute_di3 and np.isfinite(out_scores["di3_sad"]).all():
         terms.append(_zscore(out_scores["di3_sad"]))
     out_scores["ensemble"] = list(np.sum(terms, axis=0))
@@ -498,19 +593,24 @@ def _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
     # ensemble_seq: the FAST seq-only alternate — mlm + cons + pssm, no di3
     # (weighted z-score sum). One masked table + one unmasked WT forward; cost is
     # independent of #variants, so it runs at mlm speed even with di3 disabled.
-    seq_terms = np.vstack([out_scores["mlm_marginal"],
-                           out_scores["cons_weighted_mlm"],
-                           out_scores["pssm_marginal"]])
+    seq_terms = np.vstack(
+        [out_scores["mlm_marginal"], out_scores["cons_weighted_mlm"], out_scores["pssm_marginal"]]
+    )
     out_scores["ensemble_seq"] = _combine_weighted(
-        [out_scores["mlm_marginal"], out_scores["cons_weighted_mlm"],
-         out_scores["pssm_marginal"]], ensemble_weights)
+        [out_scores["mlm_marginal"], out_scores["cons_weighted_mlm"], out_scores["pssm_marginal"]],
+        ensemble_weights,
+    )
 
-    return {"scores": out_scores, "ys": ys, "ys_bin": ys_bin, "n": len(kept),
-            "seq_terms": seq_terms}
+    return {
+        "scores": out_scores,
+        "ys": ys,
+        "ys_bin": ys_bin,
+        "n": len(kept),
+        "seq_terms": seq_terms,
+    }
 
 
-def _assay_metrics(name, score_vals, ys, ys_bin, problem_type, bin_present,
-                   negate_auc=False):
+def _assay_metrics(name, score_vals, ys, ys_bin, problem_type, bin_present, negate_auc=False):
     """Per-assay Spearman (+ optional AUC) for one score over one assay.
 
     ``negate_auc`` negates the score before the AUC (clinical pathogenicity: bin
@@ -525,8 +625,7 @@ def _assay_metrics(name, score_vals, ys, ys_bin, problem_type, bin_present,
     auc = None
     if bin_present:
         sv_auc = -sv if negate_auc else sv
-        pairs = [(b, s) for b, s in zip(ys_bin, sv_auc)
-                 if b is not None and not np.isnan(float(b))]
+        pairs = [(b, s) for b, s in zip(ys_bin, sv_auc) if b is not None and not np.isnan(float(b))]
         if len(pairs) == len(sv):
             yb = [int(round(float(b))) for b, _ in pairs]
             if len(set(yb)) == 2:
@@ -540,9 +639,22 @@ def _assay_metrics(name, score_vals, ys, ys_bin, problem_type, bin_present,
 # --------------------------------------------------------------------------- #
 # Task driver.
 # --------------------------------------------------------------------------- #
-def _eval_task(task_key, model, tokenizer, refs, device, batch_size, max_length,
-               model_window, max_assays, max_variants_per_assay, di3_window,
-               only_assays=None, compute_di3=True, ensemble_weights=(1.0, 1.0, 1.0)):
+def _eval_task(
+    task_key,
+    model,
+    tokenizer,
+    refs,
+    device,
+    batch_size,
+    max_length,
+    model_window,
+    max_assays,
+    max_variants_per_assay,
+    di3_window,
+    only_assays=None,
+    compute_di3=True,
+    ensemble_weights=(1.0, 1.0, 1.0),
+):
     cfg = TASKS[task_key]
     from datasets import load_dataset
 
@@ -561,8 +673,9 @@ def _eval_task(task_key, model, tokenizer, refs, device, batch_size, max_length,
     # ships a float DMS_score directly.
     label_map = getattr(cfg, "label_map", None)
     if label_map:
-        labels = np.asarray([label_map.get(str(x), np.nan) for x in data[cfg.label_col]],
-                            dtype=float)
+        labels = np.asarray(
+            [label_map.get(str(x), np.nan) for x in data[cfg.label_col]], dtype=float
+        )
     else:
         labels = np.asarray(data[cfg.label_col], dtype=object).astype(float)
     groups = np.asarray(data[cfg.group_by])
@@ -585,9 +698,16 @@ def _eval_task(task_key, model, tokenizer, refs, device, batch_size, max_length,
     if max_assays:
         assays = assays[:max_assays]
 
-    # pssm_marginal + ensemble_seq are the new fast seq-only scores.
-    SCORE_NAMES = ["mlm_marginal", "di3_sad", "cons_weighted_mlm", "pssm_marginal",
-                   "ensemble", "ensemble_seq"]
+    # pssm_marginal/pssm_head + ensemble_seq are the fast seq-only scores.
+    SCORE_NAMES = [
+        "mlm_marginal",
+        "di3_sad",
+        "cons_weighted_mlm",
+        "pssm_marginal",
+        "pssm_head",
+        "ensemble",
+        "ensemble_seq",
+    ]
     recs = {s: [] for s in SCORE_NAMES}
     timings = {s: 0.0 for s in SCORE_NAMES}
     per_assay_n = []
@@ -601,30 +721,59 @@ def _eval_task(task_key, model, tokenizer, refs, device, batch_size, max_length,
         wt = wts[int(idx[0])]
 
         t_all0 = time.time()
-        res = _score_assay(model, tokenizer, refs, wt, idx, muts, labels, bin_labels,
-                           aa2id, device, max_length, model_window, batch_size,
-                           di3_window, compute_di3, ensemble_weights=ensemble_weights)
+        res = _score_assay(
+            model,
+            tokenizer,
+            refs,
+            wt,
+            idx,
+            muts,
+            labels,
+            bin_labels,
+            aa2id,
+            device,
+            max_length,
+            model_window,
+            batch_size,
+            di3_window,
+            compute_di3,
+            ensemble_weights=ensemble_weights,
+        )
         elapsed = time.time() - t_all0
         # Lightweight progress so long full-data runs aren't opaque.
-        print(f"[aux] assay {k_assay}/{n_assays_total} {str(g):<45s} "
-              f"nvar={idx.size:>5d} wtlen={len(wt):>5d} {elapsed:>7.1f}s",
-              flush=True)
+        print(
+            f"[aux] assay {k_assay}/{n_assays_total} {str(g):<45s} "
+            f"nvar={idx.size:>5d} wtlen={len(wt):>5d} {elapsed:>7.1f}s",
+            flush=True,
+        )
         if res is None:
             continue
         # crude attribution: di3 dominates the per-mutant forwards; split the
         # measured wall-clock by counting distinct mutants vs the shared tables.
         timings["di3_sad"] += elapsed  # whole-assay (di3 is the marginal extra cost)
-        for s in ["mlm_marginal", "cons_weighted_mlm", "pssm_marginal",
-                  "ensemble", "ensemble_seq"]:
+        for s in [
+            "mlm_marginal",
+            "cons_weighted_mlm",
+            "pssm_marginal",
+            "pssm_head",
+            "ensemble",
+            "ensemble_seq",
+        ]:
             timings[s] += 0.0
         per_assay_n.append(res["n"])
         seq_terms_all.append(res["seq_terms"])
         seq_ys_all.append(np.asarray(res["ys"], dtype=np.float64))
 
         for s in SCORE_NAMES:
-            m = _assay_metrics(s, res["scores"][s], res["ys"], res["ys_bin"],
-                               cfg.problem_type, bin_labels is not None,
-                               negate_auc=(cfg.problem_type == "binary"))
+            m = _assay_metrics(
+                s,
+                res["scores"][s],
+                res["ys"],
+                res["ys_bin"],
+                cfg.problem_type,
+                bin_labels is not None,
+                negate_auc=(cfg.problem_type == "binary"),
+            )
             if m is not None:
                 m["assay"] = str(g)
                 m["n"] = res["n"]
@@ -634,17 +783,21 @@ def _eval_task(task_key, model, tokenizer, refs, device, batch_size, max_length,
     # in-sample on these assays (upper bound, NOT held out — see docstring).
     best_w, best_sp = _best_simplex_weights(seq_terms_all, seq_ys_all, step=0.1)
 
-    return {"task": task_key, "recs": recs, "timings": timings,
-            "n_assays": len(per_assay_n),
-            "ensemble_weights": list(ensemble_weights),
-            "best_seq_weights": list(best_w) if best_w is not None else None,
-            "best_seq_spearman": best_sp}
+    return {
+        "task": task_key,
+        "recs": recs,
+        "timings": timings,
+        "n_assays": len(per_assay_n),
+        "ensemble_weights": list(ensemble_weights),
+        "best_seq_weights": list(best_w) if best_w is not None else None,
+        "best_seq_spearman": best_sp,
+    }
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model_name", default="/data/proteva/cache/ckpts/hf_stage2_final")
-    ap.add_argument("--tasks", nargs="*", default=SUBSTITUTION_ZS)
+    ap.add_argument("--tasks", nargs="*", default=SUPPORTED_AUX_TASKS)
     # Canonical aux dirs are aux_zs_<tag>_full2/ (what final_benchmark_report reads);
     # the orchestrator passes the per-model dir explicitly. This bare default follows
     # the _full2 convention so a one-off run never resurrects the old (deleted) aux_zs/.
@@ -654,26 +807,54 @@ def main(argv=None):
     ap.add_argument("--max_length", type=int, default=None)
     ap.add_argument("--model_window", type=int, default=None)
     ap.add_argument("--max_assays", type=int, default=None)
-    ap.add_argument("--assays", nargs="*", default=None,
-                    help="optional explicit DMS_id list to score (e.g. for a fast "
-                         "smoke test on small assays); default scores all assays.")
-    ap.add_argument("--max_variants_per_assay", type=_opt_int, default=2000,
-                    help="cap per-mutant di3 forwards (default 2000). Pass "
-                         "'None'/'none'/0/-1 to DISABLE the cap and score full data "
-                         "(now fast enough thanks to the GPU-vectorized di3 path).")
-    ap.add_argument("--di3_window", type=int, default=4,
-                    help="half-width k of the symKL window around each mutated site.")
-    ap.add_argument("--no_di3", action="store_true",
-                    help="skip the expensive di3_sad per-mutant forwards; run only "
-                         "the cheap mlm_marginal + cons_weighted_mlm + pssm_marginal "
-                         "+ ensemble_seq path (fully fast, mlm-speed).")
-    ap.add_argument("--ensemble_weights", type=str, default="1,1,1",
-                    help="3 comma-separated weights (mlm,cons,pssm) for the fast "
-                         "ensemble_seq (terms z-scored first; need not sum to 1). "
-                         "Default equal. The report also prints the in-sample best "
-                         "weights as a ceiling.")
-    ap.add_argument("--sanity_check", action="store_true", default=True,
-                    help="verify the canon AA token-id map recovers WT residues.")
+    ap.add_argument(
+        "--assays",
+        nargs="*",
+        default=None,
+        help="optional explicit DMS_id list to score (e.g. for a fast "
+        "smoke test on small assays); default scores all assays.",
+    )
+    ap.add_argument(
+        "--max_variants_per_assay",
+        type=_opt_int,
+        default=2000,
+        help="cap per-mutant di3 forwards (default 2000). Pass "
+        "'None'/'none'/0/-1 to DISABLE the cap and score full data "
+        "(now fast enough thanks to the GPU-vectorized di3 path).",
+    )
+    ap.add_argument(
+        "--di3_window",
+        type=int,
+        default=4,
+        help="half-width k of the symKL window around each mutated site.",
+    )
+    ap.add_argument(
+        "--no_di3",
+        action="store_true",
+        help="skip the expensive di3_sad per-mutant forwards; run only "
+        "the cheap mlm_marginal + cons_weighted_mlm + pssm_marginal "
+        "+ ensemble_seq path (fully fast, mlm-speed).",
+    )
+    ap.add_argument(
+        "--ensemble_weights",
+        type=str,
+        default="1,1,1",
+        help="3 comma-separated weights (mlm,cons,pssm) for the fast "
+        "ensemble_seq (terms z-scored first; need not sum to 1). "
+        "Default equal. The report also prints the in-sample best "
+        "weights as a ceiling.",
+    )
+    ap.add_argument(
+        "--dms_ref",
+        default=DMS_REF_DEFAULT,
+        help="ProteinGym DMS_substitutions.csv for hierarchical DMS aggregation",
+    )
+    ap.add_argument(
+        "--sanity_check",
+        action="store_true",
+        default=True,
+        help="verify the canon AA token-id map recovers WT residues.",
+    )
     args = ap.parse_args(argv)
     ens_w = tuple(float(x) for x in str(args.ensemble_weights).split(","))
     if len(ens_w) != 3:
@@ -715,12 +896,29 @@ def main(argv=None):
         if task_key not in TASKS:
             print(f"skip unknown task {task_key}")
             continue
-        result = _eval_task(task_key, model, tokenizer, refs, device,
-                            args.batch_size, args.max_length, model_window,
-                            args.max_assays, args.max_variants_per_assay,
-                            args.di3_window, only_assays=args.assays,
-                            compute_di3=not args.no_di3, ensemble_weights=ens_w)
-        _report(task_key, result, args, out)
+        if task_key not in SUPPORTED_AUX_TASKS:
+            print(
+                f"skip unsupported aux task {task_key} "
+                "(aux-head scorer supports substitutions only)"
+            )
+            continue
+        result = _eval_task(
+            task_key,
+            model,
+            tokenizer,
+            refs,
+            device,
+            args.batch_size,
+            args.max_length,
+            model_window,
+            args.max_assays,
+            args.max_variants_per_assay,
+            args.di3_window,
+            only_assays=args.assays,
+            compute_di3=not args.no_di3,
+            ensemble_weights=ens_w,
+        )
+        _report(task_key, result, args, out, args.dms_ref)
     return 0
 
 
@@ -732,61 +930,118 @@ def _canon_sanity_check(model, tokenizer, device, max_length):
     the stale CANON_TOKEN_IDS gives ~20%).
     """
     from plm.hf.collator import ProteinPackedCollator
+
     collator = ProteinPackedCollator()
     collator._ensure_ready()
-    aa_to_id = aa_token_id_lookup(collator)            # AA letter -> token id (correct)
+    aa_to_id = aa_token_id_lookup(collator)  # AA letter -> token id (correct)
     aa_ids = [aa_to_id[a] for a in _AA_LETTERS]
     seq = "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKR"
     res = _aux_forward(model, tokenizer, [seq], device, max_length)[0]
     mlm = res[2]  # (L, V) log-probs
-    cols = mlm[:, aa_ids]                              # (L, 20) over canonical AAs
+    cols = mlm[:, aa_ids]  # (L, 20) over canonical AAs
     pred = cols.argmax(dim=-1).tolist()
     recovered = "".join(_AA_LETTERS[p] for p in pred)
     n = min(len(seq), len(recovered))
     acc = sum(1 for a, b in zip(seq[:n], recovered[:n]) if a == b) / n
-    print(f"[sanity] di3_logits shape={tuple(res[0].shape)} "
-          f"cons_pred shape={tuple(res[1].shape)} logits(20-slice) shape={tuple(cols.shape)}")
+    print(
+        f"[sanity] di3_logits shape={tuple(res[0].shape)} "
+        f"cons_pred shape={tuple(res[1].shape)} logits(20-slice) shape={tuple(cols.shape)}"
+    )
     print(f"[sanity] canon-id WT recovery (unmasked decoder argmax): {acc:.1%} over {n} residues")
     if acc < 0.5:
         print("[sanity] WARNING: low recovery — canon token-id map likely WRONG.")
 
 
-def _report(task_key, result, args, out):
+def _aggregate_score_rows(task_key, rows, dms_ref_path):
+    """Aggregate one score's per-assay rows to task-level eval metrics.
+
+    For DMS substitutions, mirrors the canonical ProteinGym hierarchical
+    aggregation (UniProt -> coarse category). For clinical substitutions,
+    matches per-gene mean AUC.
+    """
+    sps = [r["spearman"] for r in rows if r.get("spearman") is not None]
+    aucs = [r["auc"] for r in rows if r.get("auc") is not None]
+    mean_spearman = float(np.mean(sps)) if sps else None
+    mean_auc = float(np.mean(aucs)) if aucs else None
+
+    if task_key == "proteingym_dms_substitutions_zeroshot":
+        try:
+            eval_spearman = _hier_mean(rows, "spearman", dms_ref_path)
+            eval_auc = _hier_mean(rows, "auc", dms_ref_path)
+            aggregation = "hierarchical(UniProt->category)"
+        except Exception as exc:
+            eval_spearman = mean_spearman
+            eval_auc = mean_auc
+            aggregation = f"flat(hierarchical-unavailable: {type(exc).__name__})"
+    elif task_key == "proteingym_clinical_substitutions_zeroshot":
+        eval_spearman = mean_spearman
+        eval_auc = mean_auc
+        aggregation = "per_gene_mean"
+    else:
+        eval_spearman = mean_spearman
+        eval_auc = mean_auc
+        aggregation = "flat"
+
+    return {
+        "mean_spearman": mean_spearman,
+        "mean_auc": mean_auc,
+        "eval_spearman": eval_spearman,
+        "eval_auc": eval_auc,
+        "aggregation": aggregation,
+        "n_assays": len(rows),
+    }
+
+
+def _report(task_key, result, args, out, dms_ref_path):
     recs = result["recs"]
     timings = result["timings"]
     summary = {}
     print(f"\n=== {task_key}  ({result['n_assays']} assays scored) ===")
-    print(f"{'score':<20} {'mean_spearman':>14} {'n_assays':>9} {'wall_s':>9}")
+    print(f"{'score':<20} {'eval_spearman':>14} {'eval_auc':>10} {'n_assays':>9} {'wall_s':>9}")
     jsonl_path = out / f"aux_zs_{Path(args.model_name).name}__{task_key}.jsonl"
     with open(jsonl_path, "w") as fh:
         for score_name, rows in recs.items():
-            sps = [r["spearman"] for r in rows if r["spearman"] is not None]
-            mean_sp = float(np.mean(sps)) if sps else float("nan")
-            aucs = [r["auc"] for r in rows if r.get("auc") is not None]
-            mean_auc = float(np.mean(aucs)) if aucs else None
+            aggregate = _aggregate_score_rows(task_key, rows, dms_ref_path)
+            eval_sp = aggregate["eval_spearman"]
+            eval_auc = aggregate["eval_auc"]
             wall = timings.get(score_name, 0.0)
-            summary[score_name] = {"mean_spearman": mean_sp, "mean_auc": mean_auc,
-                                   "n_assays": len(rows), "wall_s": wall}
-            print(f"{score_name:<20} {mean_sp:>14.4f} {len(rows):>9} {wall:>9.1f}")
+            summary[score_name] = {**aggregate, "wall_s": wall}
+            eval_sp_txt = f"{eval_sp:0.4f}" if eval_sp is not None else "nan"
+            eval_auc_txt = f"{eval_auc:0.4f}" if eval_auc is not None else "nan"
+            print(
+                f"{score_name:<20} {eval_sp_txt:>14} {eval_auc_txt:>10} {len(rows):>9} {wall:>9.1f}"
+            )
             for r in rows:
                 fh.write(json.dumps({"task": task_key, **r}) + "\n")
     # aux lift vs mlm_marginal baseline
-    base = summary.get("mlm_marginal", {}).get("mean_spearman", float("nan"))
-    print(f"  (baseline mlm_marginal mean Spearman = {base:.4f}; "
-          f"aux lift = score - baseline)")
+    base = summary.get("mlm_marginal", {}).get("eval_spearman", None)
+    base_txt = f"{base:.4f}" if base is not None else "nan"
+    print(f"  (baseline mlm_marginal eval Spearman = {base_txt}; aux lift = score - baseline)")
     # ensemble_seq weight ceiling (in-sample upper bound; the shipped ensemble_seq
     # uses --ensemble_weights, default equal).
     bw, bsp = result.get("best_seq_weights"), result.get("best_seq_spearman")
     if bw is not None:
-        print(f"  ensemble_seq weights used (mlm,cons,pssm) = "
-              f"{tuple(result.get('ensemble_weights'))}; in-sample BEST = "
-              f"{tuple(round(x, 2) for x in bw)} -> Spearman {bsp:.4f} (ceiling, not held out)")
+        print(
+            f"  ensemble_seq weights used (mlm,cons,pssm) = "
+            f"{tuple(result.get('ensemble_weights'))}; in-sample BEST = "
+            f"{tuple(round(x, 2) for x in bw)} -> Spearman {bsp:.4f} (ceiling, not held out)"
+        )
     (out / f"summary_{Path(args.model_name).name}__{task_key}.json").write_text(
-        json.dumps({"task": task_key, "model": args.model_name,
-                    "summary": summary, "di3_window": args.di3_window,
-                    "max_variants_per_assay": args.max_variants_per_assay,
-                    "ensemble_weights": result.get("ensemble_weights"),
-                    "best_seq_weights": bw, "best_seq_spearman": bsp}, indent=2))
+        json.dumps(
+            {
+                "task": task_key,
+                "model": args.model_name,
+                "summary": summary,
+                "di3_window": args.di3_window,
+                "max_variants_per_assay": args.max_variants_per_assay,
+                "dms_ref": dms_ref_path,
+                "ensemble_weights": result.get("ensemble_weights"),
+                "best_seq_weights": bw,
+                "best_seq_spearman": bsp,
+            },
+            indent=2,
+        )
+    )
     print(f"  -> JSONL: {jsonl_path}")
 
 

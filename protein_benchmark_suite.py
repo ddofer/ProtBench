@@ -127,7 +127,7 @@ DEFAULT_SKLEARN_N_JOBS = DEFAULT_KNN_N_JOBS
 
 # NOTE: datasets is imported locally in task evaluation functions to avoid
 # corrupting ESMplusplus models (which have issues with pyarrow/datasets library)
-from scipy.stats import spearmanr
+from scipy.stats import pearsonr, spearmanr
 from sklearn.ensemble import (
     HistGradientBoostingClassifier,
     HistGradientBoostingRegressor,
@@ -138,6 +138,8 @@ from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
     f1_score,
+    mean_absolute_error,
+    r2_score,
     roc_auc_score,
 )
 from sklearn.model_selection import KFold, StratifiedKFold
@@ -2250,6 +2252,7 @@ def evaluate_classification_probe(
     metrics = {
         "Accuracy": accuracy_score(y_test, predictions),
         "F1": f1_score(y_test, predictions, zero_division=0),
+        "F1_Macro": f1_score(y_test, predictions, average="macro", zero_division=0),
     }
     if hasattr(classifier, "predict_proba"):
         probabilities = classifier.predict_proba(X_test)
@@ -2297,9 +2300,17 @@ def evaluate_regression_probe(
         spearman_corr = 0.0
 
     mse = float(np.mean((y_test_arr - predictions) ** 2))
+    try:
+        pearson_corr, _ = pearsonr(y_test_arr, predictions)
+        pearson_corr = 0.0 if np.isnan(pearson_corr) else float(pearson_corr)
+    except Exception:
+        pearson_corr = 0.0
     return {
         "Spearman": float(spearman_corr),
+        "Pearson": pearson_corr,
         "MSE": mse,
+        "MAE": float(mean_absolute_error(y_test_arr, predictions)),
+        "R2": float(r2_score(y_test_arr, predictions)),
     }
 
 
@@ -3664,14 +3675,16 @@ def main():
 
     logger.info(f"Tasks to evaluate ({len(task_keys)}): {task_keys}")
 
-    # Fast mode sample cap
-    if config.get("fast"):
+    # Sample cap: ONLY in --very-fast (scout) mode. Default/--fast and --no-fast
+    # run full data (no truncation); --very-fast caps sequences + residue-level
+    # token-classification tasks to stay within a few minutes for quick scouts.
+    if config.get("very_fast"):
         max_samples = config.get("max_samples")
         if max_samples is None or max_samples > FAST_MAX_SAMPLES:
             max_samples = FAST_MAX_SAMPLES
         config["max_samples"] = max_samples
         logger.info(
-            "Fast mode enabled: tasks=%s, max_samples=%s",
+            "Very-fast mode: tasks=%s, max_samples=%s (default/--fast run full data)",
             ",".join(task_keys),
             max_samples,
         )

@@ -83,9 +83,11 @@ def _read_existing(out_csv: Path) -> list[dict]:
 def _dedup_key(r: dict) -> tuple:
     # NOT keyed on date: a corrected re-run (e.g. fixed LoRA lr) must OVERWRITE
     # the stale row, not append a second one on a new day. `notes` IS in the key
-    # so two distinct runs on the SAME checkpoint stay separate (e.g. a
-    # "verify-...-lora" smoke vs the real run) — notes is set once per launcher,
-    # not hand-typed per row, so it is stable enough to be identity here.
+    # here so a re-scored run can be merged in; the `final` pass in collect()
+    # then collapses any remaining notes-drift for the SAME logical cell
+    # (model, task, probe, split, metric), keeping the latest date. So notes
+    # only keeps rows distinct WITHIN a single merge — the on-disk file holds one
+    # row per cell regardless of notes.
     return (r["model"], r.get("notes", ""), r["task"], r["probe_type"], r["split"], r["metric_name"])
 
 def collect(probe_csvs: list[str], ft_jsonls: list[str], out_csv: str,
