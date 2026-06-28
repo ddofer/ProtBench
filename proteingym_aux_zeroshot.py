@@ -23,10 +23,10 @@ adds FOUR Proteva-only aux scores derived from the trained aux heads:
 
 and an ``ensemble`` that z-scores the three terms per assay and sums them.
 
-Substitutions only (DMS_substitutions + clinical_substitutions). CPU- and
-GPU-capable; the smoke test runs on CPU. Indel tasks are not supported in this
-aux-head scorer because its per-position substitution LLR path assumes equal
-WT/mutant length.
+Substitutions are the default. Indels are available behind ``--aux_indels`` via
+WT-target edit-window aux compatibility scores; inserted residues are ignored in
+the first scout implementation, and aligned retained residues are scored against
+WT-derived aux targets.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ import json
 import sys
 import time
 from collections import defaultdict
+from difflib import SequenceMatcher
 from pathlib import Path
 
 # protein_benchmark_suite (and its load_model) does bench-local imports
@@ -45,6 +46,9 @@ from pathlib import Path
 _BENCH_DIR = str(Path(__file__).resolve().parent)
 if _BENCH_DIR not in sys.path:
     sys.path.insert(0, _BENCH_DIR)
+_REPO_DIR = str(Path(__file__).resolve().parents[2])
+if _REPO_DIR not in sys.path:
+    sys.path.insert(0, _REPO_DIR)
 
 import numpy as np
 import torch
@@ -70,11 +74,17 @@ from plm.bench.zero_shot_dms import aa_token_id_lookup
 _AA_LETTERS = "ACDEFGHIKLMNPQRSTVWY"
 _AA20_TO_IDX = {aa: i for i, aa in enumerate(_AA_LETTERS)}
 
-# Tasks this scorer supports (substitutions only).
+# Tasks this scorer supports. Indels require ``--aux_indels``.
 SUPPORTED_AUX_TASKS = [
     "proteingym_dms_substitutions_zeroshot",
     "proteingym_clinical_substitutions_zeroshot",
+    "proteingym_dms_indels_zeroshot",
+    "proteingym_clinical_indels_zeroshot",
 ]
+INDEL_AUX_TASKS = {
+    "proteingym_dms_indels_zeroshot",
+    "proteingym_clinical_indels_zeroshot",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -307,9 +317,194 @@ def _opt_int(s):
     return None if v <= 0 else v
 
 
+def _alignment_pairs_and_edits(wt: str, mut: str) -> tuple[list[tuple[int, int]], list[int]]:
+    """Align mutant to WT and return paired positions plus WT edit anchors.
+
+    Replacements are treated as aligned positions and marked as edits. Insertions
+    have no WT residue, so their anchor is the WT position before/at the insertion.
+    """
+    pairs: list[tuple[int, int]] = []
+    edit_positions: list[int] = []
+    matcher = SequenceMatcher(None, wt, mut, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            pairs.extend((i, j1 + (i - i1)) for i in range(i1, i2))
+        elif tag == "replace":
+            n_aligned = min(i2 - i1, j2 - j1)
+            pairs.extend((i1 + k, j1 + k) for k in range(n_aligned))
+            edit_positions.extend(range(i1, max(i2, i1 + 1)))
+        elif tag == "delete":
+            edit_positions.extend(range(i1, max(i2, i1 + 1)))
+        elif tag == "insert":
+            edit_positions.append(min(i1, max(len(wt) - 1, 0)))
+    return pairs, sorted(set(edit_positions))
+
+
+def _crop_around_edits(
+    wt: str,
+    mut: str,
+    edit_window: int,
+) -> tuple[str, str, list[tuple[int, int]]]:
+    """Crop WT and mutant around their edit span and align retained residues."""
+    matcher = SequenceMatcher(None, wt, mut, autojunk=False)
+    wt_bounds: list[int] = []
+    mut_bounds: list[int] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        wt_bounds.extend([i1, i2])
+        mut_bounds.extend([j1, j2])
+
+    if wt_bounds:
+        wt_lo = max(0, min(wt_bounds) - edit_window)
+        wt_hi = min(len(wt), max(wt_bounds) + edit_window)
+        mut_lo = max(0, min(mut_bounds) - edit_window)
+        mut_hi = min(len(mut), max(mut_bounds) + edit_window)
+    else:
+        wt_lo, wt_hi = 0, len(wt)
+        mut_lo, mut_hi = 0, len(mut)
+
+    wt_crop = wt[wt_lo:wt_hi]
+    mut_crop = mut[mut_lo:mut_hi]
+    pairs, edits = _alignment_pairs_and_edits(wt_crop, mut_crop)
+    if edits:
+        lo = max(0, min(edits) - edit_window)
+        hi = min(len(wt_crop), max(edits) + edit_window + 1)
+        pairs = [(w, m) for w, m in pairs if lo <= w < hi]
+    return wt_crop, mut_crop, pairs
+
+
+def _logp_ce_delta(
+    wt_logp: torch.Tensor, mut_logp: torch.Tensor, pairs: list[tuple[int, int]]
+) -> float | None:
+    """Mean soft-target log-prob delta using WT distribution as target."""
+    vals = []
+    for wt_pos, mut_pos in pairs:
+        if wt_pos >= wt_logp.shape[0] or mut_pos >= mut_logp.shape[0]:
+            continue
+        target = wt_logp[wt_pos].exp()
+        vals.append(float((target * (mut_logp[mut_pos] - wt_logp[wt_pos])).sum()))
+    return float(np.mean(vals)) if vals else None
+
+
+def _cons_l2_delta(
+    wt_cons: torch.Tensor | np.ndarray,
+    mut_cons: torch.Tensor | np.ndarray,
+    pairs: list[tuple[int, int]],
+) -> float | None:
+    """Negative mean squared difference to WT conservation prediction."""
+    wt_arr = np.asarray(wt_cons, dtype=np.float64)
+    mut_arr = np.asarray(mut_cons, dtype=np.float64)
+    vals = []
+    for wt_pos, mut_pos in pairs:
+        if wt_pos >= wt_arr.shape[0] or mut_pos >= mut_arr.shape[0]:
+            continue
+        vals.append(-float((mut_arr[mut_pos] - wt_arr[wt_pos]) ** 2))
+    return float(np.mean(vals)) if vals else None
+
+
+def _wt_target_aux_deltas(wt_aux, mut_aux, pairs: list[tuple[int, int]]) -> dict[str, float | None]:
+    """Compute WT-target aux compatibility deltas for aligned residues."""
+    wt_di3, wt_cons, wt_mlm, wt_pssm_head = wt_aux
+    mut_di3, mut_cons, mut_mlm, mut_pssm_head = mut_aux
+    return {
+        "di3_wt_ce": _logp_ce_delta(wt_di3, mut_di3, pairs),
+        "pssm_wt_ce": _logp_ce_delta(wt_mlm, mut_mlm, pairs),
+        "pssm_head_wt_ce": (
+            _logp_ce_delta(wt_pssm_head, mut_pssm_head, pairs)
+            if wt_pssm_head is not None and mut_pssm_head is not None
+            else None
+        ),
+        "cons_wt_l2": _cons_l2_delta(wt_cons, mut_cons, pairs),
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Per-assay scoring.
 # --------------------------------------------------------------------------- #
+@torch.no_grad()
+def _score_indel_assay(
+    model,
+    tokenizer,
+    wt,
+    idx,
+    muts,
+    labels,
+    bin_labels,
+    device,
+    max_length,
+    batch_size,
+    indel_window,
+):
+    """Score indels via WT-target aux compatibility over a local edit window."""
+    plans = []
+    unique_seqs: dict[str, None] = {}
+    for i in idx:
+        ii = int(i)
+        mut = muts[ii]
+        if len(mut) == len(wt):
+            continue
+        wt_crop, mut_crop, pairs = _crop_around_edits(wt, mut, indel_window)
+        if len(pairs) < 2:
+            continue
+        plans.append((ii, wt_crop, mut_crop, pairs))
+        unique_seqs.setdefault(wt_crop, None)
+        unique_seqs.setdefault(mut_crop, None)
+
+    if len(plans) < 2:
+        return None
+
+    aux_cache = {}
+    seqs = list(unique_seqs)
+    for b0 in range(0, len(seqs), batch_size):
+        chunk = seqs[b0 : b0 + batch_size]
+        aux = _aux_forward(model, tokenizer, chunk, device, max_length)
+        aux_cache.update(zip(chunk, aux))
+
+    out_scores = {
+        "di3_wt_ce": [],
+        "pssm_wt_ce": [],
+        "pssm_head_wt_ce": [],
+        "cons_wt_l2": [],
+    }
+    ys, ys_bin, kept = [], [], []
+    for ii, wt_crop, mut_crop, pairs in plans:
+        deltas = _wt_target_aux_deltas(aux_cache[wt_crop], aux_cache[mut_crop], pairs)
+        if (
+            deltas["di3_wt_ce"] is None
+            or deltas["pssm_wt_ce"] is None
+            or deltas["cons_wt_l2"] is None
+        ):
+            continue
+        for score_name in out_scores:
+            value = deltas[score_name]
+            if value is None:
+                value = deltas["pssm_wt_ce"]
+            out_scores[score_name].append(value)
+        ys.append(labels[ii])
+        ys_bin.append(bin_labels[ii] if bin_labels is not None else None)
+        kept.append(ii)
+
+    if len(kept) < 2:
+        return None
+
+    terms = [
+        _zscore(out_scores["pssm_wt_ce"]),
+        _zscore(out_scores["cons_wt_l2"]),
+        _zscore(out_scores["di3_wt_ce"]),
+    ]
+    out_scores["ensemble_wt"] = list(np.sum(terms, axis=0))
+    return {
+        "scores": out_scores,
+        "ys": ys,
+        "ys_bin": ys_bin,
+        "n": len(kept),
+        "seq_terms": np.vstack(
+            [out_scores["pssm_wt_ce"], out_scores["cons_wt_l2"], out_scores["di3_wt_ce"]]
+        ),
+    }
+
+
 @torch.no_grad()
 def _score_assay(
     model,
@@ -427,6 +622,7 @@ def _score_assay(
 
     # --- 3. di3_sad: per distinct-mutant unmasked forward (GPU-vectorized) ----
     di3_sad = {}  # i -> score
+    di3_wt_ce = {}  # i -> WT-target 3Di log-prob delta
     if compute_di3:
         # Group variants by distinct mutant sequence so each mutant forwards once.
         seq2idxs = defaultdict(list)
@@ -482,14 +678,18 @@ def _score_assay(
             n = torch.minimum(len_mut, len_wt)  # (B,)
             T = min(Tm, Tw)
             sk = _sym_kl(q_wt[:, :T], q_mut[:, :T])  # (B,T) device
+            ce_delta = (q_wt[:, :T].exp() * (q_mut[:, :T] - q_wt[:, :T])).sum(dim=-1)
             # Mask positions beyond the effective length so window sums match the
             # old `kl = _sym_kl(...[:n])` (anything >= n[b] contributes 0).
             ar = torch.arange(T, device=device).unsqueeze(0)  # (1,T)
             valid = ar < n.unsqueeze(1).clamp(max=T)  # (B,T)
             sk = sk * valid
+            ce_delta = ce_delta * valid
             # Prefix sum: window [lo, hi) sum = csum[b,hi] - csum[b,lo].
             csum = torch.zeros((B, T + 1), dtype=sk.dtype, device=device)
             csum[:, 1:] = sk.cumsum(dim=1)
+            ce_csum = torch.zeros((B, T + 1), dtype=ce_delta.dtype, device=device)
+            ce_csum[:, 1:] = ce_delta.cumsum(dim=1)
 
             # Build index tensors for ALL (variant, mutated-position) pairs in this
             # batch: row b, lo = max(0, lp-k), hi = min(n_eff, lp+k+1), keeping only
@@ -520,22 +720,28 @@ def _score_assay(
 
             nvar = len(batch_vars)
             acc = torch.zeros(nvar, dtype=csum.dtype, device=device)
+            ce_acc = torch.zeros(nvar, dtype=ce_csum.dtype, device=device)
             if rows:
                 rows_t = torch.tensor(rows, dtype=torch.long, device=device)
                 los_t = torch.tensor(los, dtype=torch.long, device=device)
                 his_t = torch.tensor(his, dtype=torch.long, device=device)
                 slot_t = torch.tensor(var_slot, dtype=torch.long, device=device)
                 wsum = csum[rows_t, his_t] - csum[rows_t, los_t]  # per-pair sums
+                ce_wsum = ce_csum[rows_t, his_t] - ce_csum[rows_t, los_t]
                 acc.index_add_(0, slot_t, wsum)  # sum per variant
+                ce_acc.index_add_(0, slot_t, ce_wsum)
             acc = (-acc).cpu()  # negate; one xfer
+            ce_acc = ce_acc.cpu()
             for slot, i in enumerate(batch_vars):
                 di3_sad[i] = float(acc[slot])
+                di3_wt_ce[i] = float(ce_acc[slot])
 
     # --- 4. assemble per-variant scores --------------------------------------
     out_scores = {
         "mlm_marginal": [],
         "cons_weighted_mlm": [],
         "di3_sad": [],
+        "di3_wt_ce": [],
         "pssm_marginal": [],
         "pssm_head": [],
     }
@@ -575,6 +781,7 @@ def _score_assay(
         out_scores["mlm_marginal"].append(mlm)
         out_scores["cons_weighted_mlm"].append(cw)
         out_scores["di3_sad"].append(di3_sad.get(ii, np.nan) if compute_di3 else np.nan)
+        out_scores["di3_wt_ce"].append(di3_wt_ce.get(ii, np.nan) if compute_di3 else np.nan)
         out_scores["pssm_marginal"].append(pssm)
         out_scores["pssm_head"].append(pssm_head)
         ys.append(labels[ii])
@@ -589,6 +796,11 @@ def _score_assay(
     if compute_di3 and np.isfinite(out_scores["di3_sad"]).all():
         terms.append(_zscore(out_scores["di3_sad"]))
     out_scores["ensemble"] = list(np.sum(terms, axis=0))
+
+    terms_wt = [_zscore(out_scores["mlm_marginal"]), _zscore(out_scores["cons_weighted_mlm"])]
+    if compute_di3 and np.isfinite(out_scores["di3_wt_ce"]).all():
+        terms_wt.append(_zscore(out_scores["di3_wt_ce"]))
+    out_scores["ensemble_wt_di3"] = list(np.sum(terms_wt, axis=0))
 
     # ensemble_seq: the FAST seq-only alternate — mlm + cons + pssm, no di3
     # (weighted z-score sum). One masked table + one unmasked WT forward; cost is
@@ -654,6 +866,8 @@ def _eval_task(
     only_assays=None,
     compute_di3=True,
     ensemble_weights=(1.0, 1.0, 1.0),
+    aux_indels=False,
+    indel_window=128,
 ):
     cfg = TASKS[task_key]
     from datasets import load_dataset
@@ -699,15 +913,26 @@ def _eval_task(
         assays = assays[:max_assays]
 
     # pssm_marginal/pssm_head + ensemble_seq are the fast seq-only scores.
-    SCORE_NAMES = [
-        "mlm_marginal",
-        "di3_sad",
-        "cons_weighted_mlm",
-        "pssm_marginal",
-        "pssm_head",
-        "ensemble",
-        "ensemble_seq",
-    ]
+    if task_key in INDEL_AUX_TASKS:
+        SCORE_NAMES = [
+            "di3_wt_ce",
+            "pssm_wt_ce",
+            "pssm_head_wt_ce",
+            "cons_wt_l2",
+            "ensemble_wt",
+        ]
+    else:
+        SCORE_NAMES = [
+            "mlm_marginal",
+            "di3_sad",
+            "di3_wt_ce",
+            "cons_weighted_mlm",
+            "pssm_marginal",
+            "pssm_head",
+            "ensemble",
+            "ensemble_wt_di3",
+            "ensemble_seq",
+        ]
     recs = {s: [] for s in SCORE_NAMES}
     timings = {s: 0.0 for s in SCORE_NAMES}
     per_assay_n = []
@@ -721,24 +946,42 @@ def _eval_task(
         wt = wts[int(idx[0])]
 
         t_all0 = time.time()
-        res = _score_assay(
-            model,
-            tokenizer,
-            refs,
-            wt,
-            idx,
-            muts,
-            labels,
-            bin_labels,
-            aa2id,
-            device,
-            max_length,
-            model_window,
-            batch_size,
-            di3_window,
-            compute_di3,
-            ensemble_weights=ensemble_weights,
-        )
+        if task_key in INDEL_AUX_TASKS:
+            if not aux_indels:
+                res = None
+            else:
+                res = _score_indel_assay(
+                    model,
+                    tokenizer,
+                    wt,
+                    idx,
+                    muts,
+                    labels,
+                    bin_labels,
+                    device,
+                    max_length,
+                    batch_size,
+                    indel_window,
+                )
+        else:
+            res = _score_assay(
+                model,
+                tokenizer,
+                refs,
+                wt,
+                idx,
+                muts,
+                labels,
+                bin_labels,
+                aa2id,
+                device,
+                max_length,
+                model_window,
+                batch_size,
+                di3_window,
+                compute_di3,
+                ensemble_weights=ensemble_weights,
+            )
         elapsed = time.time() - t_all0
         # Lightweight progress so long full-data runs aren't opaque.
         print(
@@ -748,17 +991,8 @@ def _eval_task(
         )
         if res is None:
             continue
-        # crude attribution: di3 dominates the per-mutant forwards; split the
-        # measured wall-clock by counting distinct mutants vs the shared tables.
-        timings["di3_sad"] += elapsed  # whole-assay (di3 is the marginal extra cost)
-        for s in [
-            "mlm_marginal",
-            "cons_weighted_mlm",
-            "pssm_marginal",
-            "pssm_head",
-            "ensemble",
-            "ensemble_seq",
-        ]:
+        timings[SCORE_NAMES[0]] += elapsed
+        for s in SCORE_NAMES[1:]:
             timings[s] += 0.0
         per_assay_n.append(res["n"])
         seq_terms_all.append(res["seq_terms"])
@@ -827,6 +1061,17 @@ def main(argv=None):
         type=int,
         default=4,
         help="half-width k of the symKL window around each mutated site.",
+    )
+    ap.add_argument(
+        "--aux_indels",
+        action="store_true",
+        help="enable WT-target edit-window aux scoring for ProteinGym indel tasks",
+    )
+    ap.add_argument(
+        "--indel_window",
+        type=int,
+        default=128,
+        help="half-window around an indel edit span for WT-target aux indel scoring",
     )
     ap.add_argument(
         "--no_di3",
@@ -899,8 +1144,11 @@ def main(argv=None):
         if task_key not in SUPPORTED_AUX_TASKS:
             print(
                 f"skip unsupported aux task {task_key} "
-                "(aux-head scorer supports substitutions only)"
+                "(aux-head scorer supports substitutions plus opt-in indels)"
             )
+            continue
+        if task_key in INDEL_AUX_TASKS and not args.aux_indels:
+            print(f"skip indel aux task {task_key}: pass --aux_indels to enable scout scoring")
             continue
         result = _eval_task(
             task_key,
@@ -917,6 +1165,8 @@ def main(argv=None):
             only_assays=args.assays,
             compute_di3=not args.no_di3,
             ensemble_weights=ens_w,
+            aux_indels=args.aux_indels,
+            indel_window=args.indel_window,
         )
         _report(task_key, result, args, out, args.dms_ref)
     return 0
