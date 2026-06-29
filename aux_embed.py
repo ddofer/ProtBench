@@ -81,6 +81,10 @@ def extract_aux_features(
         t = getattr(output, field, None)
         if not isinstance(t, torch.Tensor):
             continue
+        # cons_head emits (mu, log_var) (width 2); the probe uses the mu channel
+        # only (log_var is uninformative for the embedding). No-op for old width-1.
+        if field == "cons_pred" and t.shape[-1] == 2:
+            t = t[..., :1]
         present.append(field)
         if t.dim() == 3:
             # Per-residue: (1, T, D) → (P, D) via segment mean-pool.

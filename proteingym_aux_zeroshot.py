@@ -110,7 +110,7 @@ def _aux_forward(model, tokenizer, seqs, device, max_length):
     am = enc.get("attention_mask", None)
     out = model(input_ids=ids.to(device), attention_mask=am.to(device) if am is not None else None)
     di3 = torch.log_softmax(out.di3_logits.float(), dim=-1).cpu()  # (B,T,20)
-    cons = out.cons_pred.float().squeeze(-1).cpu()  # (B,T)
+    cons = out.cons_pred[..., 0].float().cpu()  # mu channel -> (B,T) (head emits (mu, log_var))
     mlm = torch.log_softmax(out.logits.float(), dim=-1).cpu()  # (B,T,V)
     pssm_logits = getattr(out, "pssm_logits", None)
     pssm_head = (

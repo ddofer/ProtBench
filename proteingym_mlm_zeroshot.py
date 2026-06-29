@@ -824,12 +824,26 @@ def main(argv=None):
     # --merge_only: fold the per-shard sidecars into the final JSONL, no scoring/GPU.
     if args.merge_only:
         n = args.assay_num_shards
+        # COMPLETENESS GATE: every shard drops a _shard_done__<i>of<n>.json marker
+        # when it finishes (even if it scored zero assays). If fewer than n markers
+        # exist, a shard CRASHED/was killed mid-run — merging the surviving sidecars
+        # would silently write a leaderboard metric over a FRACTION of the assays.
+        # Refuse, so the caller re-runs rather than trusting a partial number.
+        done = sorted(out.glob(f"_shard_done__*of{n}.json"))
+        if len(done) != n:
+            raise SystemExit(
+                f"--merge_only: found {len(done)}/{n} shard-done markers "
+                f"({[d.name for d in done]}) — a shard crashed or did not finish; "
+                "refusing to write a PARTIAL result. Re-run the shards."
+            )
         for task_key in args.tasks:
             if task_key not in TASKS:
                 continue
             shard_files = sorted(out.glob(f"_shard_{task_key}__*of{n}.json"))
             if not shard_files:
-                print(f"merge {task_key}: no _shard_{task_key}__*of{n}.json sidecars found")
+                # All n shards finished (gate passed) but none scored this task ->
+                # genuinely no scorable assays. Correct to skip (not a partial).
+                print(f"merge {task_key}: no scorable assays across all {n} shards")
                 continue
             payloads = [json.loads(p.read_text()) for p in shard_files]
             merged = _merge_results([p["result"] for p in payloads])
@@ -839,6 +853,8 @@ def main(argv=None):
                   f"over {len(merged['recs'])} assays from {len(shard_files)} shards -> {jsonl_path}")
             for p in shard_files:
                 p.unlink()
+        for d in done:
+            d.unlink()
         return 0
 
     # Load model using the same loader as protein_benchmark_suite / wt_tta_smoke.
@@ -953,6 +969,14 @@ def main(argv=None):
               f"(skipped={result['n_skipped']})")
         print(f"  -> JSONL: {jsonl_path}")
 
+    # Sharded scoring: drop a DONE marker (even if this shard scored zero assays)
+    # so --merge_only can verify ALL n shards finished. A crashed shard leaves no
+    # marker -> merge refuses to write a partial result.
+    if args.assay_num_shards > 1:
+        (out / f"_shard_done__{args.assay_shard}of{args.assay_num_shards}.json").write_text(
+            json.dumps({"shard": args.assay_shard, "num_shards": args.assay_num_shards,
+                        "tasks": list(args.tasks)})
+        )
     return 0
 
 

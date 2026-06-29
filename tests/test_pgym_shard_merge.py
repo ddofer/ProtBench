@@ -56,3 +56,52 @@ def test_merge_pooled_clinical_indels_equals_unsharded():
     a_full = aggregate_proteingym(full)
     a_merged = aggregate_proteingym(_merge_results(shards))
     assert abs(a_full["eval_auc"] - a_merged["eval_auc"]) < 1e-9
+
+
+# --- merge completeness gate: a crashed shard must NOT yield a partial result ---
+import json as _json
+import os as _os
+import subprocess as _sp
+
+from plm.bench._hf_finetune_common import safe_ckpt as _safe_ckpt
+
+_CTX = {
+    "checkpoint": "fakemodel", "model_type": "amplify", "model_window": 1022,
+    "window_strategy": "optimal_window", "rope_extended_to": None,
+    "indel_score_mode": "strided", "indel_pll_passes": 16, "notes": "t",
+}
+
+
+def _write_shard(out, task, shard, n, recs):
+    (out / f"_shard_{task}__{shard}of{n}.json").write_text(_json.dumps(
+        {"result": {"task": task, "recs": recs, "pool_ys": [], "pool_scores": [],
+                    "n_skipped": 0}, "ctx": _CTX}))
+
+
+def _run_merge(tmpdir, n):
+    return _sp.run(
+        ["plm/.venv/bin/python", "plm/bench/proteingym_mlm_zeroshot.py",
+         "--model_name", "fakemodel", "--merge_only", "--assay_num_shards", str(n),
+         "--tasks", "proteingym_dms_indels_zeroshot", "--output_dir", str(tmpdir)],
+        capture_output=True, text=True, env={**_os.environ, "PYTHONPATH": "plm:."})
+
+
+def test_merge_refuses_partial_when_a_shard_marker_is_missing(tmp_path):
+    """A shard that crashes leaves no _shard_done marker; --merge_only must REFUSE
+    (nonzero exit, no JSONL) rather than aggregate a partial leaderboard metric."""
+    out = tmp_path / f"mlm_zs_{_safe_ckpt('fakemodel')}"
+    out.mkdir(parents=True)
+    task = "proteingym_dms_indels_zeroshot"
+    recs = [{"primary": 0.1 * i, "auc": 0.5 + 0.01 * i} for i in range(4)]
+    _write_shard(out, task, 0, 2, recs[0::2])
+    _write_shard(out, task, 1, 2, recs[1::2])
+    (out / "_shard_done__0of2.json").write_text("{}")  # only shard 0 finished
+
+    r = _run_merge(tmp_path, 2)
+    assert r.returncode != 0, "merge must refuse a partial result\n" + r.stdout + r.stderr
+    assert not (tmp_path / f"mlm_zeroshot_{_safe_ckpt('fakemodel')}.jsonl").exists()
+
+    (out / "_shard_done__1of2.json").write_text("{}")  # shard 1 now finished
+    r = _run_merge(tmp_path, 2)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (tmp_path / f"mlm_zeroshot_{_safe_ckpt('fakemodel')}.jsonl").exists()
