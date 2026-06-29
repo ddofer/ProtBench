@@ -387,7 +387,7 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
                max_assays=None, max_variants_per_assay=None,
                model_window=1022, indel_long_policy="skip",
                skip_huge_assays=None, indel_score_mode="strided",
-               indel_pll_passes=32):
+               indel_pll_passes=32, assay_shard=0, assay_num_shards=1):
     cfg = TASKS[task_key]
     is_indel = task_key in INDEL_ZS
     from datasets import load_dataset
@@ -457,6 +457,11 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
         if n_dropped:
             print(f"skip_huge_assays={skip_huge_assays}: dropped {n_dropped} "
                   f"indel assay(s) over the variant cap")
+
+    # Data-parallel: this process scores only its strided 1/N slice of assays.
+    assays = _shard_assays(assays, assay_shard, assay_num_shards)
+    if assay_num_shards > 1:
+        print(f"shard {assay_shard}/{assay_num_shards} {task_key}: {len(assays)} assays")
 
     for _ai, g in enumerate(assays, 1):
         idx = np.asarray(g2idx[str(g)], dtype=int)
@@ -675,6 +680,74 @@ def aggregate_proteingym(result, dms_ref_path=DMS_REF_DEFAULT):
     return out
 
 
+# --- data-parallel sharding (score disjoint assay strides on N GPUs) ----------
+
+def _shard_assays(assays, shard, num_shards):
+    """Strided slice of the (sorted) assay array. Strided (not contiguous) so each
+    shard gets a mix of big/small assays -> balanced wall-clock. nshards<=1 is the
+    identity (unsharded), preserving the default single-GPU behaviour exactly."""
+    if num_shards <= 1:
+        return assays
+    return assays[shard::num_shards]
+
+
+def _merge_results(results):
+    """Union disjoint-shard ``result`` dicts back into one. aggregate_proteingym is
+    a pure function of (recs, pool_*, n_skipped) and shards score DISJOINT assays,
+    so aggregating the union == aggregating the unsharded run, exactly."""
+    if not results:
+        raise ValueError("no shard results to merge")
+    merged = {"task": results[0]["task"], "recs": [],
+              "pool_ys": [], "pool_scores": [], "n_skipped": 0}
+    for r in results:
+        merged["recs"].extend(r["recs"])
+        merged["pool_ys"].extend(r["pool_ys"])
+        merged["pool_scores"].extend(r["pool_scores"])
+        merged["n_skipped"] += int(r["n_skipped"])
+    return merged
+
+
+def _np_default(o):
+    """JSON encoder fallback for numpy scalars/arrays in shard sidecars."""
+    if hasattr(o, "tolist"):
+        return o.tolist()
+    return float(o)
+
+
+def _build_and_write(out, result, ctx, dms_ref):
+    """Build the leaderboard metric_dict + JSONL record from a (possibly merged)
+    ``result`` and a small ``ctx`` (model_window/strategy/indel-mode/etc). Shared by
+    the normal single-process path and the --merge_only path so neither re-scores
+    nor diverges. Returns (rec, metric_dict, jsonl_path)."""
+    task_key = result["task"]
+    metric_dict = aggregate_proteingym(result, dms_ref_path=dms_ref)
+    metric_dict["window_strategy"] = ctx["window_strategy"]
+    metric_dict["model_window"] = ctx["model_window"]
+    if ctx.get("rope_extended_to"):
+        metric_dict["rope_extended_to"] = ctx["rope_extended_to"]
+    if task_key in INDEL_ZS:
+        metric_dict["indel_score_mode"] = ctx["indel_score_mode"]
+        metric_dict["indel_pll_passes"] = (ctx["indel_pll_passes"]
+                                           if ctx["indel_score_mode"] == "strided" else None)
+        metric_dict["leaderboard_comparable"] = False
+        metric_dict["method"] = {
+            "strided":     f"strided masked-PLL approx (own-method, k={ctx['indel_pll_passes']})",
+            "masked_pll":  "exact masked-PLL (own-method)",
+            "single_pass": "single-pass unmasked mean-logp (own-method; leakage, reference-only)",
+        }[ctx["indel_score_mode"]]
+    rec = {
+        "checkpoint": ctx["checkpoint"], "task": task_key, "mode": "mlm_zeroshot",
+        "split": "zeroshot", "model_type": ctx.get("model_type"),
+        "metric": metric_dict, "n_train": 0, "n_eval": len(result["recs"]),
+        "notes": ctx.get("notes", ""), "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    jsonl_path = write_jsonl_record(out, "mlm_zeroshot", ctx["checkpoint"], rec)
+    (out / f"per_assay_{task_key}.json").write_text(json.dumps(
+        {"task": task_key, "checkpoint": ctx["checkpoint"], "recs": result["recs"]},
+        default=_np_default))
+    return rec, metric_dict, jsonl_path
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--model_name", required=True)
@@ -732,7 +805,41 @@ def main(argv=None):
                          "before log_softmax, so scores are safe). ~1.5-2x faster + half "
                          "memory on indels — own-method, fp32 weights not needed.")
     ap.add_argument("--notes", default="")
+    ap.add_argument("--assay_shard", type=int, default=0,
+                    help="this shard's index in [0, --assay_num_shards) for data-parallel scoring")
+    ap.add_argument("--assay_num_shards", type=int, default=1,
+                    help="GPU shard count; each process scores a strided 1/N slice of every task's "
+                         "assays. 1 = unsharded (default, unchanged behaviour). Shards write "
+                         "_shard_<task>__<i>of<N>.json sidecars; run --merge_only after to re-aggregate.")
+    ap.add_argument("--merge_only", action="store_true",
+                    help="don't score: read this run's _shard_*.json sidecars, union them, and write the "
+                         "final leaderboard JSONL (re-aggregates on the union; no model/GPU needed).")
     args = ap.parse_args(argv)
+
+    # Subdir so write_jsonl_record(.parent) resolves back to output_dir, matching the
+    # finetune_sequence/residue pattern (picked up by collect_bench_results' glob).
+    out = Path(args.output_dir) / f"mlm_zs_{safe_ckpt(args.model_name)}"
+    out.mkdir(parents=True, exist_ok=True)
+
+    # --merge_only: fold the per-shard sidecars into the final JSONL, no scoring/GPU.
+    if args.merge_only:
+        n = args.assay_num_shards
+        for task_key in args.tasks:
+            if task_key not in TASKS:
+                continue
+            shard_files = sorted(out.glob(f"_shard_{task_key}__*of{n}.json"))
+            if not shard_files:
+                print(f"merge {task_key}: no _shard_{task_key}__*of{n}.json sidecars found")
+                continue
+            payloads = [json.loads(p.read_text()) for p in shard_files]
+            merged = _merge_results([p["result"] for p in payloads])
+            _rec, metric_dict, jsonl_path = _build_and_write(out, merged, payloads[0]["ctx"], args.dms_ref)
+            prim_key = "eval_spearman" if TASKS[task_key].problem_type == "regression" else "eval_auc"
+            print(f"merge {task_key}: {prim_key}={metric_dict.get(prim_key)} "
+                  f"over {len(merged['recs'])} assays from {len(shard_files)} shards -> {jsonl_path}")
+            for p in shard_files:
+                p.unlink()
+        return 0
 
     # Load model using the same loader as protein_benchmark_suite / wt_tta_smoke.
     # Returns (model_obj, is_sbert, device). For AMPLIFY: model_obj=(tokenizer, model).
@@ -794,10 +901,18 @@ def main(argv=None):
     print(f"window strategy: {'rope_extrapolation' if rope_extended_to else 'optimal-window'} "
           f"(model_window={model_window} residues, max_length={args.max_length} tokens)")
 
-    # Use a subdir so write_jsonl_record(.parent) resolves back to output_dir,
-    # matching the pattern in finetune_sequence/residue (picked up by collect glob).
-    out = Path(args.output_dir) / f"mlm_zs_{safe_ckpt(args.model_name)}"
-    out.mkdir(parents=True, exist_ok=True)
+    # Static context shared by every task record (and stashed in shard sidecars so
+    # --merge_only can rebuild the record without reloading the model).
+    ctx = {
+        "checkpoint": args.model_name,
+        "model_type": getattr(getattr(model, "config", None), "model_type", None),
+        "model_window": model_window,
+        "window_strategy": "rope_extrapolation" if rope_extended_to else "optimal_window",
+        "rope_extended_to": rope_extended_to,
+        "indel_score_mode": args.indel_score_mode,
+        "indel_pll_passes": args.indel_pll_passes,
+        "notes": args.notes,
+    }
 
     for task_key in args.tasks:
         if task_key not in TASKS:
@@ -814,42 +929,24 @@ def main(argv=None):
             skip_huge_assays=args.skip_huge_assays,
             indel_score_mode=args.indel_score_mode,
             indel_pll_passes=args.indel_pll_passes,
+            assay_shard=args.assay_shard,
+            assay_num_shards=args.assay_num_shards,
         )
         if not result["recs"] and not result["pool_ys"]:
             print(f"{task_key}: no scorable assays (skipped={result['n_skipped']})")
             continue
 
+        # Sharded: defer aggregation — write this shard's raw result, merge later.
+        if args.assay_num_shards > 1:
+            shard_path = out / f"_shard_{task_key}__{args.assay_shard}of{args.assay_num_shards}.json"
+            shard_path.write_text(json.dumps({"result": result, "ctx": ctx}, default=_np_default))
+            print(f"{task_key}: shard {args.assay_shard}/{args.assay_num_shards} wrote "
+                  f"{len(result['recs'])} assays -> {shard_path.name}")
+            continue
+
         # Leaderboard-faithful aggregation (hierarchical DMS / pooled clinical-indel
         # / per-gene clinical-subs); flat means kept alongside for transparency.
-        metric_dict = aggregate_proteingym(result, dms_ref_path=args.dms_ref)
-        metric_dict["window_strategy"] = "rope_extrapolation" if rope_extended_to else "optimal_window"
-        metric_dict["model_window"] = model_window
-        if rope_extended_to:
-            metric_dict["rope_extended_to"] = rope_extended_to
-        if task_key in INDEL_ZS:
-            # ProteinGym has NO encoder indel baseline (board is autoregressive/HMM only),
-            # so NO mode here is leaderboard-comparable. Label provenance honestly per mode.
-            metric_dict["indel_score_mode"] = args.indel_score_mode
-            metric_dict["indel_pll_passes"] = (args.indel_pll_passes
-                                               if args.indel_score_mode == "strided" else None)
-            metric_dict["leaderboard_comparable"] = False
-            metric_dict["method"] = {
-                "strided":     f"strided masked-PLL approx (own-method, k={args.indel_pll_passes})",
-                "masked_pll":  "exact masked-PLL (own-method)",
-                "single_pass": "single-pass unmasked mean-logp (own-method; leakage, reference-only)",
-            }[args.indel_score_mode]
-        rec = {
-            "checkpoint": args.model_name, "task": task_key, "mode": "mlm_zeroshot",
-            "split": "zeroshot",
-            "model_type": getattr(getattr(model, "config", None), "model_type", None),
-            "metric": metric_dict, "n_train": 0, "n_eval": len(result["recs"]),
-            "notes": args.notes, "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        }
-        jsonl_path = write_jsonl_record(out, "mlm_zeroshot", args.model_name, rec)
-        # Per-assay sidecar -> re-aggregate (flat/hierarchical/pooled) offline,
-        # never rescore. Keyed by DMS_id so it joins the reference CSV.
-        (out / f"per_assay_{task_key}.json").write_text(json.dumps(
-            {"task": task_key, "checkpoint": args.model_name, "recs": result["recs"]}))
+        _rec, metric_dict, jsonl_path = _build_and_write(out, result, ctx, args.dms_ref)
         prim_key = "eval_spearman" if cfg.problem_type == "regression" else "eval_auc"
         print(f"{task_key}: {prim_key}={metric_dict.get(prim_key)} auc={metric_dict.get('eval_auc')} "
               f"agg={metric_dict['aggregation']} over {len(result['recs'])} assays "
