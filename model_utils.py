@@ -285,6 +285,27 @@ def from_pretrained_with_flash(model_cls, model_name: str, **extra_kwargs):
 
     kwargs["attn_implementation"] = selected_attn
 
+    # Auto-fix torch.compile checkpoints. A model saved while torch.compile-wrapped
+    # has every state-dict key prefixed with '_orig_mod.', so from_pretrained matches
+    # NOTHING and SILENTLY returns a randomly-initialized model (garbage benchmarks).
+    # Strip the prefix in-place for LOCAL checkpoint dirs; idempotent no-op when the
+    # prefix is absent. Hub ids (chandar-lab/AMPLIFY_120M, Synthyra/ESMplusplus_small
+    # / ESM-C-600M, EvolutionaryScale/*, ...) are not local dirs -> skipped, so this
+    # is safe for every model type. Only rewrites single-file model.safetensors
+    # (sharded checkpoints are left untouched).
+    if os.path.isdir(model_name):
+        try:
+            from plm.hf.checkpoint_utils import strip_orig_mod_prefix
+
+            n_stripped = strip_orig_mod_prefix(model_name)
+            if n_stripped:
+                logger.info(
+                    "Stripped torch.compile '_orig_mod.' prefix from %d keys in %s",
+                    n_stripped, model_name,
+                )
+        except Exception as exc:  # never block loading on the auto-fix
+            logger.warning("torch.compile prefix auto-strip skipped for %s: %s", model_name, exc)
+
     def _load_model(current_kwargs):
         loaded_model = model_cls.from_pretrained(model_name, **current_kwargs)
         _validate_local_checkpoint_integrity(model_name, loaded_model)
