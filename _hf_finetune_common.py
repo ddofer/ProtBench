@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 import torch
 from transformers import AutoConfig, AutoTokenizer, TrainingArguments
+
+logger = logging.getLogger(__name__)
 
 # Proteva stage-2 checkpoints are saved WITHOUT tokenizer files (they reuse the
 # AMPLIFY vocab). When AutoTokenizer can't build one from the checkpoint, fall
@@ -348,19 +351,62 @@ def metric_greater_is_better(metric_name: str | None) -> bool:
     return (metric_name or "").lower() not in _LOWER_IS_BETTER_METRICS
 
 
+def resolve_early_stopping(
+    tokenized: Dict[str, Any],
+    *,
+    early_stop: bool,
+    task: str,
+    patience: int,
+):
+    """Select the in-loop eval dataset + early-stopping callbacks for the FT scripts.
+
+    Only the ``"validation"`` split may drive in-loop eval / best-model
+    selection. The ``"test"`` split is NEVER used for this: choosing the best
+    checkpoint on test and then reporting that same test metric is a selection
+    leak. When ``early_stop`` is requested but there is no validation split, warn
+    and return no callbacks so the caller trains to the max-epoch cap (the caller
+    must also pass ``eval_available=False`` to :func:`build_training_args` so
+    ``load_best_model_at_end`` is disabled for that run).
+
+    Returns ``(eval_during_train, callbacks)``. Without ``early_stop`` both are
+    empty (the old fixed-epoch / no-eval behavior)."""
+    eval_during_train = None
+    callbacks: List[Any] = []
+    if not early_stop:
+        return eval_during_train, callbacks
+    eval_during_train = tokenized.get("validation")
+    if eval_during_train is not None:
+        from transformers import EarlyStoppingCallback
+
+        callbacks = [EarlyStoppingCallback(early_stopping_patience=patience)]
+    else:
+        logger.warning(
+            "no validation split for %s; not early-stopping/selecting on the "
+            "test set (leak); training to max epochs",
+            task,
+        )
+    return eval_during_train, callbacks
+
+
 def build_training_args(
-    args: argparse.Namespace, output_dir: Path, *, main_metric: str | None = None
+    args: argparse.Namespace, output_dir: Path, *, main_metric: str | None = None,
+    eval_available: bool = True,
 ) -> TrainingArguments:
     """TrainingArguments for the FT scripts.
 
-    When ``args.early_stop`` is set AND ``main_metric`` is given, switch on
-    per-epoch eval + ``load_best_model_at_end`` (paired with an
-    ``EarlyStoppingCallback`` in the driver). ``num_train_epochs`` then acts as
-    the MAX-epoch cap, not a fixed count: easy/regression tasks stop after the
-    metric plateaus (avoiding overfit), hard tasks (e.g. 1195-class fold) get
-    the epochs they need. All our main metrics (F1_Macro/Spearman/AUC/Accuracy)
-    are higher-is-better. Without early-stop it keeps the old fixed-epoch /
-    no-eval / keep-last behavior."""
+    When ``args.early_stop`` is set AND ``main_metric`` is given AND a validation
+    split is available (``eval_available``), switch on per-epoch eval +
+    ``load_best_model_at_end`` (paired with an ``EarlyStoppingCallback`` in the
+    driver). ``num_train_epochs`` then acts as the MAX-epoch cap, not a fixed
+    count: easy/regression tasks stop after the metric plateaus (avoiding
+    overfit), hard tasks (e.g. 1195-class fold) get the epochs they need. All our
+    main metrics (F1_Macro/Spearman/AUC/Accuracy) are higher-is-better.
+
+    ``eval_available=False`` (no validation split) forces the fixed-epoch path
+    even under ``--early_stop``: selecting ``load_best_model_at_end`` on the only
+    in-loop eval set left (test) and then reporting that test metric is a leak.
+    Without early-stop it keeps the old fixed-epoch / no-eval / keep-last
+    behavior."""
     kw = dict(
         output_dir=str(output_dir / "trainer"),
         num_train_epochs=args.num_train_epochs,
@@ -379,7 +425,7 @@ def build_training_args(
         bf16=torch.cuda.is_bf16_supported() and not getattr(args, "fp32", False),
         dataloader_num_workers=args.dataloader_num_workers,
     )
-    if getattr(args, "early_stop", False) and main_metric is not None:
+    if getattr(args, "early_stop", False) and main_metric is not None and eval_available:
         kw.update(
             eval_strategy="epoch",
             save_strategy="epoch",

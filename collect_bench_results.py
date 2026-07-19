@@ -56,19 +56,31 @@ def normalize_ft_record(rec: dict, main_metric: str, task_type: str,
     # (e.g. eval_AUC, eval_F1_Macro, eval_Accuracy, eval_spearman) — so match
     # case-insensitively, not just lower(). Build a lower->value index once.
     m_ci = {str(k).lower(): v for k, v in m.items()}
+    metric_name = main_metric
     value = m_ci.get(f"eval_{main_metric}".lower())
     if value is None:
-        for k in (f"eval_{main_metric.replace('_Macro','').replace('_macro','')}".lower(),
-                  "eval_spearman", "eval_auc", "eval_accuracy",
-                  "eval_f1_macro", "eval_matthews_correlation", "eval_mcc"):
-            if k in m_ci:
-                value = m_ci[k]; break
+        # Fall back to a related metric, but LABEL the row with the metric that
+        # was ACTUALLY found — otherwise an accuracy/spearman value is silently
+        # stored under the main-metric name (e.g. "AUC") and compared against
+        # real AUCs. The first entry is the main metric with the "_Macro" suffix
+        # stripped (same metric family), so it keeps the main-metric label.
+        for key, actual in (
+            (f"eval_{main_metric.replace('_Macro','').replace('_macro','')}".lower(), main_metric),
+            ("eval_spearman", "Spearman"),
+            ("eval_auc", "AUC"),
+            ("eval_accuracy", "Accuracy"),
+            ("eval_f1_macro", "F1_Macro"),
+            ("eval_matthews_correlation", "MCC"),
+            ("eval_mcc", "MCC"),
+        ):
+            if key in m_ci:
+                value = m_ci[key]; metric_name = actual; break
     return {
         "date": (rec.get("timestamp_iso", "") or "")[:10],
         "model": rec.get("checkpoint", ""), "notes": rec.get("notes", ""),
         "probe_type": rec.get("mode", ""), "task": rec.get("task", ""),
         "task_type": task_type, "split": (rec.get("split", "") or "").lower(),
-        "metric_name": main_metric,
+        "metric_name": metric_name,
         "metric_value": float(value) if value is not None else None,
         "n_samples": rec.get("n_eval", ""), "runtime_s": runtime_s,
         "source_file": source_file,

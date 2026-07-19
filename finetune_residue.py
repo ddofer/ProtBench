@@ -41,6 +41,7 @@ from _hf_finetune_common import (  # noqa: E402
     decode_string_label,
     load_encoder_for_head,
     load_tokenizer,
+    resolve_early_stopping,
     resolve_local_dataset_path,
     safe_ckpt,
     write_jsonl_record,
@@ -228,13 +229,15 @@ def _build_compute_metrics(task: str, label_names: List[str]):
 
         return compute_metrics
 
-    from sklearn.metrics import f1_score
+    from sklearn.metrics import f1_score, matthews_corrcoef
 
     def compute_metrics(eval_pred):
         predictions, labels = eval_pred
         preds, labs = _flatten(predictions, labels)
         if not labs:
-            return {"Accuracy": 0.0, "F1_Macro": 0.0}
+            # MCC included so tasks whose main_metric is MCC (disprot) never
+            # KeyError on the empty-eval edge case.
+            return {"Accuracy": 0.0, "F1_Macro": 0.0, "MCC": 0.0}
         labs_a = np.array(labs)
         preds_a = np.array(preds)
         per_class = {}
@@ -247,6 +250,10 @@ def _build_compute_metrics(task: str, label_names: List[str]):
         return {
             "Accuracy": float(np.mean(preds_a == labs_a)),
             "F1_Macro": float(f1_score(labs, preds, average="macro", zero_division=0)),
+            # disprot's headline metric (main_metric=MCC) is a GENERIC-branch task
+            # (task != "disorder"), so MCC must be emitted here too — otherwise
+            # best-model selection / result collection KeyError on eval_MCC.
+            "MCC": float(matthews_corrcoef(labs, preds)),
             **{f"F1_{k}": v for k, v in per_class.items()},
         }
 
@@ -299,20 +306,22 @@ def _run_task(task: str, args: argparse.Namespace) -> Dict[str, Any]:
     out_dir = Path(args.output_dir) / f"finetune_residue_{safe_ckpt(args.model_name)}_{task}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    training_args = build_training_args(args, out_dir, main_metric=cfg.main_metric)
+    # Early stopping selects the best checkpoint on the VALIDATION split only —
+    # never test (that would leak). No val + --early_stop -> warn + train to cap,
+    # and load_best_model_at_end must be OFF (eval_available=False) so no "best"
+    # is picked on test.
+    has_validation = tokenized.get("validation") is not None
+    training_args = build_training_args(
+        args, out_dir, main_metric=cfg.main_metric, eval_available=has_validation
+    )
 
     collator = DataCollatorForTokenClassification(tokenizer=tokenizer)
     compute_metrics = _build_compute_metrics(task, label_meta["names"])
 
-    # Early stopping needs an in-loop eval set (validation) + the callback;
-    # without --early_stop both stay absent (old fixed-epoch behavior).
-    callbacks = []
-    eval_during_train = None
-    if args.early_stop:
-        from transformers import EarlyStoppingCallback
-
-        eval_during_train = tokenized.get("validation") or tokenized.get("test")
-        callbacks = [EarlyStoppingCallback(early_stopping_patience=args.early_stop_patience)]
+    eval_during_train, callbacks = resolve_early_stopping(
+        tokenized, early_stop=args.early_stop, task=task,
+        patience=args.early_stop_patience,
+    )
 
     trainer = Trainer(
         model=model,

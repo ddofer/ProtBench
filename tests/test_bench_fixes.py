@@ -191,3 +191,137 @@ def test_early_stop_metric_direction():
         assert metric_greater_is_better(higher) is True, higher
     # None / unknown -> treat as higher-is-better (safe default for our metrics)
     assert metric_greater_is_better(None) is True
+
+
+# ---------------------------------------------------------------------------
+# Bug #1 — no validation split must NOT early-stop / model-select on the test
+# set (leak). Only the validation split may drive best-model selection; without
+# one, warn + train to the max-epoch cap with load_best_model_at_end OFF.
+# ---------------------------------------------------------------------------
+
+
+def _es_args(**over):
+    """A Namespace of the FT common args with --early_stop ON."""
+    from argparse import Namespace
+
+    base = dict(num_train_epochs=1, per_device_train_batch_size=8,
+                per_device_eval_batch_size=16, learning_rate=1e-4,
+                weight_decay=0.0, logging_steps=50, seed=42,
+                dataloader_num_workers=0, early_stop=True,
+                early_stop_patience=1, fp32=False)
+    base.update(over)
+    return Namespace(**base)
+
+
+def test_build_training_args_no_val_disables_load_best_model():
+    """early_stop requested but NO validation split -> load_best_model_at_end
+    must be OFF. Otherwise the best checkpoint is chosen to MAXIMIZE the metric
+    on the only in-loop eval set (test), then that same test metric is reported:
+    a selection leak."""
+    from pathlib import Path
+
+    from _hf_finetune_common import build_training_args
+
+    ta = build_training_args(_es_args(), Path("/tmp/x"),
+                             main_metric="Spearman", eval_available=False)
+    assert bool(ta.load_best_model_at_end) is False
+
+
+def test_build_training_args_val_present_keeps_load_best_model():
+    """A val-present task (remote_homology / beta_lactamase_peer / ss3 all
+    resolve a validation split at runtime) keeps early-stopping best-model
+    selection ON — behavior UNCHANGED."""
+    from pathlib import Path
+
+    from _hf_finetune_common import build_training_args
+
+    ta = build_training_args(_es_args(), Path("/tmp/x"),
+                             main_metric="Spearman", eval_available=True)
+    assert ta.load_best_model_at_end is True
+
+
+def test_resolve_early_stopping_selects_validation_only():
+    """Validation present -> in-loop eval is the VALIDATION split and exactly one
+    EarlyStoppingCallback is installed (default-task path, must stay unchanged)."""
+    from transformers import EarlyStoppingCallback
+
+    from _hf_finetune_common import resolve_early_stopping
+
+    tokenized = {"train": "TR", "validation": "VAL", "test": "TE"}
+    eval_ds, callbacks = resolve_early_stopping(
+        tokenized, early_stop=True, task="ss3", patience=1)
+    assert eval_ds == "VAL"
+    assert len(callbacks) == 1 and isinstance(callbacks[0], EarlyStoppingCallback)
+
+
+def test_resolve_early_stopping_no_val_warns_skips_and_never_uses_test(caplog):
+    """No validation split + --early_stop: must NOT fall back to test (leak) —
+    warn, install no EarlyStoppingCallback, and leave the in-loop eval set empty
+    so training runs to the max-epoch cap."""
+    import logging
+
+    from _hf_finetune_common import resolve_early_stopping
+
+    tokenized = {"train": "TR", "test": "TE"}  # no 'validation' key
+    with caplog.at_level(logging.WARNING):
+        eval_ds, callbacks = resolve_early_stopping(
+            tokenized, early_stop=True, task="remote_homology", patience=1)
+    assert eval_ds is None      # NOT the test split
+    assert callbacks == []      # no EarlyStoppingCallback
+    assert "no validation split for remote_homology" in caplog.text
+
+
+def test_resolve_early_stopping_off_is_noop():
+    """Without --early_stop there is no in-loop eval and no callbacks (old
+    fixed-epoch behavior), regardless of which splits exist."""
+    from _hf_finetune_common import resolve_early_stopping
+
+    tokenized = {"train": "TR", "validation": "VAL", "test": "TE"}
+    eval_ds, callbacks = resolve_early_stopping(
+        tokenized, early_stop=False, task="ss3", patience=1)
+    assert eval_ds is None and callbacks == []
+
+
+# ---------------------------------------------------------------------------
+# Bug #2 — disprot residue FT must emit its main metric (MCC). Only the
+# `disorder` branch computed MCC; the GENERIC branch (used by disprot,
+# main_metric=MCC) returned Accuracy/F1_* only -> KeyError on eval_MCC.
+# ---------------------------------------------------------------------------
+
+
+def test_residue_generic_compute_metrics_emits_mcc():
+    import numpy as np
+
+    from finetune_residue import _build_compute_metrics
+
+    cm = _build_compute_metrics("disprot", ["0", "1"])  # generic branch
+    # 1 example, 4 residues, 2 classes; argmax(preds) == labels -> MCC == 1.0
+    predictions = np.array([[[3.0, -3.0], [-3.0, 3.0], [3.0, -3.0], [-3.0, 3.0]]])
+    labels = np.array([[0, 1, 0, 1]])
+    out = cm((predictions, labels))
+    assert "MCC" in out
+    assert isinstance(out["MCC"], float) and -1.0 <= out["MCC"] <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Bug #4 — regression Spearman NaN (constant / NaN predictions = a collapsed
+# run) must WARN, not silently return 0.0.
+# ---------------------------------------------------------------------------
+
+
+def test_regression_spearman_nan_warns_and_returns_zero(caplog):
+    import logging
+    import types
+
+    import numpy as np
+
+    from finetune_sequence import _build_compute_metrics
+
+    cfg = types.SimpleNamespace(problem_type="regression", name="dummy_reg")
+    cm = _build_compute_metrics(cfg)
+    preds = np.full(10, 0.5)              # constant -> Spearman undefined (NaN)
+    labels = np.arange(10, dtype=float)
+    with caplog.at_level(logging.WARNING):
+        out = cm((preds, labels))
+    assert out["Spearman"] == 0.0        # aggregation-compatible sentinel kept
+    assert "spearman" in caplog.text.lower()  # ...but the collapse is surfaced

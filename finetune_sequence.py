@@ -37,6 +37,7 @@ from _hf_finetune_common import (  # noqa: E402
     build_training_args,
     load_encoder_for_head,
     load_tokenizer,
+    resolve_early_stopping,
     resolve_local_dataset_path,
     safe_ckpt,
     write_jsonl_record,
@@ -277,7 +278,15 @@ def _build_compute_metrics(cfg: TaskConfig):
             labels = np.array(labels).reshape(-1)
             corr, _ = spearmanr(labels, preds)
             mse = float(np.mean((preds - labels) ** 2))
-            return {"Spearman": float(corr) if corr == corr else 0.0, "MSE": mse}
+            if corr != corr:  # NaN: constant or NaN predictions -> Spearman undefined
+                logger.warning(
+                    "Spearman is NaN for %s (constant or NaN predictions — the "
+                    "regression head likely collapsed); reporting 0.0 for "
+                    "aggregation compatibility",
+                    cfg.name,
+                )
+                corr = 0.0
+            return {"Spearman": float(corr), "MSE": mse}
 
         return cm
 
@@ -394,20 +403,22 @@ def main(argv=None) -> int:
     out_dir = Path(args.output_dir) / f"finetune_sequence_{safe_ckpt(args.model_name)}_{args.task}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    training_args = build_training_args(args, out_dir, main_metric=cfg.main_metric)
+    # Early stopping selects the best checkpoint on the VALIDATION split only —
+    # never test (that would leak). No val + --early_stop -> warn + train to cap,
+    # and load_best_model_at_end must be OFF (eval_available=False) so no "best"
+    # is picked on test.
+    has_validation = tokenized.get("validation") is not None
+    training_args = build_training_args(
+        args, out_dir, main_metric=cfg.main_metric, eval_available=has_validation
+    )
 
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
     compute_metrics = _build_compute_metrics(cfg)
 
-    # Early stopping needs an in-loop eval set (the validation split) + the
-    # callback; without --early_stop both stay absent (old fixed-epoch behavior).
-    callbacks = []
-    eval_during_train = None
-    if args.early_stop:
-        from transformers import EarlyStoppingCallback
-
-        eval_during_train = tokenized.get("validation") or tokenized.get("test")
-        callbacks = [EarlyStoppingCallback(early_stopping_patience=args.early_stop_patience)]
+    eval_during_train, callbacks = resolve_early_stopping(
+        tokenized, early_stop=args.early_stop, task=args.task,
+        patience=args.early_stop_patience,
+    )
 
     trainer = Trainer(
         model=model,
