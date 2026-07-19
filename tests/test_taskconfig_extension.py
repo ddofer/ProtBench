@@ -14,7 +14,8 @@ def test_new_tasks_present_with_token_classification_type():
 def test_conservation_flip_config():
     cfg = TASKS["conservation_flip"]
     assert cfg.label_col == "conservation_labels"
-    assert cfg.main_metric == "F1_Macro"
+    # Ordinal grades 1-9 -> Spearman headline (was nominal F1_Macro; audit fix).
+    assert cfg.main_metric == "Spearman"
     assert cfg.dataset.startswith("data/conservation_flip")
 
 

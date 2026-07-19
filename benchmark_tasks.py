@@ -278,10 +278,11 @@ TASKS: Dict[str, TaskConfig] = {
         input_map={"seq": "seq"},
         label_col="label",
         problem_type="multiclass",
-        # Large multiclass (1195 fold classes); sklearn roc_auc_score is not
-        # run for this task so AUC is never populated — F1_Macro is the
-        # actual primary metric used across all benchmark runs.
-        main_metric="F1_Macro",
+        # 1195 imbalanced fold classes: macro-F1 is dominated by 0-F1 singleton
+        # folds -> high variance (a driver of "unstable" runs). Top-1 Accuracy is
+        # the stable, literature-standard headline; F1_Macro/F1_Weighted are
+        # still computed as secondary metrics in the probe output.
+        main_metric="Accuracy",
     ),
     "subcellular_loc": TaskConfig(
         name="Subcellular Localisation",
@@ -296,10 +297,14 @@ TASKS: Dict[str, TaskConfig] = {
         dataset="AI4Protein/EC",
         input_map={"seq": "aa_seq"},
         label_col="label",
-        problem_type="multiclass",
-        # Large multiclass (hundreds of EC classes); AUC is never computed
-        # by the benchmark suite — F1_Macro is the actual primary metric.
-        main_metric="F1_Macro",
+        # EC is MULTILABEL: a protein carries several comma-separated EC numbers
+        # (up to ~9). Declaring it multiclass made the parser keep each comma
+        # string ('130,270') as its OWN class -> hundreds of singleton powerset
+        # classes -> structurally deflated, jittery macro-F1. Multilabel routes
+        # through MultiLabelBinarizer; F1_Micro is the honest headline (macro
+        # over singleton EC combos is meaningless).
+        problem_type="multilabel",
+        main_metric="F1_Micro",
         validation_split="validation",
     ),
     "antibiotic_resistance": TaskConfig(
@@ -515,7 +520,10 @@ TASKS: Dict[str, TaskConfig] = {
         input_map={"seq": "sequence"},
         label_col="conservation_labels",
         problem_type="token_classification",
-        main_metric="F1_Macro",
+        # Grades 1-9 are ORDINAL: nominal macro-F1 gives off-by-one the same 0
+        # credit as off-by-eight. FLIP reports Spearman (rank). Accuracy/F1_Macro
+        # stay as secondary; the residue probe computes Spearman on this task.
+        main_metric="Spearman",
         validation_split="validation",
         test_split="test",
     ),

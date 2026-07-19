@@ -296,6 +296,16 @@ def _compute_metrics(
     except ValueError:
         metrics["MCC"] = 0.0
 
+    # Ordinal per-residue tasks (e.g. conservation grades 1-9) need a RANK
+    # metric: nominal F1 gives an off-by-one prediction the same 0 credit as
+    # off-by-eight. Computed only when the task asks for it (main_metric ==
+    # "Spearman") so nominal tasks (SS3/disorder) get no meaningless column.
+    if main_metric == "Spearman":
+        from scipy.stats import spearmanr
+
+        rho, _ = spearmanr(y_true, y_pred)
+        metrics["Spearman"] = float(rho) if rho == rho else 0.0
+
     # Ensure main_metric is always present (e.g. custom metric not in the
     # standard Accuracy/F1_Macro/MCC set computed above).
     metrics.setdefault(main_metric, 0.0)
