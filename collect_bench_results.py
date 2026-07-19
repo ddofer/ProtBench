@@ -19,12 +19,22 @@ OUT_COLUMNS = ["date", "model", "notes", "probe_type", "task", "task_type",
                "split", "metric_name", "metric_value", "n_samples",
                "runtime_s", "source_file"]
 
+# Probe CSVs (ResultTracker) write the DISPLAY name ("EC Classification") in the
+# `Task` column, but TASKS is keyed on short ids ("ec_classification"). Resolve
+# either form so the probe path gets the real main_metric/problem_type instead of
+# silently falling back (which mis-reported EC as F1_Macro, remote_homology as
+# F1_Macro, and every residue probe row as task_type="sequence").
+_NAME_TO_KEY = {getattr(cfg, "name", k): k for k, cfg in TASKS.items()}
+
+def _resolve_cfg(task: str):
+    return TASKS.get(task) or TASKS.get(_NAME_TO_KEY.get(task, ""))
+
 def _task_type(task: str) -> str:
-    cfg = TASKS.get(task)
+    cfg = _resolve_cfg(task)
     return "residue" if (cfg and getattr(cfg, "problem_type", "") == "token_classification") else "sequence"
 
 def _main_metric(task: str, fallback: str = "AUC") -> str:
-    cfg = TASKS.get(task)
+    cfg = _resolve_cfg(task)
     return getattr(cfg, "main_metric", fallback) if cfg else fallback
 
 def normalize_probe_row(row: dict, main_metric: str, task_type: str,
