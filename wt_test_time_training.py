@@ -137,9 +137,43 @@ def resolve_mlm_head(model, tokenizer) -> MLMHeadRefs:
             special_ids=special_ids,
         )
 
+    if mtype in ("ESMplusplus", "esmplusplus", "esm_plusplus"):
+        # Vanilla ESM-C (Synthyra ESMplusplusForMaskedLM): a standard HF MaskedLM
+        # whose forward returns .logits [B, T, vocab]. Plain MLM zero-shot needs
+        # only forward_logits + mask_token_id + special_ids; the encoder_blocks /
+        # head_module handles below are best-effort so optional TTT does not KeyError
+        # — but TTT is NOT validated for this arch, so run vanilla ESM-C zero-shot
+        # only (no --ttt). Without this branch every ProteinGym MLM zero-shot shard
+        # for vanilla ESM-C died with the ValueError below.
+        def forward_logits(input_ids, attention_mask):
+            out = model(input_ids=input_ids, attention_mask=attention_mask)
+            return out.logits
+
+        inner = getattr(model, "transformer", None) or getattr(model, "esm", None) or model
+        blocks = (
+            getattr(getattr(inner, "transformer", inner), "blocks", None)
+            or getattr(inner, "blocks", None)
+            or getattr(inner, "layers", None)
+            or nn.ModuleList()
+        )
+        head = (
+            getattr(model, "sequence_head", None)
+            or getattr(model, "lm_head", None)
+            or getattr(model, "decoder", None)
+            or model
+        )
+        return MLMHeadRefs(
+            forward_logits=forward_logits,
+            encoder_blocks=blocks,
+            final_norm=None,
+            head_module=head,
+            mask_token_id=int(mask_id),
+            special_ids=special_ids,
+        )
+
     raise ValueError(
         f"WT test-time training is not supported for model_type={mtype!r}. "
-        "Supported: AMPLIFY, proteva. Load a model exposing an MLM/decoder head."
+        "Supported: AMPLIFY, proteva, ESMplusplus. Load a model exposing an MLM/decoder head."
     )
 
 

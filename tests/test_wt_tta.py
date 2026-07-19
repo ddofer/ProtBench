@@ -127,6 +127,53 @@ def test_resolve_raises_clearly_on_headless_model():
         resolve_mlm_head(model, tok)
 
 
+# --------------------------------------------------------------------------- #
+# Vanilla ESM-C (Synthyra ESMplusplusForMaskedLM, config.model_type ==
+# "ESMplusplus"): a standard HF MaskedLM whose forward returns .logits. The
+# resolver must find its MLM head so ProteinGym MLM zero-shot can score it —
+# without a branch it raised ValueError and every vanilla zero-shot shard died.
+# --------------------------------------------------------------------------- #
+class _StubESMConfig:
+    model_type = "ESMplusplus"
+
+    def __init__(self, vocab_size, hidden_size):
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+
+
+class StubESMplusplus(nn.Module):
+    """Minimal Synthyra-ESM++ look-alike: forward returns MaskedLMOutput.logits."""
+
+    def __init__(self, vocab_size=12, hidden_size=16, n_layers=2):
+        super().__init__()
+        self.config = _StubESMConfig(vocab_size, hidden_size)
+        self.embed = nn.Embedding(vocab_size, hidden_size)
+        self.blocks = nn.ModuleList(
+            [nn.Linear(hidden_size, hidden_size) for _ in range(n_layers)]
+        )
+        self.sequence_head = nn.Linear(hidden_size, vocab_size)
+
+    def forward(self, input_ids, attention_mask=None, **kwargs):
+        x = self.embed(input_ids)
+        for blk in self.blocks:
+            x = x + torch.tanh(blk(x))
+        return MaskedLMOutput(logits=self.sequence_head(x))
+
+
+def test_resolve_mlm_head_supports_esmplusplus():
+    from wt_test_time_training import resolve_mlm_head
+
+    model, tok = StubESMplusplus(), _StubTokenizer()
+    refs = resolve_mlm_head(model, tok)  # must NOT raise
+
+    assert refs.mask_token_id == tok.mask_token_id
+    assert callable(refs.forward_logits)
+    ids = torch.tensor([[1, 4, 5, 6, 2]])
+    mask = torch.ones_like(ids)
+    lg = refs.forward_logits(ids, mask)
+    assert lg.shape == (1, ids.shape[1], model.config.vocab_size)
+
+
 def _pooled_embedding(model, tok, seq):
     """Mean-pooled last-hidden-state for the stub (mirrors the readout signal)."""
     enc = tok(seq, return_tensors="pt")
