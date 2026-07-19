@@ -37,7 +37,7 @@ def test_flip2_configs():
 def test_existing_35_tasks_still_load():
     # 4 new tasks added: conservation_flip, meltome, flip2_amylase, flip2_rhomax
     assert len(TASKS) >= 42
-    for key in ("stability", "solubility", "chezod_disorder", "ec_classification"):
+    for key in ("stability", "solubility", "disprot", "ec_classification"):
         assert key in TASKS
 
 

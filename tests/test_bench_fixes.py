@@ -99,7 +99,9 @@ def test_lora_target_modules_dispatch_by_family():
     # Proteva: ALL body linears (QLoRA best practice — not just attention).
     # attn_gate is the --head-gate Linear; omitting it left a body Linear
     # un-adapted. decoder/*_head (MLM + aux heads) stay excluded.
-    assert lora_target_modules("proteva") == ["wq", "wk", "wv", "wo", "attn_gate", "w12", "w3"]
+    assert lora_target_modules("proteva") == [
+        "wq", "wk", "wv", "wo", "attn_gate", "w12", "w3", "ve_first", "ve_last",
+    ]  # + ve_first/ve_last value-embedding nn.Embeddings (PEFT-wrappable)
     assert lora_target_modules("esm") == ["query", "key", "value", "dense"]
     assert lora_target_modules("AMPLIFY") == ["q", "k", "v", "wo", "w12", "w3"]  # case-insensitive
     assert lora_target_modules("something_else") == "all-linear"
