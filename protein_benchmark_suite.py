@@ -3006,29 +3006,43 @@ def evaluate_task(
         )
 
     logger.info("  Generating embeddings...")
-    X_train = embed_sequences(
-        model_obj,
-        is_sbert,
-        train_seqs,
-        device,
-        batch_size=batch_size,
-        max_length=max_length,
-        amp_dtype=amp_dtype,
-        embed_save_path=embed_save_path,
-        l2_normalize_embeddings=l2_normalize_embeddings,
-        probe_embed_mode=probe_embed_mode,
+    # Content-addressed disk cache so the TRAIN embeddings extracted for the
+    # validation probe are reused by the test probe (a separate process) instead
+    # of re-extracted — the sequence path never persisted them (only the residue
+    # + embed_dataset paths did), so heavy tasks paid their train extraction
+    # twice. Safe: keyed on the exact seqs + embed config; ANY mismatch or cache
+    # error re-extracts (perf-only, never changes results). See seq_embed_cache.
+    from seq_embed_cache import cached_embed_sequences
+
+    _seq_cache_root = (
+        str(Path(embed_save_path).parent / "seq_cache") if embed_save_path else None
     )
-    X_test = embed_sequences(
-        model_obj,
-        is_sbert,
-        test_seqs,
-        device,
-        batch_size=batch_size,
-        max_length=max_length,
-        amp_dtype=amp_dtype,
-        embed_save_path=embed_save_path,
-        l2_normalize_embeddings=l2_normalize_embeddings,
-        probe_embed_mode=probe_embed_mode,
+    _cfg_key = (
+        f"{probe_embed_mode}|l2={int(bool(l2_normalize_embeddings))}"
+        f"|ml={max_length}|dt={amp_dtype}"
+    )
+
+    def _embed(_seqs):
+        return embed_sequences(
+            model_obj,
+            is_sbert,
+            _seqs,
+            device,
+            batch_size=batch_size,
+            max_length=max_length,
+            amp_dtype=amp_dtype,
+            embed_save_path=embed_save_path,
+            l2_normalize_embeddings=l2_normalize_embeddings,
+            probe_embed_mode=probe_embed_mode,
+        )
+
+    X_train = cached_embed_sequences(
+        lambda: _embed(train_seqs), train_seqs,
+        cache_root=_seq_cache_root, cfg_key=_cfg_key,
+    )
+    X_test = cached_embed_sequences(
+        lambda: _embed(test_seqs), test_seqs,
+        cache_root=_seq_cache_root, cfg_key=_cfg_key,
     )
 
     y_train = np.array(
