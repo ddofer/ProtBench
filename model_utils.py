@@ -323,8 +323,14 @@ def from_pretrained_with_flash(model_cls, model_name: str, **extra_kwargs):
 _WRAPPER_PREFIXES = (
     "student.",
     "teacher.",
-    "_orig_mod.student.",
-    "_orig_mod.teacher.",
+    # Plain torch.compile prefix. MUST stay listed: from_pretrained matches
+    # nothing against it and silently yields a RANDOM model, which benchmarks as
+    # plausible garbage (AUC 0.500 / F1 0.000) instead of crashing. The pre-load
+    # auto-strip above is best-effort — it is skipped for sharded checkpoints and
+    # its failures are swallowed — so this gate is the actual guarantee.
+    # Subsumes the JEPA "_orig_mod.student."/"_orig_mod.teacher." forms.
+    # Incident: v6-rtd re-bench, 2026-07-21 (652/652 keys prefixed, ~3.5 GPU-h lost).
+    "_orig_mod.",
 )
 
 
