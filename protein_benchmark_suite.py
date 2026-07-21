@@ -644,7 +644,33 @@ def load_model(
         # Load fp32 FIRST then cast (loading directly in bf16 makes __init__
         # compute the RoPE sin/cos cache in bf16 -> NaN); fix_proteva_rope_buffer
         # below recomputes it in fp32 regardless. fp32 weight_dtype -> no-op cast.
+        # torch.compile saves every state-dict key '_orig_mod.'-prefixed. Loading
+        # such a checkpoint matches NOTHING and HF returns a SILENTLY
+        # randomly-initialized body -> every probe scores at chance (AUC 0.5000,
+        # Spearman 0.0000) while looking like a real result. The final root save
+        # (<out>/model.safetensors) is written unwrapped and is CLEAN; the periodic
+        # checkpoint-N/ saves are written from the compiled module and are PREFIXED.
+        # This branch calls AutoModel.from_pretrained directly, so it bypasses the
+        # strip + key-overlap guard inside model_utils.from_pretrained_with_flash —
+        # invoke both explicitly here. _validate_local_checkpoint_integrity is the
+        # hard gate: it RAISES rather than let a mismatched load proceed.
+        from plm.bench.model_utils import _validate_local_checkpoint_integrity
+        from plm.hf.checkpoint_utils import strip_orig_mod_prefix
+
+        # NOT wrapped in try/except: strip_orig_mod_prefix returns 0 WITHOUT writing
+        # when the checkpoint is already clean, so it can only fail while fixing a
+        # genuinely prefixed checkpoint — exactly the case where continuing would
+        # benchmark random weights. Swallowing that is what caused the 2026-07-21
+        # incident in the first place. Let it raise.
+        if os.path.isdir(model_name):
+            n_stripped = strip_orig_mod_prefix(model_name)
+            if n_stripped:
+                logger.info(
+                    "-> Stripped torch.compile '_orig_mod.' prefix from %d keys in %s",
+                    n_stripped, model_name,
+                )
         model = AutoModel.from_pretrained(model_name, config=_cfg)
+        _validate_local_checkpoint_integrity(model_name, model)
         model.to(device).to(_weight_dtype).eval()
         # ProteinEncoder registers rope_cs as a NON-persistent buffer, so HF's
         # from_pretrained leaves it as uninitialized meta/garbage memory (it is

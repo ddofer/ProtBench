@@ -56,6 +56,51 @@ CUDA_VISIBLE_DEVICES=4 /data/prot/ProteinSentenceTransformers/.venv/bin/python \
     /data/proteva/plm/bench/protein_benchmark_suite.py --model_name <ckpt> --tasks stability
 ```
 
+## ⚠ Which checkpoint dir to bench (`_orig_mod.` prefix)
+
+**A `_orig_mod.`-prefixed checkpoint benchmarks as a RANDOM model — it does not
+crash.** `torch.compile` prefixes every state-dict key, `from_pretrained` then
+matches nothing, and you get plausible garbage: AUC pinned **0.5000**, Spearman
+**0.0000**, Recall@10 ~0.01. That reads as "the model is broken"; it is not —
+the *checkpoint path you picked* is.
+
+| Path | Prefixed? | Bench it? |
+|---|---|---|
+| `<out>/` (final root save) | **no** — `run_stage2.py` strips it | ✅ **prefer this** |
+| `<out>/checkpoint-N/` (periodic save) | **yes** — written from the compiled module | ⚠ only if you must |
+
+Check any checkpoint in one line (no project imports, always works):
+
+```bash
+python -c "from safetensors import safe_open; f=safe_open('<ckpt>/model.safetensors','pt'); \
+print(sum(k.startswith('_orig_mod.') for k in f.keys()), 'prefixed keys')"
+```
+
+Guards, in order (all reuse `plm/hf/checkpoint_utils.strip_orig_mod_prefix`):
+
+- **Auto-strip on load** — `model_utils.from_pretrained_with_flash` *and* the
+  Proteva branch of `protein_benchmark_suite.load_model`. Best-effort: it is a
+  no-op on **sharded** checkpoints and its failures are logged, not raised.
+- **Hard gate** — `_WRAPPER_PREFIXES` / `_validate_local_checkpoint_integrity`
+  **raise** on any surviving `_orig_mod.` key or <50% key overlap. **Do not
+  remove the plain `_orig_mod.` entry.**
+- Tests: `plm/bench/tests/test_orig_mod_guard.py` (the gate),
+  `plm/tests/bench/test_orig_mod_prefix_load.py` (strip + end-to-end loader).
+
+Calling the strip helper standalone needs the repo root *and* `plm/` on the path
+(`plm/uc30_aux_loader.py` imports `scripts.data.*`, which lives at
+`plm/scripts/`), else it dies with `ModuleNotFoundError: No module named
+'scripts'`:
+
+```bash
+PYTHONPATH=plm plm/.venv/bin/python -c \
+  "from plm.hf.checkpoint_utils import strip_orig_mod_prefix as s; print(s('<ckpt>'))"
+```
+
+Incidents: 2026-07-21 v6-rtd re-bench (~3.5 GPU-h of chance-level results, caused
+by benching `checkpoint-105000` after a swallowed strip failure), plus earlier
+repeats.
+
 ## Unified harness + delta-vs-vanilla comparison
 
 For a full model report (the way the AMPLIFY-vanilla / step-0 / trained-epoch
