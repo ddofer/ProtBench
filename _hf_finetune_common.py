@@ -388,6 +388,22 @@ def resolve_early_stopping(
     return eval_during_train, callbacks
 
 
+def keep_logits_only(logits, labels):
+    """``preprocess_logits_for_metrics`` hook: keep the logits, drop the rest.
+
+    Encoders differ in what the classification head returns. ESM-C
+    (``Synthyra/ESMplusplus_small``) returns ``(logits, hidden_states, ...)``;
+    Proteva returns a bare tensor. HF accumulates EVERY returned tensor over the
+    eval set, so without this hook the raw tuple reaches ``compute_metrics`` and
+    ``np.array(...)`` fails on the ragged result ("inhomogeneous shape ... (2, N)",
+    where the 2 is the tuple length), while the retained hidden states pin the
+    whole eval set's activations in memory (OOM). Reducing here fixes both.
+
+    Passes a single tensor through unchanged.
+    """
+    return logits[0] if isinstance(logits, (tuple, list)) else logits
+
+
 def build_training_args(
     args: argparse.Namespace, output_dir: Path, *, main_metric: str | None = None,
     eval_available: bool = True,

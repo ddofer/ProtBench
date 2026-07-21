@@ -35,6 +35,7 @@ from _hf_finetune_common import (  # noqa: E402
     add_common_finetune_args,
     apply_finetune_mode,
     build_training_args,
+    keep_logits_only,
     load_encoder_for_head,
     load_tokenizer,
     resolve_early_stopping,
@@ -429,6 +430,11 @@ def main(argv=None) -> int:
         # transformers 5.x renamed Trainer's ``tokenizer`` -> ``processing_class``.
         processing_class=tokenizer,
         compute_metrics=compute_metrics,
+        # Drop non-logits outputs BEFORE accumulation: ESM-C returns
+        # (logits, hidden_states, ...) which otherwise reaches compute_metrics
+        # as a ragged tuple (np.array ValueError) and pins every hidden state
+        # in memory (OOM). No-op for single-tensor outputs (Proteva).
+        preprocess_logits_for_metrics=keep_logits_only,
         callbacks=callbacks,
     )
 
