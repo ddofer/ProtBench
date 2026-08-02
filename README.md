@@ -1,59 +1,94 @@
-# `plm/bench` — vendored protein-benchmark suite
+# ProtBench
 
-## Origin
+One benchmark harness for protein models: frozen probes, fine-tuning, and
+non-model baselines, over 42 sequence-level and residue-level tasks.
 
-Vendored from the sibling repo `/data/prot/ProteinSentenceTransformers` at
-git SHA **`7aa984e`** (same user owns both repos; no LICENSE in source).
-
-Files copied verbatim (no edits):
-
-| File | Role |
-|---|---|
-| `protein_benchmark_suite.py` | Main CLI entry point |
-| `benchmark_tasks.py` | `TASKS` registry (~35 protein tasks) |
-| `benchmark_utils.py` | Shared utilities + result-IO helpers |
-| `benchmark_comparison.py` | Pairwise model comparison helpers |
-| `model_utils.py` | Model load + AMPLIFY/ESMplusplus detection |
-| `attention_pooling.py` | Pooling module (unused by the main CLI but kept for completeness) |
-
-Plus `data/chezod` → symlink into the sibling repo's CheZoD corpus.
-
-## Why vendored
-
-Proteva can now run the full benchmark suite on its own without depending on
-a separate working tree. The vendored code reuses the **existing** HF dataset
-cache (`~/.cache/huggingface/hub/` — already populated with all the
-`biomap-research/*` corpora) and the sibling repo's local CheZoD dataset via
-a symlink. **No re-downloads required.**
-
-## Runtime — must use the sibling venv
-
-The suite depends on heavy ML libs (`sentence-transformers`,
-`transformers>=5`, `torch>=2.10`, `scikit-learn`, `scipy`, `datasets`).
-**Proteva's own venv is Python 3.11 and pins different versions.** Always
-invoke the suite with the sibling repo's Python 3.13 venv:
+Everything runs through one CLI, so a PLM, a LoRA fine-tune, an alignment
+search and a k-mer count are scored on identical splits with identical
+metrics and land in the same CSV.
 
 ```bash
-/data/prot/ProteinSentenceTransformers/.venv/bin/python \
-    /data/proteva/plm/bench/protein_benchmark_suite.py [args...]
+# Frozen linear probe on one task
+python protein_benchmark_suite.py -m facebook/esm2_t6_8M_UR50D \
+    --tasks signalp_binary -p linear --eval_split test
+
+# The no-learning floor, same splits and metrics
+python protein_benchmark_suite.py -m kmer --tasks signalp_binary -p linear
+
+# With 95% bootstrap CIs on every label-only metric
+python protein_benchmark_suite.py -m <model> --tasks stability --bootstrap 1000
 ```
 
-Do **not** install these deps into proteva's `pyproject.toml`.
+## What is here
 
-## GPU safety (standing CLAUDE.md rule)
+| Component | Entry point |
+|---|---|
+| Frozen probes (linear / histgb / knn) | `protein_benchmark_suite.py` |
+| Residue-level probes | `token_classification_probe.py` (via `--tasks ss3 disorder ...`) |
+| Sequence fine-tuning (full / last-N / LoRA) | `finetune_sequence.py` |
+| Residue fine-tuning | `finetune_residue.py` |
+| ProteinGym zero-shot | `proteingym_mlm_zeroshot.py`, `zero_shot_dms.py` |
+| Test-time training | `wt_test_time_training.py` |
+| Task registry (42 tasks) | `benchmark_tasks.py` |
+| mmseqs2 baseline | `mmseqs_baseline.py` |
+| phmmer baseline | `hmmer_baseline.py` |
+| k-mer baseline | `kmer_baseline.py`, or `-m kmer` / `-m kmer4` |
+| Bootstrap CIs | `--bootstrap N`; retrieval CIs in `bootstrap_ci.py` |
 
-Per the project's GPU-safety rule, never co-tenant a GPU listed in
-`/data/proteva/plm/manifest.lock`. Choose a free GPU explicitly, or run on
-CPU for smokes:
+## Origin, and the other copies
+
+Seeded from proteva's `plm/bench` (72 commits of history preserved via
+`git subtree split`), which was the most complete of five divergent copies of
+this suite that had accumulated across machines. Grafted on top: the
+cross-process embedding-cache fix from
+`ProteinSentenceTransformers@33feae0`, and the mmseqs2 / phmmer baselines
+from `oriel9p/ProtSent@rebuttal`.
+
+**The older copies still exist and disagree with this one.** They carry 28
+tasks against this repo's 42, and `/home/ddofer/protein` still treats
+`ec_classification` as multiclass/`F1_Macro` where this repo has it as
+multilabel/`F1_Micro`. Concatenating result CSVs across that boundary mixes
+metric definitions under a single column name. The suite logs its own
+resolved path and task count at startup for exactly this reason — check that
+line before trusting a results directory.
+
+`protJepa/run_pretrained_benchmarks.py` resolves this repo automatically;
+`$PROTBENCH_HOME` overrides the search.
+
+## Defaults worth knowing
+
+- **Embedding caching is off.** Opt in with `--cache_embeddings`. The cache
+  key for a hub model id is just the model name, so it does *not* invalidate
+  when upstream weights change; local paths are keyed on size and mtime and
+  do invalidate correctly.
+- **`seed_all()` seeds stdlib `random`, numpy and torch** on top of the
+  `BENCHMARK_SEED` that is threaded into sklearn and `datasets.shuffle`.
+  `torch.use_deterministic_algorithms` is deliberately *not* set — it breaks
+  or badly slows several embedding kernels, and embedding is inference-only.
+- **`--bootstrap N` covers label-only metrics.** AUC and AP are computed from
+  `predict_proba` after the fact and get no interval. Do not combine it with
+  the cross-validation path: fold aggregation averages every numeric column,
+  which would turn the CIs into a mean of intervals.
+- **`METRIC_PRIORITY` is frozen.** MCC and balanced accuracy are reported but
+  deliberately excluded from it, so adding them did not re-rank any
+  historical comparison.
+
+## Install
 
 ```bash
-# Smoke (CPU only):
-CUDA_VISIBLE_DEVICES="" /data/prot/ProteinSentenceTransformers/.venv/bin/python \
-    /data/proteva/plm/bench/protein_benchmark_suite.py --help
+uv sync                      # probes only
+uv sync --extra finetune     # adds peft, for the LoRA paths
+```
 
-# Real eval on a free GPU (replace 4 with a GPU NOT in manifest.lock):
-CUDA_VISIBLE_DEVICES=4 /data/prot/ProteinSentenceTransformers/.venv/bin/python \
-    /data/proteva/plm/bench/protein_benchmark_suite.py --model_name <ckpt> --tasks stability
+Python >= 3.10. `mmseqs` is a system binary (`$MMSEQS_BIN` or `PATH`);
+phmmer comes from the `pyhmmer` package. Neither is required for the probe
+paths.
+
+## Tests
+
+```bash
+pytest -m "not slow"    # 152 tests, no network
+pytest                  # adds tests that download models
 ```
 
 ## ⚠ Which checkpoint dir to bench (`_orig_mod.` prefix)
@@ -84,7 +119,7 @@ Guards, in order (all reuse `plm/hf/checkpoint_utils.strip_orig_mod_prefix`):
 - **Hard gate** — `_WRAPPER_PREFIXES` / `_validate_local_checkpoint_integrity`
   **raise** on any surviving `_orig_mod.` key or <50% key overlap. **Do not
   remove the plain `_orig_mod.` entry.**
-- Tests: `plm/bench/tests/test_orig_mod_guard.py` (the gate),
+- Tests: `tests/test_orig_mod_guard.py` (the gate),
   `plm/tests/bench/test_orig_mod_prefix_load.py` (strip + end-to-end loader).
 
 Calling the strip helper standalone needs the repo root *and* `plm/` on the path
@@ -93,7 +128,8 @@ Calling the strip helper standalone needs the repo root *and* `plm/` on the path
 'scripts'`:
 
 ```bash
-PYTHONPATH=plm plm/.venv/bin/python -c \
+# Run this from a proteva checkout -- strip_orig_mod_prefix lives there, not here.
+PYTHONPATH=plm python -c \
   "from plm.hf.checkpoint_utils import strip_orig_mod_prefix as s; print(s('<ckpt>'))"
 ```
 
@@ -103,16 +139,13 @@ repeats.
 
 ## Unified harness + delta-vs-vanilla comparison
 
-For a full model report (the way the AMPLIFY-vanilla / step-0 / trained-epoch
-comparison is run), use the one-shot harness instead of the scripts below:
+The full model report (probe + ProteinGym + LoRA, all collected into ONE long
+CSV) was driven by `run_full_bench.sh`, which lived in proteva and did not
+move here. Drive `protein_benchmark_suite.py`, `proteingym_mlm_zeroshot.py`
+and `finetune_sequence.py` individually, then run the collector below over
+their outputs.
 
-```bash
-# probe (linear) + ProteinGym (cosine + MLM masked-marginal) + LoRA (val+test),
-# all collected into ONE long CSV. GPU arg must NOT be in manifest.lock.
-bash plm/scripts/run_full_bench.sh <ckpt-or-hf-id> "<notes>" <gpu>
-```
-
-Pipeline: `run_full_bench.sh` → `collect_bench_results.py` → the unified
+Pipeline: those runs → `collect_bench_results.py` → the unified
 `results/bench_results_all.csv` (one row per model × task × probe × split ×
 metric; the dedup key is `(model, notes, task, probe, split, metric)` so a
 corrected re-run **overwrites** the stale row). Read it as a delta-vs-vanilla
@@ -120,15 +153,15 @@ table with:
 
 ```bash
 # pivot every (probe, task) to vanilla AMPLIFY + each model + Δ-vs-vanilla
-python plm/bench/compare_to_vanilla.py --split test            # all probes
-python plm/bench/compare_to_vanilla.py --split test --probe lora
+python compare_to_vanilla.py --split test            # all probes
+python compare_to_vanilla.py --split test --probe lora
 ```
 
 **Humanized report (start here).** `report.py` is the one-command, DS-friendly
 view — run it any time to refresh two artifacts in `results/`:
 
 ```bash
-python plm/bench/report.py            # writes results/BENCH_REPORT.md + bench_pivot.csv
+python report.py            # writes results/BENCH_REPORT.md + bench_pivot.csv
 ```
 
 - **`results/BENCH_REPORT.md`** — markdown a human reads: linear / LoRA / MLM
@@ -184,20 +217,20 @@ Default `r=64 α=64 lr=2e-4 patience=1`. Per-task-type overrides:
 `target_modules` resolved per model family in `_hf_finetune_common.py` to **all body Linears** — Proteva `wq/wk/wv/wo/attn_gate/w12/w3`, AMPLIFY `q/k/v/wo/w12/w3`; MLM decoder + aux heads stay frozen, task head via `modules_to_save`. NOT `all-linear`.
 
 ```bash
-PY=/data/prot/ProteinSentenceTransformers/.venv/bin/python
+PY=python
 
 # Residue probe on SS3:
-CUDA_VISIBLE_DEVICES=4 $PY /data/proteva/plm/bench/finetune_residue.py \
+CUDA_VISIBLE_DEVICES=4 $PY finetune_residue.py \
     --model_name chandar-lab/AMPLIFY_120M \
     --task ss3 --mode probe --max_length 512 \
-    --output_dir /data/proteva/plm/results/bench/
+    --output_dir results/
 
 # All three residue tasks sequentially:
-CUDA_VISIBLE_DEVICES=4 $PY /data/proteva/plm/bench/finetune_residue.py \
+CUDA_VISIBLE_DEVICES=4 $PY finetune_residue.py \
     --model_name chandar-lab/AMPLIFY_120M --task all
 
 # Sequence LoRA on stability (best-practice r=32/alpha=64, 1 epoch):
-CUDA_VISIBLE_DEVICES=4 $PY /data/proteva/plm/bench/finetune_sequence.py \
+CUDA_VISIBLE_DEVICES=4 $PY finetune_sequence.py \
     --model_name chandar-lab/AMPLIFY_120M \
     --task stability --mode lora --lora_r 32 --lora_alpha 64 --num_train_epochs 1
 ```
@@ -206,7 +239,7 @@ CUDA_VISIBLE_DEVICES=4 $PY /data/proteva/plm/bench/finetune_sequence.py \
 Install them once before first use:
 
 ```bash
-/data/prot/ProteinSentenceTransformers/.venv/bin/pip install \
+pip install \
     "peft>=0.13" "seqeval>=1.2"
 ```
 
@@ -238,26 +271,26 @@ also saves adapter weights under `.../lora_adapter/`.
 
 ## Tests
 
-Unit tests live in [`plm/bench/tests/`](tests/). Fast tests cover the
+Unit tests live in [`tests/`](tests/). Fast tests cover the
 `TaskConfig` validator extension, label decoders, and label alignment.
 Two CPU smoke tests (model + dataset download) are marked
 `@pytest.mark.slow` and skipped by default.
 
 ```bash
-PY=/data/prot/ProteinSentenceTransformers/.venv/bin/python
+PY=python
 
 # Fast unit tests only:
-$PY -m pytest /data/proteva/plm/bench/tests/ -m "not slow"
+$PY -m pytest tests/ -m "not slow"
 
 # Including the CPU smoke tests (needs peft + seqeval installed):
-CUDA_VISIBLE_DEVICES="" $PY -m pytest /data/proteva/plm/bench/tests/ -m slow
+CUDA_VISIBLE_DEVICES="" $PY -m pytest tests/ -m slow
 ```
 
 ## Quick examples (Stage-2 search: fast subsets, clean signal)
 
 ```bash
-PY=/data/prot/ProteinSentenceTransformers/.venv/bin/python
-BENCH=/data/proteva/plm/bench/protein_benchmark_suite.py
+PY=python
+BENCH=protein_benchmark_suite.py
 
 # One task, fast mode, sample cap (default --fast already caps at FAST_MAX_SAMPLES=100k):
 CUDA_VISIBLE_DEVICES=4 $PY $BENCH --model_name <ckpt> --tasks stability --max_samples 5000
@@ -301,14 +334,14 @@ The structural tasks in this suite (`ss3`, `disorder`, `stability`,
 `chezod_disorder`) are first-class **leakage protection targets** when
 proteva pretrains with 3Di / fold-derived aux objectives. Their test
 sequences feed the train-side filtering pipeline documented at
-[`plm/docs/LEAKAGE_FILTERING_RUNBOOK.md`](../docs/LEAKAGE_FILTERING_RUNBOOK.md);
+proteva's `docs/LEAKAGE_FILTERING_RUNBOOK.md` (not part of this repo);
 they are included by default in `--task-group critical` and selectable
 in isolation via the new `--task-group structural`. PSSM-derived tasks
 are intentionally not treated as a structural leak.
 
 ## Updating
 
-To pull a newer revision from the sibling repo, re-run the same `cp`
-operations from `/data/prot/ProteinSentenceTransformers/` (no patches were
-applied to the copied files). If the sibling adds new local-data
-dependencies, mirror them under `./data/` as symlinks first.
+This repo is the canonical copy — edit it here. The older checkouts
+(`ProteinSentenceTransformers`, `protein`, `proteva/plm/bench`) are frozen
+history, kept only so in-flight runs that still point at them keep working.
+Changes do not flow back to them, and a fix landed there will not reach here.

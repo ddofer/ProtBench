@@ -3708,6 +3708,13 @@ def main():
     if BOOTSTRAP_N:
         logger.info("Bootstrap CIs enabled: %d resamples per metric", BOOTSTRAP_N)
 
+    # Several older copies of this suite still exist on disk, and they disagree
+    # about the task registry (ec_classification in particular). Record which one
+    # actually ran, so a results directory can never be traced to the wrong code.
+    logger.info(
+        "Suite: %s (%d tasks)", Path(__file__).resolve(), len(TASKS)
+    )
+
     # Handle comparison mode
     if args.compare:
         if not args.compare_model1 or not args.compare_model2:
