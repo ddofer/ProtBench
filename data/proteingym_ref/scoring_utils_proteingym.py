@@ -1,3 +1,15 @@
+"""Vendored verbatim from ProteinGym, for scoring parity with the benchmark.
+
+Not our code. Kept unmodified so ProteinGym-derived scores here match the
+reference implementation rather than a reimplementation of it.
+
+Source:  https://github.com/OATML-Markslab/ProteinGym
+Cite:    Notin et al., "ProteinGym: Large-Scale Benchmarks for Protein Fitness
+         Prediction and Design", NeurIPS 2023 Datasets and Benchmarks.
+         doi:10.1101/2023.12.07.570727
+License: see the ProteinGym repository (MIT at time of vendoring).
+"""
+
 import numpy as np
 import pandas as pd
 import torch

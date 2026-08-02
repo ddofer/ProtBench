@@ -1,9 +1,13 @@
 """
 Benchmark task configurations for Protein Language Models.
 
-Defines the TaskConfig dataclass and the TASKS dictionary with 35 benchmark tasks
-including binary/multiclass/multilabel classification, regression, retrieval,
-and ProteinGym evaluations.
+Defines the TaskConfig dataclass and the TASKS dictionary: binary, multiclass,
+multilabel, regression, retrieval, residue-level (token classification) and
+ProteinGym evaluations.
+
+Run `python protein_benchmark_suite.py --list_tasks` for the current inventory.
+Task counts are deliberately not written here -- the last one sat at "35" while
+the registry held 43.
 
 Usage:
     from benchmark_tasks import TASKS, TaskConfig

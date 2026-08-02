@@ -3452,6 +3452,34 @@ class ResultTracker:
 # =============================================================================
 
 
+def print_task_table() -> None:
+    """Print every task with its type, metric, and which preset selects it."""
+    groups = {
+        k: (
+            "very-fast" if k in VERY_FAST_TASKS
+            else "fast" if k in FAST_TASKS
+            else "retrieval" if k in RETRIEVAL_TASKS
+            else "proteingym" if k in PROTEINGYM_TASKS
+            else "default"
+        )
+        for k in TASKS
+    }
+    width = max(len(k) for k in TASKS)
+    print(f"{'TASK':<{width}}  {'TYPE':<20} {'METRIC':<12} {'PRESET':<11} NAME")
+    for key in sorted(TASKS):
+        cfg = TASKS[key]
+        print(
+            f"{key:<{width}}  {cfg.problem_type:<20} {cfg.main_metric:<12} "
+            f"{groups[key]:<11} {cfg.name}"
+        )
+    print(
+        f"\n{len(TASKS)} tasks. Presets: --very-fast ({len(VERY_FAST_TASKS)} scout "
+        f"tasks), --fast ({len(FAST_TASKS) + len(RETRIEVAL_TASKS)}), "
+        f"default ({len(DEFAULT_TASKS)}, excludes ProteinGym), "
+        f"--proteingym adds the {len(PROTEINGYM_TASKS)} ProteinGym tasks."
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Evaluate protein language models on benchmark tasks"
@@ -3514,8 +3542,16 @@ def parse_args():
         nargs="+",
         default=None,
         choices=sorted(TASKS.keys()),
-        help="Specific tasks to run (default: all). Options: "
-        + ", ".join(TASKS.keys()),
+        # metavar keeps argparse from printing all 43 task names twice in the
+        # usage line, which buried every other flag. --list_tasks shows them.
+        metavar="TASK",
+        help="Tasks to run. Overrides the presets. With no --tasks, --fast is on "
+        "by default; pass --no-fast for the full set. See --list_tasks.",
+    )
+    parser.add_argument(
+        "--list_tasks",
+        action="store_true",
+        help="Print the available tasks with their type and metric, then exit.",
     )
     parser.add_argument(
         "--max_samples",
@@ -3724,6 +3760,10 @@ def main():
     global BENCHMARK_SEED, BOOTSTRAP_N
 
     args = parse_args()
+
+    if args.list_tasks:
+        print_task_table()
+        return
     benchmark_seeds = (
         parse_seed_list(args.seed_list) if args.seed_list is not None else [args.seed]
     )
