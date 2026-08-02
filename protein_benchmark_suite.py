@@ -134,6 +134,41 @@ def seed_all(seed: int) -> None:
     torch.manual_seed(seed)  # covers CUDA too
 
 
+# Bootstrap resamples for metric CIs. 0 disables; --bootstrap N sets it.
+BOOTSTRAP_N = 0
+
+
+def _boot_ci(metric_fn, y_true, y_pred, n_boot: int, seed: int) -> Dict[str, float]:
+    """Percentile CIs by resampling test predictions and recomputing metrics.
+
+    ``metric_fn(y_true, y_pred) -> dict`` is the caller's existing metric block,
+    so the interval is computed for exactly the metrics it already reports and
+    nothing has to be reimplemented per metric. No refitting: the probe is
+    fixed, and this is the sampling distribution of the *test estimate*, which
+    is the quantity a "is this gap real?" question is about.
+    """
+    if not n_boot:
+        return {}
+    rng = np.random.default_rng(seed)
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    draws: Dict[str, List[float]] = {}
+    for _ in range(n_boot):
+        idx = rng.integers(0, len(y_true), len(y_true))
+        try:
+            sample = metric_fn(y_true[idx], y_pred[idx])
+        except ValueError:
+            # A resample can drop a class entirely; skip rather than distort.
+            continue
+        for key, value in sample.items():
+            draws.setdefault(key, []).append(value)
+    return {
+        f"{key}_CI_{side}": float(np.percentile(values, pct))
+        for key, values in draws.items()
+        for side, pct in (("low", 2.5), ("high", 97.5))
+    }
+
+
 DEFAULT_EMBED_MAX_LENGTH = 1024
 DEFAULT_BLAS_THREAD_LIMIT = 1
 # KNN keeps n_jobs=1 (threading backend; higher values can hit OpenBLAS thread limits)
@@ -2317,23 +2352,22 @@ def evaluate_classification_probe(
     predictions = classifier.predict(X_test)
 
     if problem_type == "multiclass":
-        metrics = {
-            "Accuracy": accuracy_score(y_test, predictions),
-            "F1_Weighted": f1_score(
-                y_test,
-                predictions,
-                average="weighted",
-                zero_division=0,
-            ),
-            "F1_Macro": f1_score(
-                y_test,
-                predictions,
-                average="macro",
-                zero_division=0,
-            ),
-            "BalancedAccuracy": balanced_accuracy_score(y_test, predictions),
-            "MCC": matthews_corrcoef(y_test, predictions),
-        }
+
+        def _multiclass_metrics(yt, yp):
+            return {
+                "Accuracy": accuracy_score(yt, yp),
+                "F1_Weighted": f1_score(yt, yp, average="weighted", zero_division=0),
+                "F1_Macro": f1_score(yt, yp, average="macro", zero_division=0),
+                "BalancedAccuracy": balanced_accuracy_score(yt, yp),
+                "MCC": matthews_corrcoef(yt, yp),
+            }
+
+        metrics = _multiclass_metrics(y_test, predictions)
+        metrics.update(
+            _boot_ci(
+                _multiclass_metrics, y_test, predictions, BOOTSTRAP_N, BENCHMARK_SEED
+            )
+        )
         if hasattr(classifier, "predict_proba"):
             try:
                 metrics["AUC"] = roc_auc_score(
@@ -2345,13 +2379,19 @@ def evaluate_classification_probe(
                 logger.warning("  Could not compute AUC for multiclass: %s", exc)
         return metrics
 
-    metrics = {
-        "Accuracy": accuracy_score(y_test, predictions),
-        "F1": f1_score(y_test, predictions, zero_division=0),
-        "F1_Macro": f1_score(y_test, predictions, average="macro", zero_division=0),
-        "BalancedAccuracy": balanced_accuracy_score(y_test, predictions),
-        "MCC": matthews_corrcoef(y_test, predictions),
-    }
+    def _binary_metrics(yt, yp):
+        return {
+            "Accuracy": accuracy_score(yt, yp),
+            "F1": f1_score(yt, yp, zero_division=0),
+            "F1_Macro": f1_score(yt, yp, average="macro", zero_division=0),
+            "BalancedAccuracy": balanced_accuracy_score(yt, yp),
+            "MCC": matthews_corrcoef(yt, yp),
+        }
+
+    metrics = _binary_metrics(y_test, predictions)
+    metrics.update(
+        _boot_ci(_binary_metrics, y_test, predictions, BOOTSTRAP_N, BENCHMARK_SEED)
+    )
     if hasattr(classifier, "predict_proba"):
         probabilities = classifier.predict_proba(X_test)
         if probabilities.shape[1] == 2:
@@ -2403,13 +2443,31 @@ def evaluate_regression_probe(
         pearson_corr = 0.0 if np.isnan(pearson_corr) else float(pearson_corr)
     except Exception:
         pearson_corr = 0.0
-    return {
+    metrics = {
         "Spearman": float(spearman_corr),
         "Pearson": pearson_corr,
         "MSE": mse,
         "MAE": float(mean_absolute_error(y_test_arr, predictions)),
         "R2": float(r2_score(y_test_arr, predictions)),
     }
+
+    def _resampled(yt, yp):
+        # NaN correlations on a degenerate resample fall back to 0.0, matching
+        # how the point estimate above treats a constant prediction.
+        rho, _ = spearmanr(yt, yp)
+        r, _ = pearsonr(yt, yp)
+        return {
+            "Spearman": 0.0 if np.isnan(rho) else float(rho),
+            "Pearson": 0.0 if np.isnan(r) else float(r),
+            "MSE": float(np.mean((yt - yp) ** 2)),
+            "MAE": float(mean_absolute_error(yt, yp)),
+            "R2": float(r2_score(yt, yp)),
+        }
+
+    metrics.update(
+        _boot_ci(_resampled, y_test_arr, predictions, BOOTSTRAP_N, BENCHMARK_SEED)
+    )
+    return metrics
 
 
 def _aggregate_cv_metrics(fold_metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -3475,6 +3533,18 @@ def parse_args():
         "--device", type=str, default=None, help="Device (auto/cuda/cpu)"
     )
     parser.add_argument(
+        "--bootstrap",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Resamples for percentile CIs on probe metrics, adding <Metric>_CI_low / "
+        "_CI_high columns (default: 0, off; 1000 is plenty). Covers the label-only "
+        "metrics -- AUC and AP are computed from predict_proba afterwards and get no "
+        "interval. Do not combine with the cross-validation path (--eval_split "
+        "validation on a task with no validation split): fold aggregation averages "
+        "every numeric column, which turns the CIs into a mean of intervals.",
+    )
+    parser.add_argument(
         "--cache_embeddings",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -3626,7 +3696,7 @@ def parse_args():
 
 def main():
     """Main execution function."""
-    global BENCHMARK_SEED
+    global BENCHMARK_SEED, BOOTSTRAP_N
 
     args = parse_args()
     benchmark_seeds = (
@@ -3634,6 +3704,9 @@ def main():
     )
     BENCHMARK_SEED = benchmark_seeds[0]
     seed_all(BENCHMARK_SEED)
+    BOOTSTRAP_N = args.bootstrap
+    if BOOTSTRAP_N:
+        logger.info("Bootstrap CIs enabled: %d resamples per metric", BOOTSTRAP_N)
 
     # Handle comparison mode
     if args.compare:
