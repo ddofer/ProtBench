@@ -10,14 +10,14 @@ CPU only by default (per the GPU-safety rule). Honest expectation per the design
 doc: a small/zero delta on one easy-MSA assay with few steps — this confirms the
 path runs and is wired, not that it beats HEAD.
 
-    CUDA_VISIBLE_DEVICES="" /data/prot/ProteinSentenceTransformers/.venv/bin/python \
-        /data/proteva/plm/bench/wt_tta_smoke.py
+    CUDA_VISIBLE_DEVICES="" python contrib/proteva/wt_tta_smoke.py
 """
 
 from __future__ import annotations
 
 import argparse
 import glob
+import os
 import logging
 
 import numpy as np
@@ -35,9 +35,15 @@ from wt_test_time_training import (
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("wt_tta_smoke")
 
-_PG_GLOB = (
-    "/home/nvidia/.cache/huggingface/hub/datasets--OATML-Markslab--ProteinGym_v1"
-    "/snapshots/*/DMS_substitutions/train-*.parquet"
+# Reads the ProteinGym parquet straight out of the HF cache rather than
+# re-downloading. $HF_HOME wins if set, else the default cache location.
+_HF_HUB = os.path.join(
+    os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface"), "hub"
+)
+_PG_GLOB = os.path.join(
+    _HF_HUB,
+    "datasets--OATML-Markslab--ProteinGym_v1",
+    "snapshots", "*", "DMS_substitutions", "train-*.parquet",
 )
 
 
