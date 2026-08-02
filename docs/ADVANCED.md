@@ -127,7 +127,6 @@ Default `r=64 α=64 lr=2e-4 patience=1`. Per-task-type overrides:
 - **Many-class classification** (remote_homology=1195 classes, ec_classification): `lr=1e-4 patience=3` — aggressive default causes loss to stay at ln(N) for the full 1-epoch grace period and patience=1 restores the near-random checkpoint (F1≈0.0003 verified 2026-06-16).
 - **Other classification** (binary, low-cardinality multiclass): default.
 
-`target_modules` resolved per model family in `_hf_finetune_common.py` to **all body Linears** — Proteva `wq/wk/wv/wo/attn_gate/w12/w3`, AMPLIFY `q/k/v/wo/w12/w3`; MLM decoder + aux heads stay frozen, task head via `modules_to_save`. NOT `all-linear`.
 
 ```bash
 PY=python
@@ -166,24 +165,10 @@ also saves adapter weights under `.../lora_adapter/`.
 
 Moved to [DATASETS.md](DATASETS.md).
 
-## Applied fixes (2026-06-16/17)
-
-| Bug | Fix | Commit |
-|---|---|---|
-| Sequence probe used `OneVsRestClassifier(liblinear)` — OvR wrapper means pseudo-multinomial, not true multinomial; `liblinear` stalls at 100 iters on 100k+ sample tasks | Switched to `LogisticRegression(solver="saga")` — true multinomial, handles large n | `c70b743` |
-| Residue probe (`token_classification_probe.py`) used `lbfgs` which stalls past 1000 iters on ~600k SS3 residues | Switched to `solver="saga"` | `ef9a1c6` |
-| ProteinGym clinical pathogenicity AUC inverted (~0.10 instead of ~0.90) | Negate MLM scores before `roc_auc_score` — pathogenic = deleterious = lower logP | `c151261` |
-| MLM JSONL not collected by `collect_bench_results.py` glob | Use subdir pattern `FT_OUT/mlm_zs_{ckpt}/` so `write_jsonl_record(.parent)` lands in `FT_OUT` | `7dc61f1` |
-| `resolve_mlm_head` only knew AMPLIFY — Proteva models raised ValueError | Added Proteva branch using `model(…).logits` / `encoder.blocks` / `encoder.decoder` | `6844ae0` |
-| Proteva MLM crashed with RoPE size mismatch at max_length=2048 | Clamp `max_length` to `encoder.config.max_position` (=1024) before scoring | `78ba78f` |
-| `remote_homology` LoRA collapsed (F1≈0.0003) — 1195-class head can't descend from ln(1195) in 1 epoch with patience=1 | Many-class carve-out: `lr=1e-4, patience=3` for `remote_homology` and `ec_classification` | `23dd06e` |
-
 ## Tests
 
 Unit tests live in [`tests/`](tests/). Fast tests cover the
 `TaskConfig` validator extension, label decoders, and label alignment.
-Two CPU smoke tests (model + dataset download) are marked
-`@pytest.mark.slow` and skipped by default.
 
 ```bash
 PY=python
@@ -234,13 +219,6 @@ cache (`~/.cache/huggingface/hub/`), which already contains every
 verified no explicit `cache_dir=` override exists in the vendored code — the
 only `cache_dir` references in the files are for the *embedding-output* cache
 controlled by `--embed_cache_dir`, which is unrelated to dataset downloads.
-
-## Not in the default training/search loop
-
-This is an **on-demand** evaluation tool. It is intentionally not wired into
-any autoresearch path, `train_proxy.py`, or the queue runner. Call it
-manually during Stage-2 search to spot-check pretraining objectives against
-downstream signal.
 
 ## Structural test sets are also leakage sources
 
