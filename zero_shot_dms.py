@@ -29,9 +29,9 @@ AAs); AMPLIFY shares that exact map.
 
 CLI::
 
-    python -m plm.bench.zero_shot_dms --ckpt DIR --task {gb1,beta_lactamase} \
+    python -m zero_shot_dms --ckpt DIR --task {gb1,beta_lactamase} \
         [--device cuda] [--batch-size 64] [--max-variants N]
-    python -m plm.bench.zero_shot_dms --amplify --task beta_lactamase [...]
+    python -m zero_shot_dms --amplify --task beta_lactamase [...]
 
 Both downstream datasets store *full variant sequences* of fixed length (no
 explicit wt+mutation list), so the wild-type is derived per dataset as the
@@ -446,7 +446,7 @@ def load_task_variants(task: str, max_variants: int | None = None) -> list[DMSVa
         raise ValueError(f"unknown task {task!r}; expected one of {sorted(_TASK_SPECS)}")
     from datasets import load_dataset
 
-    from plm.bench.benchmark_tasks import TASKS
+    from benchmark_tasks import TASKS
 
     task_key, seq_col, label_col = _TASK_SPECS[task]
     cfg = TASKS[task_key]

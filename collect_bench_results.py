@@ -8,7 +8,7 @@ from pathlib import Path
 
 # Robust import: try package-style first, fall back to adding bench dir to sys.path
 try:
-    from plm.bench.benchmark_tasks import TASKS
+    from benchmark_tasks import TASKS
 except ImportError:
     _BENCH_DIR = str(Path(__file__).resolve().parent)
     if _BENCH_DIR not in sys.path:

@@ -1,7 +1,7 @@
 """Proteva trunk + AUX-head ProteinGym zero-shot substitution scorer.
 
 A SEPARATE scorer that runs *alongside* the canonical MLM-marginal scorer
-(:mod:`plm.bench.proteingym_mlm_zeroshot`). It reuses that module's
+(:mod:`proteingym_mlm_zeroshot`). It reuses that module's
 native-context windowing (``get_optimal_window``), masked-marginal log-prob
 tables (``windowed_logp_table`` / ``masked_marginal_logprob_table``), the needed-
 positions union, and the ProteinGym DMS-substitution data loading verbatim, then
@@ -55,10 +55,10 @@ import torch
 from scipy.stats import spearmanr
 from sklearn.metrics import roc_auc_score
 
-from plm.bench.benchmark_tasks import TASKS
+from benchmark_tasks import TASKS
 
 # Reuse the canonical MLM scorer's primitives verbatim (no reimplementation).
-from plm.bench.proteingym_mlm_zeroshot import (
+from proteingym_mlm_zeroshot import (
     DMS_REF_DEFAULT,
     _detect_native_context,
     _hier_mean,
@@ -69,7 +69,7 @@ from plm.bench.proteingym_mlm_zeroshot import (
 
 # Reuse the collator-derived canonical AA->token-id lookup (the correct one;
 # NOT the stale CANON_TOKEN_IDS in uc30_aux_loader.py).
-from plm.bench.zero_shot_dms import aa_token_id_lookup
+from zero_shot_dms import aa_token_id_lookup
 
 _AA_LETTERS = "ACDEFGHIKLMNPQRSTVWY"
 _AA20_TO_IDX = {aa: i for i, aa in enumerate(_AA_LETTERS)}
@@ -1105,8 +1105,8 @@ def main(argv=None):
     if len(ens_w) != 3:
         raise SystemExit(f"--ensemble_weights needs 3 values (mlm,cons,pssm), got {ens_w}")
 
-    from plm.bench.protein_benchmark_suite import load_model
-    from plm.bench.wt_test_time_training import resolve_mlm_head
+    from protein_benchmark_suite import load_model
+    from wt_test_time_training import resolve_mlm_head
 
     model_obj, is_sbert, device = load_model(args.model_name, device=args.device)
     if is_sbert:

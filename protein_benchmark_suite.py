@@ -654,7 +654,7 @@ def load_model(
         # strip + key-overlap guard inside model_utils.from_pretrained_with_flash —
         # invoke both explicitly here. _validate_local_checkpoint_integrity is the
         # hard gate: it RAISES rather than let a mismatched load proceed.
-        from plm.bench.model_utils import _validate_local_checkpoint_integrity
+        from model_utils import _validate_local_checkpoint_integrity
         from plm.hf.checkpoint_utils import strip_orig_mod_prefix
 
         # NOT wrapped in try/except: strip_orig_mod_prefix returns 0 WITHOUT writing

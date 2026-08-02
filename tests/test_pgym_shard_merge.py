@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from plm.bench.proteingym_mlm_zeroshot import (
+from proteingym_mlm_zeroshot import (
     _shard_assays,
     _merge_results,
     aggregate_proteingym,
@@ -63,7 +63,7 @@ import json as _json
 import os as _os
 import subprocess as _sp
 
-from plm.bench._hf_finetune_common import safe_ckpt as _safe_ckpt
+from _hf_finetune_common import safe_ckpt as _safe_ckpt
 
 _CTX = {
     "checkpoint": "fakemodel", "model_type": "amplify", "model_window": 1022,

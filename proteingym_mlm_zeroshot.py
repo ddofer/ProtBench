@@ -17,8 +17,8 @@ import numpy as np, torch
 from pathlib import Path
 from scipy.stats import spearmanr
 from sklearn.metrics import roc_auc_score
-from plm.bench.benchmark_tasks import TASKS
-from plm.bench._hf_finetune_common import write_jsonl_record, safe_ckpt
+from benchmark_tasks import TASKS
+from _hf_finetune_common import write_jsonl_record, safe_ckpt
 
 SUBSTITUTION_ZS = [
     "proteingym_dms_substitutions_zeroshot",
