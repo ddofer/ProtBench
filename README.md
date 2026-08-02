@@ -214,7 +214,6 @@ Default `r=64 α=64 lr=2e-4 patience=1`. Per-task-type overrides:
 - **Many-class classification** (remote_homology=1195 classes, ec_classification): `lr=1e-4 patience=3` — aggressive default causes loss to stay at ln(N) for the full 1-epoch grace period and patience=1 restores the near-random checkpoint (F1≈0.0003 verified 2026-06-16).
 - **Other classification** (binary, low-cardinality multiclass): default.
 
-`target_modules` resolved per model family in `_hf_finetune_common.py` to **all body Linears** — Proteva `wq/wk/wv/wo/attn_gate/w12/w3`, AMPLIFY `q/k/v/wo/w12/w3`; MLM decoder + aux heads stay frozen, task head via `modules_to_save`. NOT `all-linear`.
 
 ```bash
 PY=python
@@ -253,28 +252,15 @@ also saves adapter weights under `.../lora_adapter/`.
 
 | Task | Dataset | Source paper | Caveats |
 |---|---|---|---|
-| `ss3`, `disorder` | [`agemagician/NetSurfP-SS3`](https://huggingface.co/datasets/agemagician/NetSurfP-SS3) | Klausen et al., *NetSurfP-2.0*, Proteins 2019 ([doi:10.1002/prot.25674](https://doi.org/10.1002/prot.25674)) | Third-party rehost by Ahmed Elnaggar (ProtTrans author). Train/val reshuffled from paper's 10,337/500 to 10,792/646. **CB513 = 511 chains** (vs 513 in paper); **CASP12 = 20** (vs 21). Disorder = PDB-missing-coordinate mask, NOT DisProt / CAID2 — do not cross-compare. No license on HF card. |
-| `signal_peptide` | [`SaProtHub/Dataset-Signal-Peptides`](https://huggingface.co/datasets/SaProtHub/Dataset-Signal-Peptides) | Teufel et al., *SignalP 6.0*, Nat Biotechnol 2022 ([doi:10.1038/s41587-021-01156-3](https://doi.org/10.1038/s41587-021-01156-3)) | All 25,693 rows packed into HF `train` split; partition is in the `stage` column (20,490 / 2,569 / 2,634). Third-party rehost by SaProtHub. License: MIT. |
-| `disprot` | [`LiteFold/DisProt`](https://huggingface.co/datasets/LiteFold/DisProt) | Aspromonte et al., *DisProt 2024*, NAR ([doi:10.1093/nar/gkad928](https://doi.org/10.1093/nar/gkad928)) | Built to local Arrow `data/disprot/` by `scripts/prep_disprot.py`. Per-residue 0/1 = union of curated `region_terms == 'disorder'` spans (excludes functional terms like 'protein binding'); reproduces `disorder_content` for ~99% of proteins. Split via DisProt's deterministic `split_bucket` (sha256(id)%10): test=bucket0 (324), val=bucket1 (340), train=buckets2-9 (2,535). **This is the manually-curated CAID-style target — distinct from the NetSurfP `disorder` mask above; do not cross-compare.** Headline metric MCC (imbalanced, ~17% disordered). `disprot_id`/`accession` retained for the planned mmseqs pretraining-contamination filter. |
+| `ss3`, `disorder` | [`agemagician/NetSurfP-SS3`](https://huggingface.co/datasets/agemagician/NetSurfP-SS3) | Klausen et al., *NetSurfP-2.0*, Proteins 2019 ([doi:10.1002/prot.25674](https://doi.org/10.1002/prot.25674)) |  Train/val reshuffled from paper's 10,337/500 to 10,792/646. **CB513 = 511 chains** (vs 513 in paper); **CASP12 = 20** (vs 21). Disorder = PDB-missing-coordinate mask, NOT DisProt / CAID2 — do not cross-compare. |
+| `signal_peptide` | [`SaProtHub/Dataset-Signal-Peptides`](https://huggingface.co/datasets/SaProtHub/Dataset-Signal-Peptides) | Teufel et al., *SignalP 6.0*, Nat Biotechnol 2022 ([doi:10.1038/s41587-021-01156-3](https://doi.org/10.1038/s41587-021-01156-3)) | All 25,693 rows packed into HF `train` split; partition is in the `stage` column (20,490 / 2,569 / 2,634).|
+| `disprot` | [`LiteFold/DisProt`](https://huggingface.co/datasets/LiteFold/DisProt) | Aspromonte et al., *DisProt 2024*, NAR ([doi:10.1093/nar/gkad928](https://doi.org/10.1093/nar/gkad928)) | Built to local Arrow `data/disprot/` by `scripts/prep_disprot.py`. Per-residue 0/1 = union of curated `region_terms == 'disorder'` spans. Split via DisProt's deterministic `split_bucket` (sha256(id)%10): test=bucket0 (324), val=bucket1 (340), train=buckets2-9 (2,535). **This is the manually-curated CAID-style target — distinct from the NetSurfP `disorder` mask above.** Headline metric MCC (imbalanced, ~17% disordered). |
 
-## Applied fixes (2026-06-16/17)
-
-| Bug | Fix | Commit |
-|---|---|---|
-| Sequence probe used `OneVsRestClassifier(liblinear)` — OvR wrapper means pseudo-multinomial, not true multinomial; `liblinear` stalls at 100 iters on 100k+ sample tasks | Switched to `LogisticRegression(solver="saga")` — true multinomial, handles large n | `c70b743` |
-| Residue probe (`token_classification_probe.py`) used `lbfgs` which stalls past 1000 iters on ~600k SS3 residues | Switched to `solver="saga"` | `ef9a1c6` |
-| ProteinGym clinical pathogenicity AUC inverted (~0.10 instead of ~0.90) | Negate MLM scores before `roc_auc_score` — pathogenic = deleterious = lower logP | `c151261` |
-| MLM JSONL not collected by `collect_bench_results.py` glob | Use subdir pattern `FT_OUT/mlm_zs_{ckpt}/` so `write_jsonl_record(.parent)` lands in `FT_OUT` | `7dc61f1` |
-| `resolve_mlm_head` only knew AMPLIFY — Proteva models raised ValueError | Added Proteva branch using `model(…).logits` / `encoder.blocks` / `encoder.decoder` | `6844ae0` |
-| Proteva MLM crashed with RoPE size mismatch at max_length=2048 | Clamp `max_length` to `encoder.config.max_position` (=1024) before scoring | `78ba78f` |
-| `remote_homology` LoRA collapsed (F1≈0.0003) — 1195-class head can't descend from ln(1195) in 1 epoch with patience=1 | Many-class carve-out: `lr=1e-4, patience=3` for `remote_homology` and `ec_classification` | `23dd06e` |
 
 ## Tests
 
 Unit tests live in [`tests/`](tests/). Fast tests cover the
 `TaskConfig` validator extension, label decoders, and label alignment.
-Two CPU smoke tests (model + dataset download) are marked
-`@pytest.mark.slow` and skipped by default.
 
 ```bash
 PY=python
@@ -320,28 +306,3 @@ cache (`~/.cache/huggingface/hub/`), which already contains every
 verified no explicit `cache_dir=` override exists in the vendored code — the
 only `cache_dir` references in the files are for the *embedding-output* cache
 controlled by `--embed_cache_dir`, which is unrelated to dataset downloads.
-
-## Not in the default training/search loop
-
-This is an **on-demand** evaluation tool. It is intentionally not wired into
-any autoresearch path, `train_proxy.py`, or the queue runner. Call it
-manually during Stage-2 search to spot-check pretraining objectives against
-downstream signal.
-
-## Structural test sets are also leakage sources
-
-The structural tasks in this suite (`ss3`, `disorder`, `stability`,
-`chezod_disorder`) are first-class **leakage protection targets** when
-proteva pretrains with 3Di / fold-derived aux objectives. Their test
-sequences feed the train-side filtering pipeline documented at
-proteva's `docs/LEAKAGE_FILTERING_RUNBOOK.md` (not part of this repo);
-they are included by default in `--task-group critical` and selectable
-in isolation via the new `--task-group structural`. PSSM-derived tasks
-are intentionally not treated as a structural leak.
-
-## Updating
-
-This repo is the canonical copy — edit it here. The older checkouts
-(`ProteinSentenceTransformers`, `protein`, `proteva/plm/bench`) are frozen
-history, kept only so in-flight runs that still point at them keep working.
-Changes do not flow back to them, and a fix landed there will not reach here.
