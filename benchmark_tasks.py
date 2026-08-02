@@ -89,7 +89,7 @@ FAST_TASKS = [
     "enzyme_catalytic_efficiency",
     # "antibiotic_resistance",
     "ppi_bernett",
-    # go_mf excluded: multilabel task, not counted in paper wins
+    # go_mf excluded: large multilabel task, too slow for the default sweep
     # chezod_disorder DISABLED 2026-06-19 -> replaced by disprot (residue-level)
     "ss3",
     "conservation_flip",
@@ -619,7 +619,8 @@ RETRIEVAL_TASKS = sorted(
     k for k, cfg in TASKS.items() if cfg.problem_type == "retrieval"
 )
 
-# Multilabel tasks excluded from default wins/benchmarks per paper policy
+# Large multilabel tasks are excluded from the default sweep (thousands of
+# labels each); request them explicitly with --tasks.
 # (results are kept in TASKS for historical compatibility, but these are
 # not counted in model comparisons and not run by default).
 MULTILABEL_EXCLUDED_TASKS = frozenset({"go_mf", "cafa5"})

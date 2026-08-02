@@ -102,8 +102,7 @@ Task                 Winner Metric  Best_AUC  Other_AUC   Δ_AUC Samples
 Solubility (DeepSol)   kmer    AUC    0.6123    0.56096 0.05134     500
 ```
 
-It writes to `results/benchmarks/` relative to your current directory, which
-`--output_dir` does not change.
+It writes the comparison CSV to `--output_dir` (default `results/benchmarks/`).
 
 For more than two models, read the CSVs yourself — but **filter to one split
 first**, or you will average test and validation rows together:

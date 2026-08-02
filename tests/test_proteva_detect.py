@@ -28,7 +28,9 @@ def neutral_ckpt_dir():
 
 
 def test_detect_proteva_by_name():
-    assert detect_model_type("ddofer/proteva-120m") == "proteva"
+    # Substring match only -- no such repo is fetched, so a placeholder id keeps
+    # the test from naming a private checkpoint.
+    assert detect_model_type("example-org/proteva-120m") == "proteva"
 
 
 def test_detect_proteva_by_local_config_model_type(neutral_ckpt_dir):

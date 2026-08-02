@@ -34,9 +34,9 @@ kernels = ["kernels>=0.12,<0.13"]
 package = false
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "contrib/proteva"]
 # tests/ is a package but test_disprot imports test_token_classification_probe flat.
-pythonpath = [".", "tests"]
+pythonpath = [".", "tests", "contrib/proteva"]
 markers = ["slow: heavyweight tests that hit the network / download models"]
 
 [tool.ruff]

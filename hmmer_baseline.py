@@ -1,11 +1,10 @@
 #!/usr/bin/env python
 """HMMER (phmmer) alignment baseline over the benchmark, scored identically to MMseqs2.
 
-Reviewer Yi1G named "HMMER/MMseqs2" among the missing baselines. phmmer builds an
-implicit profile from each single query sequence and searches it against the
-target set, which is a more sensitive remote-homology detector than MMseqs2's
-k-mer prefilter -- it is the harder alignment baseline, which is why it is worth
-running rather than assuming it would lose.
+phmmer builds an implicit profile from each single query sequence and searches
+it against the target set, which makes it a more sensitive remote-homology
+detector than MMseqs2's k-mer prefilter. It is the harder alignment baseline of
+the two, which is why it is worth running rather than assuming it would lose.
 
 **The scoring code is not duplicated here.** Both engines emit the same
 structure -- `hits: {query_idx: [(target_idx, bitscore), ...]}` ranked best

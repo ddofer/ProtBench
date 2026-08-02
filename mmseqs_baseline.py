@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """MMseqs2-only baseline for the two structural benchmark tasks.
 
-Answers the reviewer question "how much of ProtSent's structural performance is
-just sequence similarity?" by scoring the SAME tasks with alignment instead of
-embeddings, under the SAME metric definitions:
+Answers "how much of this model's structural performance is just sequence
+similarity?" by scoring the SAME tasks with alignment instead of embeddings,
+under the SAME metric definitions:
 
   scope40_retrieval  family-level Recall@{1,10,30}, self-match excluded --
                      identical to evaluate_retrieval() in
@@ -79,7 +79,7 @@ def read_hits(tsv: Path) -> dict[int, list[tuple[int, float]]]:
     """query_idx -> [(target_idx, bits), ...] in rank order.
 
     Ranked by **E-value ascending, then bitscore descending** -- the conventional
-    ordering for a sequence-search baseline, and the one the rebuttal reports.
+    ordering for a sequence-search baseline.
     Bitscore alone gives a different (and, for SCOPe-40, markedly more optimistic)
     ranking, so the tie-break matters and is stated explicitly rather than left to
     whatever order MMseqs2 emitted.

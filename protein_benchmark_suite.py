@@ -875,6 +875,39 @@ def _resolve_local_dataset_path(dataset_name: str) -> Optional[Path]:
     return None
 
 
+# data/<name> -> the script that builds it. Kept explicit rather than guessed
+# from the name, so a rename breaks the test instead of the error message.
+_PREP_SCRIPTS = {
+    "data/conservation_flip": "scripts/prep_conservation.py",
+    "data/disprot": "scripts/prep_disprot.py",
+    "data/flip2_amylase": "scripts/prep_flip2.py",
+    "data/flip2_rhomax": "scripts/prep_flip2.py",
+}
+
+
+def require_local_dataset(dataset_name: str) -> Path:
+    """Resolve a `data/...` dataset, or explain how to build it.
+
+    Without this, `datasets` reports "doesn't exist on the Hub", which sends the
+    reader looking for a deleted HuggingFace dataset rather than at a prep
+    script in this repo.
+    """
+    path = _resolve_local_dataset_path(dataset_name)
+    if path is not None:
+        return path
+    script = _PREP_SCRIPTS.get(dataset_name)
+    hint = (
+        f"Build it first:\n    python {script}"
+        if script
+        else f"Expected a dataset directory at {dataset_name!r}."
+    )
+    raise FileNotFoundError(
+        f"Local dataset {dataset_name!r} is not present. It is built from source "
+        f"rather than downloaded, so a fresh clone does not have it.\n{hint}\n"
+        f"See docs/DATASETS.md."
+    )
+
+
 def _clean_chezod_scores(values: Any) -> List[float]:
     """Normalize a CheZOD score payload into finite per-residue floats."""
 
@@ -1255,8 +1288,9 @@ def _prepare_token_classification_data(
         "cv_fallback": False,
     }
     logger.info("Loading residue-level dataset: %s", cfg.dataset)
-    local_dataset_path = _resolve_local_dataset_path(cfg.dataset)
-    if local_dataset_path is not None:
+    if str(cfg.dataset).startswith("data/"):
+        ds = _load_local_dataset(require_local_dataset(cfg.dataset))
+    elif (local_dataset_path := _resolve_local_dataset_path(cfg.dataset)) is not None:
         ds = _load_local_dataset(local_dataset_path)
     else:
         load_kwargs = {}
@@ -1388,6 +1422,11 @@ def prepare_data(
     if cfg.data_dir:
         load_kwargs["data_dir"] = cfg.data_dir
 
+    # A data/... task is built by a prep script, never downloaded. Resolve it up
+    # front so a missing one reports the script to run, rather than falling into
+    # the Hub path below and reporting that the dataset does not exist there.
+    if str(cfg.dataset).startswith("data/"):
+        require_local_dataset(cfg.dataset)
     local_dataset_path = _resolve_local_dataset_path(cfg.dataset)
     try:
         if local_dataset_path is not None:
@@ -3463,13 +3502,16 @@ class ResultTracker:
 
 def print_task_table() -> None:
     """Print every task with its type, metric, and which preset selects it."""
+    # Derived from the actual preset membership, not assumed. A few tasks
+    # (cafa5, go_mf) are in no preset at all and must say so -- claiming
+    # "default" would send people to --no-fast, which does not include them.
     groups = {
         k: (
             "very-fast" if k in VERY_FAST_TASKS
-            else "fast" if k in FAST_TASKS
-            else "retrieval" if k in RETRIEVAL_TASKS
+            else "fast" if k in FAST_TASKS or k in RETRIEVAL_TASKS
             else "proteingym" if k in PROTEINGYM_TASKS
-            else "default"
+            else "default" if k in DEFAULT_TASKS
+            else "none"
         )
         for k in TASKS
     }
