@@ -1883,11 +1883,22 @@ def embed_sequences(
                 # Append PID so concurrent subprocesses never share a cache file.
                 # The FastESM embed_dataset performs a non-atomic torch.save after
                 # a read-modify-write, which races and corrupts the .pth when
-                # multiple GPU workers target the same model path. Intra-process
-                # reuse across tasks is preserved; cross-process reuse is sacrificed
-                # (cheaper than risking silent cache corruption and lost benchmarks).
+                # multiple GPU workers target the same model path.
                 base, ext = os.path.splitext(embed_save_path)
                 _save_path = f"{base}.pid{os.getpid()}{ext}"
+                # Seed this process's file from the shared cache so a second split
+                # or a restart does not re-embed everything. This only ever *reads*
+                # the shared file, so it cannot participate in the write race.
+                if os.path.exists(embed_save_path) and not os.path.exists(_save_path):
+                    try:
+                        shutil.copyfile(embed_save_path, _save_path)
+                    except OSError as exc:
+                        logger.warning(
+                            "Could not seed embedding cache from %s (%s); "
+                            "embedding from scratch.",
+                            embed_save_path,
+                            exc,
+                        )
             else:
                 _save_path = os.path.join(
                     tempfile.mkdtemp(), "_no_cache_embeddings.pth"
@@ -1908,6 +1919,22 @@ def embed_sequences(
                 emb_dict = model.embed_dataset(**kwargs)
             if not emb_dict:
                 raise RuntimeError("embed_dataset returned no embeddings")
+            if _use_cache and os.path.exists(_save_path):
+                # Publish this process's cache for the next one. os.replace is
+                # atomic within a filesystem, so a reader never sees a partial
+                # file -- unlike the non-atomic torch.save that caused the
+                # original corruption. Concurrent workers still write only their
+                # own pid file; the last to publish wins, which costs reuse but
+                # never validity.
+                try:
+                    os.replace(_save_path, embed_save_path)
+                except OSError as exc:
+                    logger.warning(
+                        "Could not publish embedding cache to %s (%s); "
+                        "the next process will re-embed.",
+                        embed_save_path,
+                        exc,
+                    )
             # Re-order dict results to match original input order.
             # embed_dataset keys are truncated sequences; truncate lookups to match.
             embs_list = []
