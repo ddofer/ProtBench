@@ -3471,10 +3471,11 @@ def parse_args():
     parser.add_argument(
         "--cache_embeddings",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Cache embeddings to disk under --embed_cache_dir/<model_name>/embeddings.pth. "
-        "Enable for baseline/static models you want to reuse; leave off for fine-tuned "
-        "models that change between runs (default: True).",
+        default=False,
+        help="Cache embeddings to disk under --embed_cache_dir/<model_name>/embeddings.pth "
+        "(default: off). Opt in for static models you will re-benchmark. Note the cache "
+        "key for a hub model id is just the name, so it does NOT invalidate when the "
+        "upstream weights change; local paths are keyed on file size and mtime.",
     )
     parser.add_argument(
         "--batch_size",
