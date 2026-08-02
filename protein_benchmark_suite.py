@@ -158,6 +158,7 @@ from sklearn.preprocessing import (
 from transformers import AutoModel, AutoModelForMaskedLM, AutoTokenizer
 
 from benchmark_comparison import compare_benchmarks, display_comparison
+from kmer_baseline import kmer_features, parse_kmer_model_name
 from benchmark_tasks import (
     DEFAULT_TASKS,
     FAST_MAX_SAMPLES,
@@ -470,6 +471,13 @@ def resolve_proteva_runtime(torch_dtype, is_cpu):
     return torch.float32, "off"
 
 
+class _KmerEmbedder:
+    """Marker for the k-mer baseline, carrying k through to embed_sequences."""
+
+    def __init__(self, k: int):
+        self.k = k
+
+
 def load_model(
     model_name: str,
     device: str = "cuda",
@@ -493,6 +501,14 @@ def load_model(
         - is_sbert: Boolean indicating if it's a SentenceTransformer
         - device: The device being used
     """
+    # "kmer" / "kmer4" is the no-learning baseline: fixed k-mer frequency
+    # vectors, no weights to load and nothing to put on a device. It rides the
+    # normal path from here on so it gets the same probes, splits and metrics.
+    kmer_k = parse_kmer_model_name(model_name)
+    if kmer_k is not None:
+        logger.info("Using the k-mer baseline (k=%d, %d dims)", kmer_k, 20**kmer_k)
+        return _KmerEmbedder(kmer_k), False, "cpu"
+
     if not torch.cuda.is_available():
         print("WARNING! No GPU/CUDA available!")
     if device is None:
@@ -1774,7 +1790,9 @@ def embed_sequences(
     show_progress = _progress_bars_enabled()
     _configure_tqdm_defaults(show_progress)
 
-    if is_sbert:
+    if isinstance(model_obj, _KmerEmbedder):
+        embs = kmer_features(flat_seqs, k=model_obj.k)
+    elif is_sbert:
         if getattr(model_obj, "max_seq_length", None) != max_length:
             model_obj.max_seq_length = max_length
         # SentenceTransformer handles batching internally
