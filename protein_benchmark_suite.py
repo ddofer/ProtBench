@@ -158,7 +158,9 @@ from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
+    balanced_accuracy_score,
     f1_score,
+    matthews_corrcoef,
     mean_absolute_error,
     r2_score,
     roc_auc_score,
@@ -2329,6 +2331,8 @@ def evaluate_classification_probe(
                 average="macro",
                 zero_division=0,
             ),
+            "BalancedAccuracy": balanced_accuracy_score(y_test, predictions),
+            "MCC": matthews_corrcoef(y_test, predictions),
         }
         if hasattr(classifier, "predict_proba"):
             try:
@@ -2345,6 +2349,8 @@ def evaluate_classification_probe(
         "Accuracy": accuracy_score(y_test, predictions),
         "F1": f1_score(y_test, predictions, zero_division=0),
         "F1_Macro": f1_score(y_test, predictions, average="macro", zero_division=0),
+        "BalancedAccuracy": balanced_accuracy_score(y_test, predictions),
+        "MCC": matthews_corrcoef(y_test, predictions),
     }
     if hasattr(classifier, "predict_proba"):
         probabilities = classifier.predict_proba(X_test)
