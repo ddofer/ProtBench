@@ -9,7 +9,7 @@ for models that don't follow vanilla HuggingFace conventions:
   - DPLM2 (Synthyra): protein diffusion language model
   - Profluent-E1 (Synthyra): retrieval-augmented protein encoder
 
-Used by both protein_pipeline.py (training) and protein_benchmark_suite.py (benchmarking).
+Used by protein_benchmark_suite.py and the fine-tuning scripts (benchmarking).
 """
 
 import importlib

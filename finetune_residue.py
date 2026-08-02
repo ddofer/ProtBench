@@ -5,7 +5,7 @@ Wires AMPLIFY / ESM-style encoders to HF ``AutoModelForTokenClassification``
 disorder (same dataset, ``disorder`` column), and signal peptides
 (SignalP6 via SaProtHub). Mirrors the CLI style of ``protein_benchmark_suite.py``.
 
-See ``plm/bench/README.md`` § Dataset provenance for citation details and
+See ``docs/DATASETS.md`` for citation details and
 verified row counts.
 """
 

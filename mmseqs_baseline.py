@@ -38,9 +38,8 @@ import numpy as np
 
 logger = logging.getLogger("mmseqs_baseline")
 
-# $MMSEQS_BIN wins, else whatever is on PATH. ProtSent vendored a copy under
-# tools/mmseqs/, which did not survive the move here; mmseqs is a system tool,
-# not something this repo should ship.
+# $MMSEQS_BIN wins, else whatever is on PATH. mmseqs is a system tool, not
+# something this repo ships -- see the README for install options.
 MMSEQS = Path(os.environ.get("MMSEQS_BIN") or shutil.which("mmseqs") or "mmseqs")
 # Sensitive search: this is a homology-detection baseline, so recall matters far
 # more than runtime. Both task sets are small (~10-15k sequences).

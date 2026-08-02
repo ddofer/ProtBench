@@ -1,6 +1,6 @@
 """Sequence-level fine-tuning for protein LMs: probe / full / LoRA modes.
 
-Wraps any task in the vendored ``TASKS`` registry whose ``problem_type``
+Wraps any task in the ``TASKS`` registry whose ``problem_type``
 is one of ``{binary, multiclass, regression}``. Uses HF
 ``AutoModelForSequenceClassification`` + ``Trainer`` + ``DataCollatorWithPadding``;
 LoRA mode wraps the encoder via ``peft.get_peft_model`` while leaving

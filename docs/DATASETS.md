@@ -53,8 +53,10 @@ distinction matters.
 | `solubility` | [`proteinea/solubility`](https://huggingface.co/datasets/proteinea/solubility) | binary | AUC |
 | `scope40_retrieval` | [`tattabio/scope40_test`](https://huggingface.co/datasets/tattabio/scope40_test) | retrieval | Recall@10 |
 
-Local `data/...` entries are built into the repo by `scripts/prep_*.py` rather
-than downloaded.
+Local `data/...` entries are **not** downloaded and are **not** in a fresh
+clone. Build them first with the matching script in `scripts/`:
+`prep_conservation.py`, `prep_disprot.py`, `prep_flip2.py`. Two of the four
+(`conservation_flip`, `disprot`) are in the default preset.
 
 ## Verified provenance
 

@@ -1,83 +1,17 @@
 # -*- coding: utf-8 -*-
-"""
-Protein Benchmark Suite
-======================================
+"""Protein Benchmark Suite -- frozen-probe evaluation of protein models.
 
-Features:
-- TaskConfig dataclass with top_k_labels filtering for GO/EC
-- SentenceTransformer loading (priority) + HuggingFace AutoModel fallback
-- Robust column detection for various dataset formats
-- 35 benchmark tasks (26 standard + 1 retrieval + 8 ProteinGym)
-- Linear probe evaluation with frozen embeddings
-- Validation-first supervised evaluation with 4-fold CV fallback on train
-- Retrieval evaluation with Recall@K
-- ResultTracker for CSV export
+Embeds sequences once with a frozen model, fits a small probe (linear, knn or
+histgb) on those embeddings, and writes one CSV row per task x seed x probe x
+split. Also runs non-neural baselines (k-mer, and via sibling scripts MMseqs2
+and phmmer) through the identical splits and metrics, so they are comparable.
 
-Tasks (35 total):
-    Binary (8):      solubility, ppi_bernett, peptide_hla, metal_ion_binding,
-                                     material_production, binary_subcellular_localization,
-                                     signalp_binary, profet_np_sp_cleaved
-  Multiclass (5):  remote_homology, subcellular_loc, ec_classification,
-                   antibiotic_resistance, temperature_stability
-  Multilabel (2):  go_mf, cafa5
-        Regression (11): variant_effect, fluorescence, stability, thermostability,
-                                                                         optimal_ph, enzyme_catalytic_efficiency, cloning_clf,
-                                                                         chezod_disorder, beta_lactamase_peer,
-                                                                         aav_flip, rhla_enzyme_mutations
-    Retrieval (1):   scope40_retrieval
-  ProteinGym Zero-Shot (4):
-                   proteingym_dms_substitutions_zeroshot,
-                   proteingym_dms_indels_zeroshot,
-                   proteingym_clinical_substitutions_zeroshot,
-                   proteingym_clinical_indels_zeroshot
-  ProteinGym Supervised (4):
-                   proteingym_dms_substitutions_supervised,
-                   proteingym_dms_indels_supervised,
-                   proteingym_clinical_substitutions_supervised,
-                   proteingym_clinical_indels_supervised
+    python protein_benchmark_suite.py --list_tasks
+    python protein_benchmark_suite.py -m facebook/esm2_t6_8M_UR50D \
+        --tasks solubility -p linear --eval_split test
 
-    --fast mode (default) runs 17 tasks (16 fast tasks + scope40_retrieval) with sample cap.
-    --no-fast runs all 26 standard probe tasks (no sample cap, no ProteinGym, no retrieval).
-  --proteingym adds the 8 ProteinGym tasks to any run.
-
-Usage:
-    # Run validation-first benchmarks (default):
-    python protein_benchmark_suite.py -m facebook/esm2_t30_150M_UR50D
-
-    # Force historical test-set evaluation:
-    python protein_benchmark_suite.py -m facebook/esm2_t30_150M_UR50D --eval_split test
-
-    # Run fast benchmarks (default):
-    python protein_benchmark_suite.py -m facebook/esm2_t30_150M_UR50D
-
-    # Run all 26 standard probe tasks (excluding ProteinGym and retrieval):
-    python protein_benchmark_suite.py -m facebook/esm2_t30_150M_UR50D --no-fast
-
-    # Run SCOPe-40 retrieval only:
-    python protein_benchmark_suite.py -m facebook/esm2_t33_650M_UR50D -t scope40_retrieval
-
-    # Run all 34 default tasks (standard + ProteinGym; retrieval remains opt-in):
-    python protein_benchmark_suite.py -m facebook/esm2_t30_150M_UR50D --no-fast --proteingym
-
-    # Run only ProteinGym tasks:
-    python protein_benchmark_suite.py -m my_model --proteingym --tasks <none needed, --proteingym adds them>
-
-    # Run specific tasks:
-    python protein_benchmark_suite.py -m my_model -t solubility fluorescence
-
-    # Append ProteinGym results to existing model results:
-    python protein_benchmark_suite.py -m facebook/esm2_t30_150M_UR50D --proteingym
-
-    # Compare results from 2 previously run runs:
-    python protein_benchmark_suite.py --compare --compare_model1 results/run1 --compare_model2 results/run2
-
-    # Cache embeddings for reuse (e.g., baselines):
-    python protein_benchmark_suite.py -m facebook/esm2_t30_150M_UR50D --cache_embeddings
-
-    ## big run example: run two models and compare:
-    python protein_benchmark_suite.py -m facebook/esm2_t30_150M_UR50D --cache_embeddings   --no-fast \
-    && python protein_benchmark_suite.py -m models/esm150_stage2/final  --no-fast \
-    && python protein_benchmark_suite.py --compare --compare_model1 results/benchmarks/bench_facebook_esm2_t30_150M_UR50D.csv  --compare_model2 results/benchmarks/bench_models/esm150_stage2_final.csv
+Task counts and preset membership are deliberately not written here; they go
+stale. Ask the code: --list_tasks. Full usage is in README.md.
 """
 
 import argparse

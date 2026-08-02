@@ -3,8 +3,8 @@
 This module centralizes common constants, data-prep functions, and metric
 utilities used across:
   - benchmark_comparison.py
-  - benchmark_relative_plot.py
-  - benchmark_ablation_report.py
+  - benchmark_comparison.py
+  - collect_bench_results.py
   - protein_benchmark_suite.py
 
 Usage:

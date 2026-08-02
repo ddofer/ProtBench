@@ -1,10 +1,6 @@
-"""Vendored protein-benchmark suite (sibling repo ProteinSentenceTransformers @ 7aa984e).
+"""ProtBench: benchmark protein models on 40+ sequence and residue tasks.
 
-See README.md for usage, runtime requirements, and the rationale for keeping
-this directory as a thin self-contained copy that reuses the existing HF cache
-and local data (via symlinks under ``./data``).
-
-This package is intentionally not imported by the proteva training/search loop.
-It is an on-demand evaluation tool invoked directly via
-``protein_benchmark_suite.py --tasks ...``.
+See README.md. The modules here are imported flat (``from benchmark_tasks
+import TASKS``), not as a package, because callers put the repo root on
+sys.path rather than installing it.
 """

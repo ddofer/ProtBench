@@ -45,6 +45,27 @@ Fine-tuning (full, last-N layers, or LoRA) lives in `finetune_sequence.py` and
 `finetune_residue.py`. It costs far more compute and is a separate question from
 "what does the representation contain".
 
+## Getting the data
+
+Most tasks download themselves. The dataset is pulled from HuggingFace on first
+use and cached under `~/.cache/huggingface/`, so the first run of a task is
+slower and needs network access. No account or token is required — every
+dataset used here is public.
+
+**Four tasks are built locally instead of downloaded**, and two of them are in
+the default preset, so run these before your first sweep:
+
+```bash
+python scripts/prep_conservation.py   # conservation_flip  (in --very-fast and --fast)
+python scripts/prep_disprot.py        # disprot            (in --fast)
+python scripts/prep_flip2.py          # flip2_amylase, flip2_rhomax (in --no-fast)
+```
+
+Skip them and those tasks fail with a message naming the script to run; the
+rest of the sweep continues and the failure is recorded in the results CSV.
+
+Per-task sources, sizes and citations: [docs/DATASETS.md](docs/DATASETS.md).
+
 ## Recipes
 
 **See what tasks exist.**
