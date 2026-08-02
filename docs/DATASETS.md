@@ -122,3 +122,38 @@ need to check.
 [Rostlab/EAT](https://github.com/Rostlab/EAT) repository (splits) and
 [Zenodo 14675997](https://zenodo.org/records/14675997) (CATH v4.3.0 labels,
 CC-BY-4.0). Rebuild with `scripts/build_cath_eat_dataset.py`.
+
+## The CATH midnight-zone task
+
+Accuracy at the homologous-superfamily (H) level, transferring labels from the
+69k lookup set to the 150 answerable queries.
+
+**Measured with ProtBench** (1-NN, Euclidean, `-p knn --knn_k 1`):
+
+| Method | Accuracy |
+|---|---|
+| 3-mer frequencies | 0.0 |
+| ESM2-8M | 21.3 |
+| ESM2-650M | 42.7 |
+
+**Reported by Heinzinger et al. 2022**, Table 1, on the same splits but with
+their own models and embedding pipeline:
+
+| Method | Accuracy |
+|---|---|
+| Random | 0 |
+| MMseqs2 | 35 |
+| raw ProtT5 | 64 |
+| ProtTucker(ProtT5) | 76 |
+| HMMER profiles | 77 |
+
+The two tables are kept apart on purpose: they share splits and scoring but not
+models or embedding code, so a row from one is not a like-for-like comparison
+against a row from the other. Compare within a table.
+
+The 0.0 for 3-mers is the check that matters. It matches the published random
+baseline, which says amino acid composition carries nothing about remote
+homology — the task is not leaking a shortcut.
+
+Dataset: [`GrimSqueaker/cath43-eat`](https://huggingface.co/datasets/GrimSqueaker/cath43-eat),
+built by `scripts/build_cath_eat_dataset.py`.

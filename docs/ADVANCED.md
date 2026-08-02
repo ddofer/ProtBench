@@ -207,16 +207,21 @@ CUDA_VISIBLE_DEVICES=4 $PY $BENCH --model_name <ckpt> --tasks stability --max_sa
 # Three correlated tasks (stability + solubility + beta_lactamase_peer):
 CUDA_VISIBLE_DEVICES=4 $PY $BENCH --model_name <ckpt> --tasks stability solubility beta_lactamase_peer --max_samples 5000
 
-# Disorder-only (CheZoD via the local symlinked dataset):
-CUDA_VISIBLE_DEVICES=4 $PY $BENCH --model_name <ckpt> --tasks chezod_disorder
+# Residue-level disorder (see the caveat below -- two different tasks are
+# both called "disorder"):
+CUDA_VISIBLE_DEVICES=4 $PY $BENCH --model_name <ckpt> --tasks disprot
 
 # Compare two CSVs from prior runs:
 $PY $BENCH --compare --compare_model1 results/benchmarks/bench_<a>.csv \
                      --compare_model2 results/benchmarks/bench_<b>.csv
 ```
 
-The task key for the CheZoD benchmark is **`chezod_disorder`** (mean-Z-score
-regression — the std-Z variant is commented out in the upstream registry).
+**`chezod_disorder` is no longer registered** -- it was disabled in favour of
+the residue-level `disprot` task and is commented out in `benchmark_tasks.py`.
+Passing it now fails with `invalid choice`. Two live tasks are called
+"disorder": `disorder` (a PDB missing-coordinate mask, from NetSurfP) and
+`disprot` (manually curated, CAID-style). They are not comparable to each
+other; see [DATASETS.md](DATASETS.md).
 
 Pass `--help` for the full list of flags (probe type, eval-split,
 `--max_samples`, embedding cache, `--seed_list`, …).
