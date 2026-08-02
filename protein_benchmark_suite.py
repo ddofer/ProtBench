@@ -86,6 +86,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import shutil
 import sys
 import tempfile
@@ -113,6 +114,26 @@ import torch
 import torch.nn.functional as F
 
 BENCHMARK_SEED = 42
+
+
+def seed_all(seed: int) -> None:
+    """Seed every global RNG the benchmark can reach.
+
+    BENCHMARK_SEED alone only covers what it is explicitly threaded into --
+    sklearn's random_state and datasets.shuffle. Anything reaching for a global
+    RNG instead (torch init, an unseeded permutation, dataloader shuffling,
+    fine-tuning dropout) was previously free to vary between runs that both
+    reported the same seed.
+
+    Deliberately not calling torch.use_deterministic_algorithms(True): it makes
+    several embedding kernels error or fall back to far slower paths, and
+    embedding is inference-only here, so it buys nothing.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)  # covers CUDA too
+
+
 DEFAULT_EMBED_MAX_LENGTH = 1024
 DEFAULT_BLAS_THREAD_LIMIT = 1
 # KNN keeps n_jobs=1 (threading backend; higher values can hit OpenBLAS thread limits)
@@ -3605,6 +3626,7 @@ def main():
         parse_seed_list(args.seed_list) if args.seed_list is not None else [args.seed]
     )
     BENCHMARK_SEED = benchmark_seeds[0]
+    seed_all(BENCHMARK_SEED)
 
     # Handle comparison mode
     if args.compare:
@@ -3836,6 +3858,7 @@ def main():
     completed_runs = 0
     for seed_index, benchmark_seed in enumerate(benchmark_seeds, start=1):
         BENCHMARK_SEED = benchmark_seed
+        seed_all(BENCHMARK_SEED)
         logger.info(
             "Benchmark seed %d/%d: %s",
             seed_index,
