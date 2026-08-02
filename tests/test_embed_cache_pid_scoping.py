@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -82,8 +83,16 @@ def test_embed_cache_disabled_uses_tempdir(tmp_path: Path) -> None:
     )
 
     assert model.last_save_path is not None
-    assert "_no_cache_embeddings.pth" in model.last_save_path
+    assert "_no_cache_embeddings" in model.last_save_path
+    # Must not join the shared-cache pid scheme, which is for real cache files.
     assert f".pid{os.getpid()}" not in model.last_save_path
+    # And must not create anything: embed_dataset gets save=False, so a
+    # directory made here would never be written to nor cleaned up. That leaked
+    # on every run once caching became opt-in.
+    assert not os.path.exists(os.path.dirname(model.last_save_path)) or (
+        os.path.dirname(model.last_save_path) == tempfile.gettempdir()
+    )
+    assert not os.path.exists(model.last_save_path)
 
 
 if __name__ == "__main__":

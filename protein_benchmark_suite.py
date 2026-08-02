@@ -162,9 +162,21 @@ def _boot_ci(metric_fn, y_true, y_pred, n_boot: int, seed: int) -> Dict[str, flo
             continue
         for key, value in sample.items():
             draws.setdefault(key, []).append(value)
+
+    # Refuse to report an interval built from a handful of surviving resamples.
+    # On a task with rare classes most draws can fail, and a 2.5th percentile
+    # over a dozen values looks exactly like one over a thousand in the CSV.
+    usable = {k: v for k, v in draws.items() if len(v) >= max(20, n_boot // 10)}
+    if len(usable) < len(draws):
+        logger.warning(
+            "  Bootstrap: dropped CIs for %s (too few valid resamples of %d; "
+            "resampling kept dropping a class)",
+            sorted(set(draws) - set(usable)),
+            n_boot,
+        )
     return {
         f"{key}_CI_{side}": float(np.percentile(values, pct))
-        for key, values in draws.items()
+        for key, values in usable.items()
         for side, pct in (("low", 2.5), ("high", 97.5))
     }
 
@@ -1976,8 +1988,13 @@ def embed_sequences(
                             exc,
                         )
             else:
+                # embed_dataset gets save=False below, so it neither reads nor
+                # writes this path -- it exists only so a stale file from a
+                # previous model can never be picked up. Do NOT mkdtemp here:
+                # the directory would never be written to and never cleaned up,
+                # and since caching became opt-in that leaked on every run.
                 _save_path = os.path.join(
-                    tempfile.mkdtemp(), "_no_cache_embeddings.pth"
+                    tempfile.gettempdir(), f"_no_cache_embeddings.{os.getpid()}.pth"
                 )
             kwargs = dict(
                 sequences=flat_seqs,
@@ -2209,11 +2226,19 @@ def evaluate_multilabel(
 
     preds = clf.predict(X_test_f)
 
-    return {
-        "Accuracy": accuracy_score(y_test_f, preds),
-        "F1_Macro": f1_score(y_test_f, preds, average="macro", zero_division=0),
-        "F1_Micro": f1_score(y_test_f, preds, average="micro", zero_division=0),
-    }
+    # No MCC or balanced accuracy here: neither is defined over a multilabel
+    # indicator matrix. Bootstrap resampling is fine though -- it resamples
+    # rows, and every metric below accepts 2D indicator input.
+    def _metrics(yt, yp):
+        return {
+            "Accuracy": accuracy_score(yt, yp),
+            "F1_Macro": f1_score(yt, yp, average="macro", zero_division=0),
+            "F1_Micro": f1_score(yt, yp, average="micro", zero_division=0),
+        }
+
+    metrics = _metrics(y_test_f, preds)
+    metrics.update(_boot_ci(_metrics, y_test_f, preds, BOOTSTRAP_N, BENCHMARK_SEED))
+    return metrics
 
 
 def evaluate_regression(X_train, y_train, X_test, y_test) -> Dict[str, float]:

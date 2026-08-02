@@ -23,6 +23,7 @@ and large -- pair it with --max_samples.
 
 from __future__ import annotations
 
+import functools
 import itertools
 import re
 
@@ -41,11 +42,29 @@ def parse_kmer_model_name(model_name: str) -> int | None:
     return int(m.group(1)) if m.group(1) else DEFAULT_K
 
 
-def kmer_features(sequences: list[str], k: int = DEFAULT_K) -> np.ndarray:
-    """(n_sequences, 20**k) float32 matrix of k-mer frequencies."""
-    vocab = {
+@functools.lru_cache(maxsize=None)
+def _vocab(k: int) -> dict[str, int]:
+    """All 20**k k-mers, in a fixed order. Cached: callers hit this per split."""
+    return {
         "".join(t): i for i, t in enumerate(itertools.product(AMINO_ACIDS, repeat=k))
     }
+
+
+def kmer_features(sequences: list[str], k: int = DEFAULT_K) -> np.ndarray:
+    """(n_sequences, 20**k) float32 matrix of k-mer frequencies."""
+    if k < 1:
+        raise ValueError(f"k must be >= 1, got {k}")
+    # 20**6 x 10k sequences is 2.5 TB. Fail with the arithmetic rather than
+    # let someone discover it as an OOM twenty minutes into a sweep.
+    gib = 20**k * max(len(sequences), 1) * 4 / 1024**3
+    if gib > 16:
+        raise ValueError(
+            f"k={k} on {len(sequences):,} sequences needs {gib:,.0f} GiB "
+            f"({20**k:,} dims, dense float32). Use a smaller k, or cap rows "
+            f"with --max_samples."
+        )
+
+    vocab = _vocab(k)
     out = np.zeros((len(sequences), len(vocab)), dtype=np.float32)
     for row, seq in enumerate(sequences):
         # X/B/Z/U and gaps break the sequence into segments rather than being

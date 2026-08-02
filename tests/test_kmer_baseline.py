@@ -55,3 +55,20 @@ def test_suite_embeds_sequences_via_the_kmer_path():
     embs = pbs.embed_sequences(model_obj, is_sbert, ["ACDEF", "WWWW"], device="cpu")
     assert embs.shape == (2, 400)
     assert embs.dtype == np.float32
+
+
+def test_large_k_refuses_with_arithmetic_not_oom():
+    """k=6 on any real workload is terabytes; fail fast and say why."""
+    with pytest.raises(ValueError, match="GiB"):
+        kmer_features(["ACDEF"] * 10_000, k=6)
+
+
+def test_vocab_is_cached_across_calls():
+    from kmer_baseline import _vocab
+
+    assert _vocab(2) is _vocab(2)
+
+
+def test_k_must_be_positive():
+    with pytest.raises(ValueError, match="k must be"):
+        kmer_features(["ACDEF"], k=0)

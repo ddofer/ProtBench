@@ -84,3 +84,33 @@ def test_ci_covers_only_the_label_only_metrics(bootstrap_on):
 def test_bootstrap_flag_defaults_to_zero(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["protein_benchmark_suite.py", "-m", "dummy"])
     assert pbs.parse_args().bootstrap == 0
+
+
+def test_ci_dropped_when_too_few_resamples_survive(monkeypatch, caplog):
+    """A CI over a dozen surviving draws must not be reported as if it were 1000."""
+    import logging
+
+    monkeypatch.setattr(pbs, "BOOTSTRAP_N", 100)
+
+    calls = {"n": 0}
+
+    def flaky(yt, yp):
+        calls["n"] += 1
+        if calls["n"] > 1:  # only the point estimate succeeds
+            raise ValueError("resample dropped a class")
+        return {"Score": 1.0}
+
+    with caplog.at_level(logging.WARNING):
+        out = pbs._boot_ci(flaky, np.zeros(10), np.zeros(10), 100, 42)
+    assert out == {}
+
+
+def test_multilabel_gets_ci_columns(bootstrap_on):
+    """Multilabel resamples rows of an indicator matrix; metrics accept 2D."""
+    rng = np.random.default_rng(0)
+    y = rng.integers(0, 2, size=(80, 3))
+    X = y + rng.normal(0, 0.05, size=(80, 3))
+    metrics = pbs.evaluate_multilabel(X, y, X, y)
+    assert "F1_Micro_CI_low" in metrics
+    assert metrics["F1_Micro_CI_low"] <= metrics["F1_Micro"] <= metrics["F1_Micro_CI_high"]
+    assert "MCC" not in metrics  # undefined over indicator matrices

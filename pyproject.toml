@@ -6,20 +6,25 @@ description = "Unified protein model benchmark suite: frozen probes, finetuning,
 requires-python = ">=3.10"
 dependencies = [
     "datasets",
-    "matplotlib",
     "numpy",
     "pandas",
+    "pyarrow",
     "scikit-learn",
     "scipy",
     "sentence-transformers",
     "torch",
-    "tqdm",
     "transformers",
 ]
 
 [project.optional-dependencies]
 # peft is imported lazily, so probe-only runs work without it installed.
 finetune = ["peft>=0.19"]
+# phmmer is a Python package, not a system binary. mmseqs2 IS a system binary
+# (conda install -c bioconda mmseqs2) and cannot be declared here.
+alignment = ["pyhmmer>=0.10"]
+# Only final_benchmark_report.py plots, and it imports matplotlib inside the
+# function, so probe runs never need it.
+plots = ["matplotlib"]
 # transformers 5.5.0 declares kernels<0.13; 0.13+ breaks `import transformers`.
 kernels = ["kernels>=0.12,<0.13"]
 
