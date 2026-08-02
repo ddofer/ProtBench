@@ -613,7 +613,7 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
             "pool_ys": pool_ys, "pool_scores": pool_scores, "n_skipped": n_skipped}
 
 
-DMS_REF_DEFAULT = "/data/proteva/plm/bench/data/proteingym_ref/DMS_substitutions.csv"
+DMS_REF_DEFAULT = str(Path(__file__).resolve().parent / "data" / "proteingym_ref" / "DMS_substitutions.csv")
 
 
 def _hier_mean(recs, field, ref_path):
@@ -754,7 +754,7 @@ def main(argv=None):
     ap.add_argument("--tasks", nargs="*", default=ALL_ZS,
                     help="default: all 4 ProteinGym benchmarks (subs via masked-"
                          "marginal, indels via pseudo-log-likelihood)")
-    ap.add_argument("--output_dir", default="/data/proteva/plm/results/bench/discrim_mlmzs")
+    ap.add_argument("--output_dir", default="results/bench/discrim_mlmzs")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--max_length", type=int, default=None,

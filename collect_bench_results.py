@@ -178,7 +178,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--probe-csv", nargs="*", default=[])
     ap.add_argument("--ft-jsonl", nargs="*", default=[])
-    ap.add_argument("--out", default="/data/proteva/plm/results/bench_results_all.csv")
+    ap.add_argument("--out", default="results/bench_results_all.csv")
     ap.add_argument("--notes", default="")
     args = ap.parse_args(argv)
     n = collect(args.probe_csv, args.ft_jsonl, args.out, notes=args.notes)

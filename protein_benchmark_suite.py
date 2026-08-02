@@ -772,9 +772,18 @@ def load_model(
         # The HF checkpoint ships weights only; load the project tokenizer.
         try:
             tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        except Exception:
-            tokenizer = AutoTokenizer.from_pretrained("/data/proteva/cache/tokenizer")
-            logger.info("-> Using fallback tokenizer: /data/proteva/cache/tokenizer")
+        except Exception as exc:
+            # Some Proteva checkpoints ship weights without a tokenizer. Point
+            # $PROTEVA_TOKENIZER at one rather than hardcoding a path that only
+            # exists on the machine this was written on.
+            fallback = os.environ.get("PROTEVA_TOKENIZER")
+            if not fallback:
+                raise RuntimeError(
+                    f"No tokenizer in {model_name!r}. Set $PROTEVA_TOKENIZER to a "
+                    f"directory containing one."
+                ) from exc
+            tokenizer = AutoTokenizer.from_pretrained(fallback)
+            logger.info("-> Using $PROTEVA_TOKENIZER: %s", fallback)
         logger.info("-> Loaded as HF AutoModel (Proteva)")
         return (tokenizer, model), False, device
 

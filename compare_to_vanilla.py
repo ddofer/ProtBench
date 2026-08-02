@@ -25,7 +25,7 @@ import argparse
 import csv
 from pathlib import Path
 
-DEFAULT_CSV = "/data/proteva/plm/results/bench_results_all.csv"
+DEFAULT_CSV = "results/bench_results_all.csv"
 
 
 def _to_float(v):

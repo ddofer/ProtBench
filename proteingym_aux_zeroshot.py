@@ -1030,12 +1030,13 @@ def _eval_task(
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--model_name", default="/data/proteva/cache/ckpts/hf_stage2_final")
+    ap.add_argument("--model_name", required=True,
+                    help="Checkpoint or HF id to score")
     ap.add_argument("--tasks", nargs="*", default=SUPPORTED_AUX_TASKS)
     # Canonical aux dirs are aux_zs_<tag>_full2/ (what final_benchmark_report reads);
     # the orchestrator passes the per-model dir explicitly. This bare default follows
     # the _full2 convention so a one-off run never resurrects the old (deleted) aux_zs/.
-    ap.add_argument("--output_dir", default="/data/proteva/plm/results/bench/aux_zs_full2")
+    ap.add_argument("--output_dir", default="results/bench/aux_zs_full2")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--batch_size", type=int, default=32)
     ap.add_argument("--max_length", type=int, default=None)

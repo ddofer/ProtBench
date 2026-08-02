@@ -311,8 +311,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--task", required=True,
                     help="Any key from benchmark_tasks.TASKS")
-    ap.add_argument("--work_dir", default="/storage/users/ddofer/data/mmseqs_baseline")
-    ap.add_argument("--threads", type=int, default=64)
+    ap.add_argument("--work_dir", default="results/mmseqs_baseline",
+                    help="Scratch space for the mmseqs database and hit tables")
+    ap.add_argument("--threads", type=int, default=min(64, os.cpu_count() or 8),
+                    help="Search threads (default: min(64, CPU count))")
     ap.add_argument("--max_samples", type=int, default=None,
                     help="Subsample cap passed to prepare_data (default: no cap)")
     ap.add_argument("--output", default="results/benchmarks/mmseqs_baseline.json")
