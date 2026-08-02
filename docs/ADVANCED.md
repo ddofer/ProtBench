@@ -167,7 +167,7 @@ Moved to [DATASETS.md](DATASETS.md).
 
 ## Tests
 
-Unit tests live in [`tests/`](tests/). Fast tests cover the
+Unit tests live in [`tests/`](../tests/). Fast tests cover the
 `TaskConfig` validator extension, label decoders, and label alignment.
 
 ```bash
