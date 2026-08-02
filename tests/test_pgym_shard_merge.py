@@ -62,6 +62,10 @@ def test_merge_pooled_clinical_indels_equals_unsharded():
 import json as _json
 import os as _os
 import subprocess as _sp
+import sys as _sys
+from pathlib import Path as _Path
+
+ROOT = _Path(__file__).resolve().parents[1]
 
 from _hf_finetune_common import safe_ckpt as _safe_ckpt
 
@@ -79,11 +83,16 @@ def _write_shard(out, task, shard, n, recs):
 
 
 def _run_merge(tmpdir, n):
+    # sys.executable, not a hardcoded venv: the interpreter running the tests is
+    # the one that should run the subprocess. The old "plm/.venv/bin/python" was
+    # relative to a directory layout this repo no longer has -- and did not exist
+    # there either, so this test never actually ran its subprocess.
     return _sp.run(
-        ["plm/.venv/bin/python", "plm/bench/proteingym_mlm_zeroshot.py",
+        [_sys.executable, str(ROOT / "proteingym_mlm_zeroshot.py"),
          "--model_name", "fakemodel", "--merge_only", "--assay_num_shards", str(n),
          "--tasks", "proteingym_dms_indels_zeroshot", "--output_dir", str(tmpdir)],
-        capture_output=True, text=True, env={**_os.environ, "PYTHONPATH": "plm:."})
+        capture_output=True, text=True, cwd=str(ROOT),
+        env={**_os.environ, "PYTHONPATH": str(ROOT)})
 
 
 def test_merge_refuses_partial_when_a_shard_marker_is_missing(tmp_path):
