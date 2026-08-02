@@ -191,6 +191,7 @@ from model_utils import (
     get_torch_compile_settings,
     needs_esm2_token_dropout_workaround,
     patch_amplify_attention_fallback,
+    patch_unknown_residue_tokens,
     _prepare_amplify_inputs,
 )
 
@@ -483,6 +484,37 @@ class _KmerEmbedder:
 
 
 def load_model(
+    model_name: str,
+    device: str = "cuda",
+    torch_dtype: Optional[torch.dtype] = None,
+    attn_implementation: Optional[str] = None,
+):
+    """Load a model, then make its tokenizer tolerant of unknown residues.
+
+    A thin wrapper over ``_load_model_impl`` rather than a patch inside it: the
+    impl has eight return paths and the guard has to cover every one. FastPLM's
+    tokenizer raises ``KeyError`` on any out-of-vocabulary character, which takes
+    down a whole task -- CATH lookup69k alone contains a NUL byte that does it.
+    """
+    obj, is_sbert, dev = _load_model_impl(
+        model_name, device, torch_dtype, attn_implementation
+    )
+    if is_sbert:
+        tokenizer = getattr(obj, "tokenizer", None)
+    elif isinstance(obj, tuple):
+        tokenizer = obj[0]
+    else:
+        tokenizer = None
+    # The embedding path prefers model.tokenizer over the one returned here, so
+    # patch both -- they are often different objects.
+    inner = obj[1] if isinstance(obj, tuple) and len(obj) == 2 else obj
+    for tok in (tokenizer, getattr(inner, "tokenizer", None)):
+        if tok is not None:
+            patch_unknown_residue_tokens(tok)
+    return obj, is_sbert, dev
+
+
+def _load_model_impl(
     model_name: str,
     device: str = "cuda",
     torch_dtype: Optional[torch.dtype] = None,
@@ -1876,6 +1908,27 @@ def embed_sequences(
         has_embed_dataset = hasattr(model, "embed_dataset") and callable(
             model.embed_dataset
         )
+        if has_embed_dataset:
+            # Only the legacy ESM++ signature (sequences=, max_len=, pooling_types=,
+            # save_path=) is understood below. Current FastPLM builds ship
+            # embed_dataset(inputs, *, pooling=, max_length=, output=, ...); calling
+            # that with the old keywords raises "missing 1 required positional
+            # argument: 'inputs'". The suite catches that per task and records it as
+            # an Error row, so the sweep still exits 0 with an empty results table --
+            # silent, and only found by reading the CSV. Detect the signature and
+            # fall through to the generic batched path, which handles any HF model.
+            import inspect as _inspect
+
+            try:
+                _params = _inspect.signature(model.embed_dataset).parameters
+                has_embed_dataset = "sequences" in _params
+            except (TypeError, ValueError):
+                has_embed_dataset = False
+            if not has_embed_dataset:
+                logger.info(
+                    "embed_dataset() has a non-legacy signature; using the generic "
+                    "batched embedding path"
+                )
 
         if is_proteva_model:
             # Proteva fa2-varlen path: tokenize each sequence, pack a chunk of

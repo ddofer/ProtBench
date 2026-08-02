@@ -39,7 +39,13 @@ class _RecordingEmbedModel:
         self.preloaded: dict[str, torch.Tensor] | None = None
         self.last_save_path: str | None = None
 
-    def embed_dataset(self, **kwargs: object) -> dict[str, torch.Tensor]:
+    # `sequences` is named explicitly, as the real legacy FastESM signature does.
+    # embed_sequences dispatches on its presence to tell that signature apart from
+    # the current embed_dataset(inputs, *, pooling=, ...), so a bare **kwargs stub
+    # gets routed to the generic path and never exercises the cache under test.
+    def embed_dataset(
+        self, sequences: object = None, **kwargs: object
+    ) -> dict[str, torch.Tensor]:
         """Mimic embed_dataset: load whatever is at save_path, add, save back."""
 
         save_path = str(kwargs["save_path"])
@@ -50,7 +56,7 @@ class _RecordingEmbedModel:
             else None
         )
         embeddings = dict(self.preloaded or {})
-        for seq in kwargs["sequences"]:  # type: ignore[union-attr]
+        for seq in sequences:  # type: ignore[union-attr]
             embeddings[str(seq)] = torch.zeros(8)
         if kwargs["save"]:
             torch.save(embeddings, save_path)

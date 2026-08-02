@@ -40,10 +40,15 @@ class _StubEmbedModel:
     def __init__(self) -> None:
         self.last_save_path: str | None = None
 
-    def embed_dataset(self, **kwargs: object) -> dict[str, torch.Tensor]:
+    # `sequences` is named explicitly, as the real legacy FastESM signature does.
+    # embed_sequences dispatches on its presence to tell that signature apart from
+    # the current embed_dataset(inputs, *, pooling=, ...), so a bare **kwargs stub
+    # gets routed to the generic path and never exercises the cache under test.
+    def embed_dataset(
+        self, sequences: object = None, **kwargs: object
+    ) -> dict[str, torch.Tensor]:
         self.last_save_path = kwargs["save_path"]  # type: ignore[assignment]
-        seqs = kwargs["sequences"]  # type: ignore[assignment]
-        return {s: torch.zeros(8) for s in seqs}  # type: ignore[misc]
+        return {s: torch.zeros(8) for s in sequences}  # type: ignore[misc]
 
 
 def test_embed_cache_path_is_pid_scoped(tmp_path: Path) -> None:

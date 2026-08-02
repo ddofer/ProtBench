@@ -715,6 +715,66 @@ def _prepare_amplify_inputs(input_ids, attention_mask, device=None, dtype=None):
 
 
 # =============================================================================
+# Out-of-vocabulary residue fallback
+# =============================================================================
+
+
+class _FallbackVocab(dict):
+    """Vocabulary dict that returns a fallback id for any unknown token.
+
+    Defined at module level, with ``__reduce__``, so it survives pickling into
+    spawned dataloader workers.
+
+    ``__missing__`` fires only on ``[]`` lookup, so ``in``, ``len()`` and
+    ``get_vocab()`` still report the true vocabulary -- nothing downstream sees a
+    larger vocab than the embedding matrix has rows.
+    """
+
+    def __init__(self, mapping, fallback_id):
+        super().__init__(mapping)
+        self.fallback_id = fallback_id
+
+    def __missing__(self, key):
+        return self.fallback_id
+
+    def __reduce__(self):
+        return (_FallbackVocab, (dict(self), self.fallback_id))
+
+
+def patch_unknown_residue_tokens(tokenizer):
+    """Map any token missing from the vocabulary onto 'X' instead of raising.
+
+    FastPLM's ``_convert_token_to_id`` raises ``KeyError`` for an out-of-vocabulary
+    token rather than falling back to ``unk_token``. Stock ``EsmTokenizer`` does
+    not -- so this only bites models whose ``model.tokenizer`` is FastPLM's, which
+    is exactly the tokenizer the embedding path uses. Probing ``AutoTokenizer``
+    instead will report that the problem does not exist; it does.
+
+    Offenders seen in practice: 'J' (IUPAC ambiguity code, the one letter absent
+    from the ESM2 vocabulary), '|' in Peptide-HLA, '#' in Thermostability (FLIP),
+    and a NUL byte in CATH lookup69k domain 9pcyA00 that errored the whole
+    cath_eat task. Enumerating A-Z covers only the residue family, so the fallback
+    is installed for every unknown key instead.
+
+    'X' rather than ``<unk>`` deliberately: ESM2 was pretrained with 'X' as the
+    unknown-residue symbol and has essentially never seen ``<unk>`` inside a
+    sequence, so 'X' keeps the input in the pretraining distribution.
+
+    Idempotent.
+    """
+    table = getattr(tokenizer, "_token_to_id", None)
+    if not isinstance(table, dict) or isinstance(table, _FallbackVocab):
+        return
+    fallback_id = table.get("X", getattr(tokenizer, "unk_token_id", None))
+    if fallback_id is None:
+        return
+    tokenizer._token_to_id = _FallbackVocab(table, fallback_id)
+    logger.info(
+        "Tokenizer will map out-of-vocabulary tokens to 'X' (id %d)", fallback_id
+    )
+
+
+# =============================================================================
 # ESMplusplus SDPA fix
 # =============================================================================
 
