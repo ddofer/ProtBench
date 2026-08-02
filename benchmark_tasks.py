@@ -500,6 +500,30 @@ TASKS: Dict[str, TaskConfig] = {
         train_split="train",
         test_split="train",
     ),
+    # Remote-homology detection in the "midnight zone": queries are filtered so
+    # no sequence-alignment relative exists in the lookup set, so this measures
+    # whether embeddings see a fold that alignment cannot.
+    #
+    # Run it with `-p knn --knn_k 1`, which makes the probe literally the
+    # paper's method: take the label of the nearest lookup protein by Euclidean
+    # distance. A linear probe here would fit 6.5k classes over 69k rows and is
+    # not what the reference numbers describe.
+    #
+    # test_h is pre-filtered to the 150 of 219 queries whose superfamily exists
+    # in the lookup set at all; the other 69 are unanswerable by any method and
+    # the paper excludes them. Reference (Heinzinger 2022, Table 1, H-level):
+    # MMseqs2 35, HMMER 77, raw ProtT5 64, ProtTucker(ProtT5) 76.
+    # doi:10.1093/nargab/lqac043
+    "cath_eat": TaskConfig(
+        name="CATH v4.3 Superfamily Transfer (midnight zone)",
+        dataset="GrimSqueaker/cath43-eat",
+        input_map={"seq": "sequence"},
+        label_col="cath_h",
+        problem_type="multiclass",
+        main_metric="Accuracy",
+        train_split="lookup",
+        test_split="test_h",
+    ),
     ## disable std task for now
     # "chezod_disorder_std": TaskConfig(
     #     name="CheZoD Disorder (Std Z-Score)",
