@@ -1,0 +1,607 @@
+"""
+Benchmark task configurations for Protein Language Models.
+
+Defines the TaskConfig dataclass and the TASKS dictionary: binary, multiclass,
+multilabel, regression, retrieval, residue-level (token classification) and
+ProteinGym evaluations.
+
+Run `python protein_benchmark_suite.py --list_tasks` for the current inventory.
+Task counts are deliberately not written here -- the last one sat at "35" while
+the registry held 43.
+
+Usage:
+    from benchmark_tasks import TASKS, TaskConfig
+
+    cfg = TASKS["solubility"]
+    print(cfg.name, cfg.problem_type)
+"""
+
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple
+
+
+@dataclass
+class TaskConfig:
+    """Configuration for a single benchmark task."""
+
+    name: str
+    dataset: str
+    input_map: Dict[str, str]  # Maps internal keys to actual dataset columns
+    label_col: str
+    problem_type: str  # 'binary', 'multiclass', 'multilabel', 'regression', 'retrieval'
+    main_metric: str
+    dataset_config: Optional[str] = None
+    data_dir: Optional[str] = None  # For datasets that use data_dir (e.g., ProteinGym)
+    train_split: str = "train"
+    test_split: str = "test"
+    validation_split: Optional[str] = None
+    split_column: Optional[str] = (
+        None  # Derive train/test rows from a column in one source split
+    )
+    validation_column_values: Optional[Tuple[str, ...]] = None
+    top_k_labels: Optional[int] = None  # For filtering multilabel to top K
+    auto_split: bool = False  # If True, split train into train/test (80/20)
+    remove_sequence_whitespace: bool = (
+        False  # Remove spaces/newlines inside sequence strings
+    )
+    group_by: Optional[str] = (
+        None  # Column to group by for stratified split (e.g., DMS_id)
+    )
+    label_map: Optional[Dict[str, Any]] = (
+        None  # Map raw label values to normalized ones
+    )
+    eval_mode: str = (
+        "standard"  # 'standard', 'proteingym_zeroshot', 'proteingym_supervised'
+    )
+    bin_col: Optional[str] = (
+        None  # Official binary-label column for AUC (ProteinGym DMS_score_bin)
+    )
+
+    def __post_init__(self):
+        valid_types = {
+            "binary",
+            "multiclass",
+            "multilabel",
+            "regression",
+            "retrieval",
+            "token_classification",
+        }
+        if self.problem_type not in valid_types:
+            raise ValueError(f"problem_type must be one of {valid_types}")
+
+
+# Many (not all) of the available benchmark tasks;
+FAST_TASKS = [
+    "remote_homology",
+    "solubility",
+    "signalp_binary",
+    "profet_np_sp_cleaved",
+    "beta_lactamase_peer",
+    "peptide_hla",
+    "metal_ion_binding",
+    "subcellular_loc",
+    "ec_classification",
+    "variant_effect",
+    "fluorescence",
+    "stability",
+    "enzyme_catalytic_efficiency",
+    "ppi_bernett",
+    # go_mf excluded: large multilabel task, too slow for the default sweep
+    "ss3",
+    "conservation_flip",
+    "disprot",
+]
+
+# Curated very-fast / low-variance subset (2026-06-03) for high-ROI scout
+# comparisons: a fold-recognition task (representation quality) + two fast
+# stable binary tasks + three stable regression/fitness tasks + two residue-
+# level structural/evolutionary tasks. Deliberately omits the slower or
+# higher-variance FAST_TASKS (ec_classification, ppi_bernett,
+# enzyme_catalytic_efficiency, variant_effect, peptide_hla, profet) and the
+# retrieval task. Selected via --very-fast. Every entry MUST be a key in TASKS.
+VERY_FAST_TASKS = [
+    "remote_homology",
+    "solubility",
+    "metal_ion_binding",
+    "fluorescence",
+    "stability",
+    "beta_lactamase_peer",
+    "ss3",
+    "conservation_flip",
+]
+
+FAST_MAX_SAMPLES = 100_000
+# For token_classification tasks in fast mode, cap at sequence count to keep
+# residue-level logistic regression tractable on CPU (~400k residues at 2000 seqs).
+FAST_TOKEN_CLASS_MAX_SAMPLES = 2_000
+
+_CLINICAL_LABEL_MAP = {"Pathogenic": 1, "Benign": 0, "0": 0, "1": 1}
+
+# ProteinGym variant definitions: (data_dir, label_col, problem_type, main_metric, group_by)
+_PROTEINGYM_VARIANTS = {
+    "dms_substitutions": (
+        "DMS_substitutions",
+        "DMS_score",
+        "regression",
+        "Spearman",
+        "DMS_id",
+        None,
+    ),
+    "dms_indels": ("DMS_indels", "DMS_score", "regression", "Spearman", "DMS_id", None),
+    "clinical_substitutions": (
+        "clinical_substitutions",
+        "annotation",
+        "binary",
+        "AUC",
+        "protein_id",
+        _CLINICAL_LABEL_MAP,
+    ),
+    "clinical_indels": (
+        "clinical_indels",
+        "annotation",
+        "binary",
+        "AUC",
+        "protein_id",
+        _CLINICAL_LABEL_MAP,
+    ),
+}
+
+
+def _proteingym_tasks(eval_mode: str) -> Dict[str, TaskConfig]:
+    """Generate ProteinGym TaskConfig entries for a given eval mode (zeroshot/supervised)."""
+    is_zeroshot = eval_mode == "zeroshot"
+    tasks = {}
+    for variant, (
+        data_dir,
+        label_col,
+        problem_type,
+        metric,
+        group_by,
+        label_map,
+    ) in _PROTEINGYM_VARIANTS.items():
+        key = f"proteingym_{variant}_{eval_mode}"
+        # Preserve original display names: "DMS Substitutions", "Zero-Shot", etc.
+        name_parts = " ".join(
+            w.upper() if w == "dms" else w.capitalize() for w in variant.split("_")
+        )
+        mode_label = "Zero-Shot" if is_zeroshot else "Supervised"
+        input_map = (
+            {"mutant": "mutated_sequence", "wt": "target_seq"}
+            if is_zeroshot
+            else {"seq": "mutated_sequence"}
+        )
+        # DMS assays ship an official per-assay binary label (DMS_score_bin) — the
+        # ground truth the ProteinGym leaderboard AUC/MCC are computed against.
+        # Clinical sets use their annotation label directly (no bin col).
+        bin_col = "DMS_score_bin" if variant.startswith("dms_") else None
+        tasks[key] = TaskConfig(
+            name=f"ProteinGym {name_parts} ({mode_label})",
+            dataset="OATML-Markslab/ProteinGym_v1",
+            data_dir=data_dir,
+            input_map=input_map,
+            label_col=label_col,
+            problem_type=problem_type,
+            main_metric=metric,
+            group_by=group_by,
+            label_map=label_map,
+            eval_mode=f"proteingym_{eval_mode}",
+            bin_col=bin_col,
+        )
+    return tasks
+
+
+TASKS: Dict[str, TaskConfig] = {
+    # =========================================================================
+    # Binary Classification
+    # =========================================================================
+    "ppi_bernett": TaskConfig(
+        name="PPI (Bernett Gold Standard)",
+        dataset="Synthyra/bernett_gold_ppi",
+        input_map={"seq1": "SeqA", "seq2": "SeqB"},
+        label_col="labels",
+        problem_type="binary",
+        main_metric="AUC",
+        validation_split="valid",
+    ),
+    "solubility": TaskConfig(
+        name="Solubility (DeepSol)",
+        dataset="proteinea/solubility",
+        input_map={"seq": "sequences"},
+        label_col="labels",
+        problem_type="binary",
+        main_metric="AUC",
+        validation_split="valid",
+    ),
+    "peptide_hla": TaskConfig(
+        name="Peptide-HLA Binding",
+        dataset="biomap-research/peptide_HLA_MHC_affinity",
+        input_map={"seq": "seq"},
+        label_col="label",
+        problem_type="binary",
+        main_metric="AUC",
+        validation_split="valid",
+    ),
+    "metal_ion_binding": TaskConfig(
+        name="Metal Ion Binding",
+        dataset="biomap-research/metal_ion_binding",
+        input_map={"seq": "seq"},
+        label_col="label",
+        problem_type="binary",
+        main_metric="AUC",
+    ),
+    "material_production": TaskConfig(
+        name="Material Production",
+        dataset="biomap-research/material_production",
+        input_map={"seq": "seq"},
+        label_col="label",
+        problem_type="binary",
+        main_metric="AUC",
+    ),
+    "binary_subcellular_localization": TaskConfig(
+        name="Binary Subcellular Localization",
+        dataset="mila-intel/ProtST-BinaryLocalization",
+        input_map={"seq": "prot_seq"},
+        label_col="localization",
+        problem_type="binary",
+        main_metric="AUC",
+        train_split="train",
+        test_split="test",
+        remove_sequence_whitespace=True,
+    ),
+    "signalp_binary": TaskConfig(
+        name="Signal Peptide Prediction (SignalP/ProteinBERT)",
+        dataset="GrimSqueaker/SignalP_Binary",
+        input_map={"seq": "seq"},
+        label_col="label",
+        problem_type="binary",
+        main_metric="AUC",
+        train_split="train",
+        test_split="test",
+    ),
+    "profet_np_sp_cleaved": TaskConfig(
+        name="Neuropeptide Precursor Prediction (ProFET/NeuroPID)",
+        dataset="GrimSqueaker/ProFET_NP_SP_Cleaved",
+        input_map={"seq": "seq"},
+        label_col="label",
+        problem_type="binary",
+        main_metric="AUC",
+        train_split="train",
+        validation_split="validation",
+        test_split="test",
+    ),
+    # =========================================================================
+    # Multi-class Classification
+    # =========================================================================
+    "remote_homology": TaskConfig(
+        name="Remote Homology (Fold)",
+        dataset="biomap-research/fold_prediction",
+        input_map={"seq": "seq"},
+        label_col="label",
+        problem_type="multiclass",
+        # 1195 imbalanced fold classes: macro-F1 is dominated by 0-F1 singleton
+        # folds -> high variance (a driver of "unstable" runs). Top-1 Accuracy is
+        # the stable, literature-standard headline; F1_Macro/F1_Weighted are
+        # still computed as secondary metrics in the probe output.
+        main_metric="Accuracy",
+    ),
+    "subcellular_loc": TaskConfig(
+        name="Subcellular Localisation",
+        dataset="proteinea/deeploc",
+        input_map={"seq": "input"},
+        label_col="loc",
+        problem_type="multiclass",
+        main_metric="AUC",
+    ),
+    "ec_classification": TaskConfig(
+        name="EC Classification",
+        dataset="AI4Protein/EC",
+        input_map={"seq": "aa_seq"},
+        label_col="label",
+        # EC is MULTILABEL: a protein carries several comma-separated EC numbers
+        # (up to ~9). Declaring it multiclass made the parser keep each comma
+        # string ('130,270') as its OWN class -> hundreds of singleton powerset
+        # classes -> structurally deflated, jittery macro-F1. Multilabel routes
+        # through MultiLabelBinarizer; F1_Micro is the honest headline (macro
+        # over singleton EC combos is meaningless).
+        problem_type="multilabel",
+        main_metric="F1_Micro",
+        validation_split="validation",
+    ),
+    "antibiotic_resistance": TaskConfig(
+        name="Antibiotic Resistance",
+        dataset="biomap-research/antibiotic_resistance",
+        input_map={"seq": "seq"},
+        label_col="label",
+        problem_type="multiclass",
+        main_metric="AUC",
+    ),
+    "temperature_stability": TaskConfig(
+        name="Temperature Stability",
+        dataset="biomap-research/temperature_stability",
+        input_map={"seq": "seq"},
+        label_col="label",
+        problem_type="multiclass",
+        main_metric="AUC",
+        validation_split="valid",
+    ),
+    # =========================================================================
+    # Multi-label Classification
+    # =========================================================================
+    "go_mf": TaskConfig(
+        name="Molecular Function (GO)",
+        dataset="AI4Protein/GO_MF",
+        input_map={"seq": "aa_seq"},
+        label_col="label",
+        problem_type="multilabel",
+        main_metric="F1_Macro",
+        validation_split="validation",
+    ),
+    "cafa5": TaskConfig(
+        name="CAFA5 (Protein Function)",
+        dataset="andrewdalpino/CAFA5",
+        dataset_config="mf",
+        input_map={"seq": "sequence"},
+        label_col="terms",
+        problem_type="multilabel",
+        main_metric="F1_Macro",
+        top_k_labels=500,
+    ),
+    # =========================================================================
+    # Regression
+    # =========================================================================
+    "variant_effect": TaskConfig(
+        name="Variant Effect (GB1)",
+        dataset="biomap-research/fitness_prediction",
+        input_map={"seq": "seq"},
+        label_col="label",
+        problem_type="regression",
+        main_metric="Spearman",
+        validation_split="valid",
+    ),
+    "fluorescence": TaskConfig(
+        name="Fluorescence (TAPE)",
+        dataset="cradle-bio/tape-fluorescence",
+        input_map={"seq": "primary"},
+        label_col="log_fluorescence",
+        problem_type="regression",
+        main_metric="Spearman",
+    ),
+    "stability": TaskConfig(
+        name="Stability (Biomap)",
+        dataset="biomap-research/stability_prediction",
+        input_map={"seq": "seq"},
+        label_col="label",
+        problem_type="regression",
+        main_metric="Spearman",
+        validation_split="valid",
+    ),
+    "thermostability": TaskConfig(
+        name="Thermostability (FLIP)",
+        dataset="SaProtHub/Dataset-Thermostability-FLIP",
+        input_map={"seq": "protein"},
+        label_col="label",
+        problem_type="regression",
+        main_metric="Spearman",
+        auto_split=True,
+    ),
+    "meltome": TaskConfig(
+        name="Meltome (Melting Temperature Tm)",
+        dataset="hazemessam/meltome",
+        input_map={"seq": "sequence"},
+        label_col="label",
+        problem_type="regression",
+        main_metric="MSE",
+        split_column="split",
+        train_split="train",
+        test_split="test",
+    ),
+    # FLIP2 subtasks: pre-filtered local Arrow datasets (data/flip2_*/);
+    # created by scripts/prep_flip2.py from LiteFold/FLIP2.
+    "flip2_amylase": TaskConfig(
+        name="Alpha-Amylase Fitness (FLIP2)",
+        dataset="data/flip2_amylase",
+        input_map={"seq": "sequence"},
+        label_col="score",
+        problem_type="regression",
+        main_metric="Spearman",
+    ),
+    "flip2_rhomax": TaskConfig(
+        name="Rhodopsin Fitness (FLIP2)",
+        dataset="data/flip2_rhomax",
+        input_map={"seq": "sequence"},
+        label_col="score",
+        problem_type="regression",
+        main_metric="Spearman",
+    ),
+    "optimal_ph": TaskConfig(
+        name="Optimal pH",
+        dataset="biomap-research/optimal_ph",
+        input_map={"seq": "seq"},
+        label_col="label",
+        problem_type="regression",
+        main_metric="Spearman",
+    ),
+    "enzyme_catalytic_efficiency": TaskConfig(
+        name="Enzyme Catalytic Efficiency",
+        dataset="biomap-research/enzyme_catalytic_efficiency",
+        input_map={"seq": "seq"},
+        label_col="label",
+        problem_type="regression",
+        main_metric="Spearman",
+    ),
+    "cloning_clf": TaskConfig(
+        name="Cloning Classification",
+        dataset="biomap-research/cloning_clf",
+        input_map={"seq": "seq"},
+        label_col="label",
+        problem_type="regression",
+        main_metric="Spearman",
+    ),
+    "beta_lactamase_peer": TaskConfig(
+        name="beta-lactamase-PEER",
+        dataset="SaProtHub/Dataset-Beta_Lactamase-PEER",
+        input_map={"seq": "protein"},
+        label_col="label",
+        problem_type="regression",
+        main_metric="Spearman",
+        split_column="stage",
+        validation_column_values=("valid", "validation", "val"),
+        train_split="train",
+        test_split="test",
+    ),
+    "aav_flip": TaskConfig(
+        name="AAV Fitness (FLIP)",
+        dataset="SaProtHub/Dataset-AAV-FLIP",
+        input_map={"seq": "protein"},
+        label_col="label",
+        problem_type="regression",
+        main_metric="Spearman",
+        split_column="stage",
+        validation_column_values=("valid", "validation", "val"),
+        train_split="train",
+        test_split="test",
+    ),
+    "rhla_enzyme_mutations": TaskConfig(
+        name="RhlA Enzyme Mutations",
+        dataset="SaProtHub/DATASET-CAPE-RhlA-seqlabel",
+        input_map={"seq": "protein"},
+        label_col="label",
+        problem_type="regression",
+        main_metric="Spearman",
+        split_column="stage",
+        validation_column_values=("valid", "validation", "val"),
+        train_split="train",
+        test_split="test",
+    ),
+    # =========================================================================
+    # Retrieval
+    # =========================================================================
+    "scope40_retrieval": TaskConfig(
+        name="SCOPe-40 Structural Retrieval",
+        dataset="tattabio/scope40_test",
+        input_map={"seq": "sequence"},
+        label_col="family",
+        problem_type="retrieval",
+        main_metric="Recall@10",
+        train_split="train",
+        test_split="train",
+    ),
+    # Remote-homology detection in the "midnight zone": queries are filtered so
+    # no sequence-alignment relative exists in the lookup set, so this measures
+    # whether embeddings see a fold that alignment cannot.
+    #
+    # Run it with `-p knn --knn_k 1`, which makes the probe literally the
+    # paper's method: take the label of the nearest lookup protein by Euclidean
+    # distance. A linear probe here would fit 6.5k classes over 69k rows and is
+    # not what the reference numbers describe.
+    #
+    # test_h is pre-filtered to the 150 of 219 queries whose superfamily exists
+    # in the lookup set at all; the other 69 are unanswerable by any method and
+    # the paper excludes them. Reference (Heinzinger 2022, Table 1, H-level):
+    # MMseqs2 35, HMMER 77, raw ProtT5 64, ProtTucker(ProtT5) 76.
+    # doi:10.1093/nargab/lqac043
+    "cath_eat": TaskConfig(
+        name="CATH v4.3 Superfamily Transfer (midnight zone)",
+        dataset="GrimSqueaker/cath43-eat",
+        input_map={"seq": "sequence"},
+        label_col="cath_h",
+        problem_type="multiclass",
+        main_metric="Accuracy",
+        train_split="lookup",
+        test_split="test_h",
+    ),
+    # =========================================================================
+    # Token Classification (residue-level)
+    # =========================================================================
+    # Per-residue conservation scores 1-9 (9-class token classification).
+    # Local Arrow dataset built by scripts/prep_conservation.py from FLIP FASTA.
+    "conservation_flip": TaskConfig(
+        name="Residue Conservation (FLIP)",
+        dataset="data/conservation_flip",
+        input_map={"seq": "sequence"},
+        label_col="conservation_labels",
+        problem_type="token_classification",
+        # Grades 1-9 are ORDINAL: nominal macro-F1 gives off-by-one the same 0
+        # credit as off-by-eight. FLIP reports Spearman (rank). Accuracy/F1_Macro
+        # stay as secondary; the residue probe computes Spearman on this task.
+        main_metric="Spearman",
+        validation_split="validation",
+        test_split="test",
+    ),
+    "ss3": TaskConfig(
+        name="Secondary Structure 3 (NetSurfP-SS3)",
+        dataset="agemagician/NetSurfP-SS3",
+        input_map={"seq": "input"},
+        label_col="label",
+        problem_type="token_classification",
+        main_metric="F1_Macro",
+        validation_split="validation",
+        test_split="test",
+    ),
+    "disorder": TaskConfig(
+        name="Disorder (NetSurfP-SS3 mask)",
+        dataset="agemagician/NetSurfP-SS3",
+        input_map={"seq": "input"},
+        label_col="disorder",
+        problem_type="token_classification",
+        main_metric="MCC",
+        validation_split="validation",
+        test_split="test",
+    ),
+    "signal_peptide": TaskConfig(
+        name="Signal Peptide (SignalP6)",
+        dataset="SaProtHub/Dataset-Signal-Peptides",
+        input_map={"seq": "protein"},
+        label_col="label",
+        problem_type="token_classification",
+        main_metric="F1_Macro",
+        split_column="stage",
+        validation_column_values=("valid",),
+    ),
+    # Per-residue intrinsic disorder, built from DisProt curated region spans
+    # (union of regions = disordered). Distinct from the NetSurfP `disorder`
+    # task above (PDB-missing-coordinate mask) — DisProt is the manually
+    # curated CAID-style target. Local Arrow dataset built by
+    # scripts/prep_disprot.py from LiteFold/DisProt. MCC is the CAID headline
+    # metric for this imbalanced binary task.
+    "disprot": TaskConfig(
+        name="Intrinsic Disorder (DisProt)",
+        dataset="data/disprot",
+        input_map={"seq": "sequence"},
+        label_col="disorder_labels",
+        problem_type="token_classification",
+        main_metric="MCC",
+        validation_split="validation",
+        test_split="test",
+    ),
+    # =========================================================================
+    # ProteinGym — Zero-Shot (cosine similarity WT vs mutant, per-assay Spearman/AUC)
+    # =========================================================================
+    **_proteingym_tasks("zeroshot"),
+    # =========================================================================
+    # ProteinGym — Supervised (intra-assay 80/20 linear probe, per-assay Spearman/AUC)
+    # =========================================================================
+    **_proteingym_tasks("supervised"),
+}
+
+# ProteinGym task keys — large/slow, opt-in only via --proteingym or -t
+PROTEINGYM_TASKS = sorted(k for k in TASKS if k.startswith("proteingym_"))
+
+# Retrieval task keys — opt-in only via -t
+RETRIEVAL_TASKS = sorted(
+    k for k, cfg in TASKS.items() if cfg.problem_type == "retrieval"
+)
+
+# Large multilabel tasks are excluded from the default sweep (thousands of
+# labels each); request them explicitly with --tasks.
+# (results are kept in TASKS for historical compatibility, but these are
+# not counted in model comparisons and not run by default).
+MULTILABEL_EXCLUDED_TASKS = frozenset({"go_mf", "cafa5"})
+
+# Default tasks for --no-fast: all standard probe tasks, excluding ProteinGym,
+# opt-in retrieval tasks, and multilabel-excluded tasks.
+DEFAULT_TASKS = [
+    k
+    for k in TASKS
+    if k not in set(PROTEINGYM_TASKS) | set(RETRIEVAL_TASKS) | MULTILABEL_EXCLUDED_TASKS
+]

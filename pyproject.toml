@@ -1,0 +1,42 @@
+[project]
+name = "protbench"
+version = "0.1.0"
+description = "Unified protein model benchmark suite: frozen probes, finetuning, sequence + residue tasks"
+# 3.10 keeps this usable from older project venvs.
+requires-python = ">=3.10"
+dependencies = [
+    "datasets",
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "scikit-learn",
+    "scipy",
+    "sentence-transformers",
+    "torch",
+    "transformers",
+]
+
+[project.optional-dependencies]
+# peft is imported lazily, so probe-only runs work without it installed.
+finetune = ["peft>=0.19"]
+# phmmer is a Python package, not a system binary. mmseqs2 IS a system binary
+# (conda install -c bioconda mmseqs2) and cannot be declared here.
+alignment = ["pyhmmer>=0.10"]
+
+# Flat script repo, not an installable package. Callers run
+# `python protein_benchmark_suite.py` or put this dir on sys.path.
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "contrib/proteva"]
+# tests/ is a package but test_disprot imports test_token_classification_probe flat.
+pythonpath = [".", "tests", "contrib/proteva"]
+markers = ["slow: heavyweight tests that hit the network / download models"]
+# Slow tests download models and need extra backends, so a bare `pytest` on a
+# fresh clone would be red through no fault of the checkout. Opt in with
+# `pytest -m slow`.
+addopts = "-m 'not slow'"
+
+[tool.ruff]
+extend-exclude = ["*.ipynb"]

@@ -1,0 +1,6 @@
+# Local Arrow/HuggingFace datasets built by ../scripts/prep_*.py. Not committed:
+# rebuild them with those scripts. See docs/DATASETS.md.
+conservation_flip/
+flip2_amylase/
+flip2_rhomax/
+disprot/
