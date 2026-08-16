@@ -285,6 +285,12 @@ For a sense of scale, 3-mer frequencies score 0.0 here and ESM2-650M scores
 0.43. Reference numbers and full provenance are in
 [docs/DATASETS.md](docs/DATASETS.md#the-cath-midnight-zone-task).
 
+For the full C/A/T/H breakdown, run `uv run python cath_levels.py --selfcheck`
+first and then pass `--models tag=model_or_path`. `train_cath_tucker_head.py`
+is an optional ProtTucker-style projection-head reproduction on frozen CATH
+embeddings; its selfcheck validates the hard-negative mining and loss semantics,
+but real training/evaluation still needs the model embeddings and GPU runtime.
+
 ## Install
 
 ```bash

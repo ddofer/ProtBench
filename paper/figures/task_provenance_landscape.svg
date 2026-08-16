@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img">
+<defs>
+<marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,4 L0,8 Z" fill="#6b7684"/></marker>
+</defs>
+<rect width="1280" height="720" fill="#fbfcfd"/>
+<text x="60" y="70" font-family="Arial, Helvetica, sans-serif" font-size="30" font-weight="700" fill="#1f2933" text-anchor="start">Task coverage and provenance tiers</text>
+<text x="60" y="105" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="400" fill="#5f6b7a" text-anchor="start">Counts are generated from benchmark_tasks.py; provenance tiers summarize docs/DATASETS.md status.</text>
+<text x="60" y="145" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="700" fill="#5f6b7a" text-anchor="start">Problem type</text>
+<text x="385" y="145" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="700" fill="#2f8f6f" text-anchor="middle">Verified</text>
+<text x="575" y="145" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="700" fill="#2f6f9f" text-anchor="middle">Mapped</text>
+<text x="765" y="145" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="700" fill="#b8841a" text-anchor="middle">Local build</text>
+<text x="955" y="145" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="700" fill="#b54b4b" text-anchor="middle">Best-effort</text>
+<text x="60" y="203" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700" fill="#1f2933" text-anchor="start">Binary (12)</text>
+<rect x="290" y="165" width="172" height="50" rx="8" fill="#ffffff" stroke="#c9d2dc" stroke-width="1"/>
+<text x="376" y="199" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#5f6b7a" text-anchor="middle">0</text>
+<rect x="480" y="165" width="172" height="50" rx="8" fill="#2f6f9f" stroke="#c9d2dc" stroke-width="1"/>
+<text x="566" y="199" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#ffffff" text-anchor="middle">8</text>
+<rect x="670" y="165" width="172" height="50" rx="8" fill="#ffffff" stroke="#c9d2dc" stroke-width="1"/>
+<text x="756" y="199" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#5f6b7a" text-anchor="middle">0</text>
+<rect x="860" y="165" width="172" height="50" rx="8" fill="#b54b4b" stroke="#c9d2dc" stroke-width="1"/>
+<text x="946" y="199" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#ffffff" text-anchor="middle">4</text>
+<text x="60" y="267" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700" fill="#1f2933" text-anchor="start">Multiclass (5)</text>
+<rect x="290" y="229" width="172" height="50" rx="8" fill="#ffffff" stroke="#c9d2dc" stroke-width="1"/>
+<text x="376" y="263" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#5f6b7a" text-anchor="middle">0</text>
+<rect x="480" y="229" width="172" height="50" rx="8" fill="#2f6f9f" stroke="#c9d2dc" stroke-width="1"/>
+<text x="566" y="263" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#ffffff" text-anchor="middle">2</text>
+<rect x="670" y="229" width="172" height="50" rx="8" fill="#ffffff" stroke="#c9d2dc" stroke-width="1"/>
+<text x="756" y="263" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#5f6b7a" text-anchor="middle">0</text>
+<rect x="860" y="229" width="172" height="50" rx="8" fill="#b54b4b" stroke="#c9d2dc" stroke-width="1"/>
+<text x="946" y="263" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#ffffff" text-anchor="middle">3</text>
+<text x="60" y="331" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700" fill="#1f2933" text-anchor="start">Multilabel (3)</text>
+<rect x="290" y="293" width="172" height="50" rx="8" fill="#ffffff" stroke="#c9d2dc" stroke-width="1"/>
+<text x="376" y="327" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#5f6b7a" text-anchor="middle">0</text>
+<rect x="480" y="293" width="172" height="50" rx="8" fill="#2f6f9f" stroke="#c9d2dc" stroke-width="1"/>
+<text x="566" y="327" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#ffffff" text-anchor="middle">1</text>
+<rect x="670" y="293" width="172" height="50" rx="8" fill="#ffffff" stroke="#c9d2dc" stroke-width="1"/>
+<text x="756" y="327" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#5f6b7a" text-anchor="middle">0</text>
+<rect x="860" y="293" width="172" height="50" rx="8" fill="#b54b4b" stroke="#c9d2dc" stroke-width="1"/>
+<text x="946" y="327" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#ffffff" text-anchor="middle">2</text>
+<text x="60" y="395" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700" fill="#1f2933" text-anchor="start">Regression (17)</text>
+<rect x="290" y="357" width="172" height="50" rx="8" fill="#ffffff" stroke="#c9d2dc" stroke-width="1"/>
+<text x="376" y="391" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#5f6b7a" text-anchor="middle">0</text>
+<rect x="480" y="357" width="172" height="50" rx="8" fill="#2f6f9f" stroke="#c9d2dc" stroke-width="1"/>
+<text x="566" y="391" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#ffffff" text-anchor="middle">9</text>
+<rect x="670" y="357" width="172" height="50" rx="8" fill="#b8841a" stroke="#c9d2dc" stroke-width="1"/>
+<text x="756" y="391" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#ffffff" text-anchor="middle">2</text>
+<rect x="860" y="357" width="172" height="50" rx="8" fill="#b54b4b" stroke="#c9d2dc" stroke-width="1"/>
+<text x="946" y="391" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#ffffff" text-anchor="middle">6</text>
+<text x="60" y="459" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700" fill="#1f2933" text-anchor="start">Residue (5)</text>
+<rect x="290" y="421" width="172" height="50" rx="8" fill="#2f8f6f" stroke="#c9d2dc" stroke-width="1"/>
+<text x="376" y="455" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#ffffff" text-anchor="middle">3</text>
+<rect x="480" y="421" width="172" height="50" rx="8" fill="#ffffff" stroke="#c9d2dc" stroke-width="1"/>
+<text x="566" y="455" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#5f6b7a" text-anchor="middle">0</text>
+<rect x="670" y="421" width="172" height="50" rx="8" fill="#b8841a" stroke="#c9d2dc" stroke-width="1"/>
+<text x="756" y="455" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#ffffff" text-anchor="middle">2</text>
+<rect x="860" y="421" width="172" height="50" rx="8" fill="#ffffff" stroke="#c9d2dc" stroke-width="1"/>
+<text x="946" y="455" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#5f6b7a" text-anchor="middle">0</text>
+<text x="60" y="523" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700" fill="#1f2933" text-anchor="start">Retrieval (1)</text>
+<rect x="290" y="485" width="172" height="50" rx="8" fill="#ffffff" stroke="#c9d2dc" stroke-width="1"/>
+<text x="376" y="519" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#5f6b7a" text-anchor="middle">0</text>
+<rect x="480" y="485" width="172" height="50" rx="8" fill="#2f6f9f" stroke="#c9d2dc" stroke-width="1"/>
+<text x="566" y="519" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#ffffff" text-anchor="middle">1</text>
+<rect x="670" y="485" width="172" height="50" rx="8" fill="#ffffff" stroke="#c9d2dc" stroke-width="1"/>
+<text x="756" y="519" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#5f6b7a" text-anchor="middle">0</text>
+<rect x="860" y="485" width="172" height="50" rx="8" fill="#ffffff" stroke="#c9d2dc" stroke-width="1"/>
+<text x="946" y="519" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="#5f6b7a" text-anchor="middle">0</text>
+<rect x="70" y="558" width="1140" height="82" rx="10" fill="#ffffff" stroke="#c9d2dc" stroke-width="1"/>
+<circle cx="100" cy="590" r="7" fill="#2f8f6f" stroke="#c9d2dc" stroke-width="1"/>
+<text x="118" y="595" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="400" fill="#1f2933" text-anchor="start">Verified: Checked against upstream release or local build details</text>
+<circle cx="460" cy="590" r="7" fill="#2f6f9f" stroke="#c9d2dc" stroke-width="1"/>
+<text x="478" y="595" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="400" fill="#1f2933" text-anchor="start">Mapped: Linked to an original benchmark paper but not fully reverified</text>
+<circle cx="820" cy="590" r="7" fill="#b54b4b" stroke="#c9d2dc" stroke-width="1"/>
+<text x="838" y="595" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="400" fill="#1f2933" text-anchor="start">Best-effort: Third-party rehost or source still needs manual confirmation</text>
+</svg>
