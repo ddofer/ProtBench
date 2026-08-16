@@ -118,10 +118,6 @@ default `validation` cross-validates on the shared training file instead, and
 all five `ss8_*` tasks then report the same number. The run warns when this
 happens, and the CSV records it as `EvalStrategy=validation_cv4_train`.
 
-```bash
-python protein_benchmark_suite.py -m <model> --tasks ss8_cb513 --eval_split test
-```
-
 **Run the fast subset on two models.** The suite takes one model at a time; loop
 in the shell. Point both at the same `--output_dir` so the results land together:
 
@@ -237,9 +233,6 @@ contain every training class. Accuracy, F1 and MCC are still valid.
 optimal growth temperature of the *source organism*; `thermostability` and
 `meltome` are melting temperatures of the *protein*. They are not replicates and
 should not be averaged together.
-
-**`ppi_affinity` has a 200-pair test split.** That is small enough that a single
-run moves around a lot — use `--bootstrap` before reading anything into a gap.
 
 ## Reading the output
 
@@ -399,11 +392,19 @@ but real training/evaluation still needs the model embeddings and GPU runtime.
 ## Install
 
 ```bash
-uv sync                      # probes, the common case
+uv sync                      # probes and tests, the common case
 uv sync --extra finetune     # + peft, for LoRA
 uv sync --extra alignment    # + pyhmmer, for the phmmer baseline
 uv sync --extra plots        # + matplotlib, for report figures
+uv sync --extra kernels      # + kernels, matching whatever transformers asks for
 ```
+
+**`uv sync` prunes.** Those lines are alternatives, not steps: `uv sync --extra
+kernels` *uninstalls* whatever `--extra finetune` put there. Pass every extra you
+want in one command — `uv sync --extra finetune --extra alignment`.
+
+`pytest` comes from the `dev` dependency group, which `uv sync` installs by
+default, so it survives all of the above.
 
 Python ≥ 3.10. MMseqs2 is a system binary and cannot be installed from here —
 `conda install -c bioconda mmseqs2`, or a static build from
@@ -412,9 +413,14 @@ Python ≥ 3.10. MMseqs2 is a system binary and cannot be installed from here �
 ## Tests
 
 ```bash
-pytest -m "not slow"    # 157 tests, no network
+pytest -m "not slow"    # 254 tests, no network
 pytest                  # adds tests that download models
 ```
+
+Three further tests cover the fine-tuning `TrainingArguments` builder and need
+`accelerate`, which arrives with `uv sync --extra finetune`. Without it they fail
+on import rather than skip, so a bare sync reports 254 passed and 3 failed — not
+a regression.
 
 ## Reproducibility
 
@@ -441,3 +447,5 @@ you report, not just this repo.
 - [`docs/DATASETS.md`](docs/DATASETS.md) — every task's source and citation
 - [`docs/ADVANCED.md`](docs/ADVANCED.md) — fine-tuning recipes, ProteinGym
   zero-shot, test-time training, checkpoint pitfalls
+- `decontaminate.py` — filter a corpus against benchmark test sets
+- `contact_catjac.py` — zero-shot contact prediction from an MLM head
