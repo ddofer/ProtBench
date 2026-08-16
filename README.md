@@ -29,14 +29,14 @@ This measures what the pretrained representation already contains, rather than
 what the model could learn if you trained it further. It is also cheap: you
 embed once and can then fit as many probes as you like.
 
-```
+```text
 sequences ──▶ model (frozen) ──▶ one vector per protein ──▶ probe ──▶ metrics
 ```
 
 Three probes are available via `-p`:
 
 | Probe | What it is | Use it when |
-|---|---|---|
+| --- | --- | --- |
 | `linear` | Logistic/ridge regression on standardised embeddings | Default. Measures linearly accessible information. |
 | `knn` | k-nearest neighbours, raw Euclidean | Retrieval and homology-transfer tasks. `--knn_k 1` is 1-NN annotation transfer. |
 | `histgb` | Gradient-boosted trees | Non-linear structure. Slow on high dimensions. |
@@ -66,6 +66,18 @@ rest of the sweep continues and the failure is recorded in the results CSV.
 
 Per-task sources, sizes and citations: [docs/DATASETS.md](docs/DATASETS.md).
 
+## Paper draft
+
+A working Application Note draft and generated paper assets live under
+[`paper/`](paper/). Refresh registry-derived tables with:
+
+```bash
+python3 scripts/paper_assets.py --out-dir paper/generated
+```
+
+The generator imports only `benchmark_tasks.py`, so it can run in a minimal
+Python environment without installing the full benchmark stack.
+
 ## Recipes
 
 **See what tasks exist.**
@@ -86,7 +98,7 @@ python protein_benchmark_suite.py -m facebook/esm2_t33_650M_UR50D \
 The presets are not nested, which surprises people:
 
 | Preset | Tasks | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `--very-fast` | 8 | Curated scout subset. |
 | `--fast` *(default)* | 18 | Includes `scope40_retrieval`. |
 | `--no-fast` | 32 | The broad set — but **not** a superset of `--fast`. Drops `scope40_retrieval`. |
@@ -213,7 +225,7 @@ One row per task × seed × probe × split. Columns beyond the identifiers are
 metrics, and which appear depends on the task type:
 
 | Task type | Metrics |
-|---|---|
+| --- | --- |
 | binary | Accuracy, F1, F1_Macro, BalancedAccuracy, MCC, AUC, AP |
 | multiclass | Accuracy, F1_Weighted, F1_Macro, BalancedAccuracy, MCC, AUC |
 | multilabel | Accuracy, F1_Macro, F1_Micro |
@@ -243,7 +255,7 @@ one to report for it.
 A representation claim needs a floor to clear. Three are built in:
 
 | Baseline | Command | Needs |
-|---|---|---|
+| --- | --- | --- |
 | k-mer frequencies | `-m kmer` | nothing |
 | MMseqs2 alignment | `python mmseqs_baseline.py --task <task>` | `mmseqs` on PATH or `$MMSEQS_BIN` |
 | phmmer profiles | `python hmmer_baseline.py --task <task>` | `uv sync --extra alignment` |

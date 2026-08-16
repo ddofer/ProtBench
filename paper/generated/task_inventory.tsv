@@ -1,0 +1,44 @@
+task_key	display_name	problem_type	main_metric	preset	dataset
+aav_flip	AAV Fitness (FLIP)	regression	Spearman	no-fast/default	SaProtHub/Dataset-AAV-FLIP
+antibiotic_resistance	Antibiotic Resistance	multiclass	AUC	no-fast/default	biomap-research/antibiotic_resistance
+beta_lactamase_peer	beta-lactamase-PEER	regression	Spearman	very-fast	SaProtHub/Dataset-Beta_Lactamase-PEER
+binary_subcellular_localization	Binary Subcellular Localization	binary	AUC	no-fast/default	mila-intel/ProtST-BinaryLocalization
+cafa5	CAFA5 (Protein Function)	multilabel	F1_Macro	explicit-only	andrewdalpino/CAFA5
+cath_eat	CATH v4.3 Superfamily Transfer (midnight zone)	multiclass	Accuracy	no-fast/default	GrimSqueaker/cath43-eat
+cloning_clf	Cloning Classification	regression	Spearman	no-fast/default	biomap-research/cloning_clf
+conservation_flip	Residue Conservation (FLIP)	token_classification	Spearman	very-fast	data/conservation_flip
+disorder	Disorder (NetSurfP-SS3 mask)	token_classification	MCC	no-fast/default	agemagician/NetSurfP-SS3
+disprot	Intrinsic Disorder (DisProt)	token_classification	MCC	fast	data/disprot
+ec_classification	EC Classification	multilabel	F1_Micro	fast	AI4Protein/EC
+enzyme_catalytic_efficiency	Enzyme Catalytic Efficiency	regression	Spearman	fast	biomap-research/enzyme_catalytic_efficiency
+flip2_amylase	Alpha-Amylase Fitness (FLIP2)	regression	Spearman	no-fast/default	data/flip2_amylase
+flip2_rhomax	Rhodopsin Fitness (FLIP2)	regression	Spearman	no-fast/default	data/flip2_rhomax
+fluorescence	Fluorescence (TAPE)	regression	Spearman	very-fast	cradle-bio/tape-fluorescence
+go_mf	Molecular Function (GO)	multilabel	F1_Macro	explicit-only	AI4Protein/GO_MF
+material_production	Material Production	binary	AUC	no-fast/default	biomap-research/material_production
+meltome	Meltome (Melting Temperature Tm)	regression	MSE	no-fast/default	hazemessam/meltome
+metal_ion_binding	Metal Ion Binding	binary	AUC	very-fast	biomap-research/metal_ion_binding
+optimal_ph	Optimal pH	regression	Spearman	no-fast/default	biomap-research/optimal_ph
+peptide_hla	Peptide-HLA Binding	binary	AUC	fast	biomap-research/peptide_HLA_MHC_affinity
+ppi_bernett	PPI (Bernett Gold Standard)	binary	AUC	fast	Synthyra/bernett_gold_ppi
+profet_np_sp_cleaved	Neuropeptide Precursor Prediction (ProFET/NeuroPID)	binary	AUC	fast	GrimSqueaker/ProFET_NP_SP_Cleaved
+proteingym_clinical_indels_supervised	ProteinGym Clinical Indels (Supervised)	binary	AUC	proteingym	OATML-Markslab/ProteinGym_v1
+proteingym_clinical_indels_zeroshot	ProteinGym Clinical Indels (Zero-Shot)	binary	AUC	proteingym	OATML-Markslab/ProteinGym_v1
+proteingym_clinical_substitutions_supervised	ProteinGym Clinical Substitutions (Supervised)	binary	AUC	proteingym	OATML-Markslab/ProteinGym_v1
+proteingym_clinical_substitutions_zeroshot	ProteinGym Clinical Substitutions (Zero-Shot)	binary	AUC	proteingym	OATML-Markslab/ProteinGym_v1
+proteingym_dms_indels_supervised	ProteinGym DMS Indels (Supervised)	regression	Spearman	proteingym	OATML-Markslab/ProteinGym_v1
+proteingym_dms_indels_zeroshot	ProteinGym DMS Indels (Zero-Shot)	regression	Spearman	proteingym	OATML-Markslab/ProteinGym_v1
+proteingym_dms_substitutions_supervised	ProteinGym DMS Substitutions (Supervised)	regression	Spearman	proteingym	OATML-Markslab/ProteinGym_v1
+proteingym_dms_substitutions_zeroshot	ProteinGym DMS Substitutions (Zero-Shot)	regression	Spearman	proteingym	OATML-Markslab/ProteinGym_v1
+remote_homology	Remote Homology (Fold)	multiclass	Accuracy	very-fast	biomap-research/fold_prediction
+rhla_enzyme_mutations	RhlA Enzyme Mutations	regression	Spearman	no-fast/default	SaProtHub/DATASET-CAPE-RhlA-seqlabel
+scope40_retrieval	SCOPe-40 Structural Retrieval	retrieval	Recall@10	fast	tattabio/scope40_test
+signal_peptide	Signal Peptide (SignalP6)	token_classification	F1_Macro	no-fast/default	SaProtHub/Dataset-Signal-Peptides
+signalp_binary	Signal Peptide Prediction (SignalP/ProteinBERT)	binary	AUC	fast	GrimSqueaker/SignalP_Binary
+solubility	Solubility (DeepSol)	binary	AUC	very-fast	proteinea/solubility
+ss3	Secondary Structure 3 (NetSurfP-SS3)	token_classification	F1_Macro	very-fast	agemagician/NetSurfP-SS3
+stability	Stability (Biomap)	regression	Spearman	very-fast	biomap-research/stability_prediction
+subcellular_loc	Subcellular Localisation	multiclass	AUC	fast	proteinea/deeploc
+temperature_stability	Temperature Stability	multiclass	AUC	no-fast/default	biomap-research/temperature_stability
+thermostability	Thermostability (FLIP)	regression	Spearman	no-fast/default	SaProtHub/Dataset-Thermostability-FLIP
+variant_effect	Variant Effect (GB1)	regression	Spearman	fast	biomap-research/fitness_prediction
