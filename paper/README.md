@@ -5,8 +5,10 @@ assets for ProtBench.
 
 ## Files
 
-- `protbench_application_note.md` - short main-text draft, written for a
-  Bioinformatics Application Note style submission.
+- `protbench_application_note.tex` - the main-text draft, written for a
+  Bioinformatics Application Note style submission. Standalone (Pandoc-generated
+  preamble), so it compiles as-is and drops straight into Overleaf. This is the
+  only copy: edit it directly, there is no Markdown source to regenerate from.
 - `supplement.md` - supplementary methods, result-source boundaries, and open
   citation checks.
 - `references.bib` - working bibliography for the draft.

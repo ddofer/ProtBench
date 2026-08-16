@@ -164,26 +164,14 @@ scientific question requires them.
 
 \subsection{2 Design Principles}\label{design-principles}
 
-ProtBench enforces four principles for reproducible protein model
-evaluation.
-
-\begin{enumerate}
-\def\labelenumi{\arabic{enumi}.}
-\tightlist
-\item
-  \textbf{Evaluation contracts are explicit.} Task, split, metric,
-  probe, seed, and result row are fixed and reused across models.
-\item
-  \textbf{Frozen probes measure accessible information.} They test what
-  is already present in the representation, independent of task-specific
-  adaptation. Fine-tuning and zero-shot modes answer related questions.
-\item
-  \textbf{Baselines clarify the contribution.} k-mer, MMseqs2, and
-  phmmer separate composition, homology, and learned effects.
-\item
-  \textbf{Provenance is auditable.} Sources are verified, mapped, or
-  flagged; results can be traced back to original benchmarks.
-\end{enumerate}
+Task, split, metric, probe, seed, and result row are fixed once and
+reused across every model, so a difference between two numbers is a
+difference between the models. Frozen probes are the default because they
+measure what a representation already carries, before task adaptation.
+Non-neural baselines are run alongside, because a representation claim
+needs a floor to clear. Dataset provenance is recorded per task and
+verified where possible, so a result can be traced to the benchmark it
+came from rather than to a rehost.
 
 \subsection{3 System and Methods}\label{system-and-methods}
 
@@ -284,16 +272,15 @@ Stability & Spearman & 0.437 & 0.704 & 0.388 \\
 }
 
 The results show performance does not move in a single direction. First,
-parameter scaling (Vanilla 35M to 150M) provides massive gains on
-structural regression tasks (e.g., Stability jumps from 0.437 to 0.704),
+parameter scaling (Vanilla 35M to 150M) gains most on structural
+regression (Stability 0.437 to 0.704),
 while local mutational fitness capabilities often saturate early
 (Variant effect stays flat at \textasciitilde0.84)---a dynamic
 previously observed in models like ProteinBERT
 \autocite{brandes2022proteinbert}. Second, contrastive learning
 (ProtSent) improves global structure retrieval (homology) but severely
 collapses local mutational fitness (beta-lactamase, stability, variant
-effect). Relying on isolated literature metrics across different
-preprocessing pipelines would obscure these divergent trade-offs.
+effect).
 
 The CATH v4.3 superfamily transfer task exemplifies ProtBench's
 task-design approach. Its queries have no detectable sequence-alignment
@@ -303,9 +290,7 @@ exposes this task through the standard k-NN annotation-transfer
 interface. The scorer (\texttt{cath\_levels.py}) and optional
 Tucker-head training reproduction
 (\texttt{train\_cath\_tucker\_head.py}) both include self-check
-validation modes. New CATH accuracy claims are deferred until committed
-result artifacts are available; current usage is a demonstration of task
-design and reproducible scoring.
+validation modes.
 
 \subsection{6 Reproducibility and Use}\label{reproducibility-and-use}
 
@@ -345,12 +330,10 @@ isolate learned effects.
 
 \subsection{8 Conclusion}\label{conclusion}
 
-ProtBench provides a practical evaluation layer for protein
-representation work: one task registry, shared probes and metrics,
-public dataset provenance notes, alignment and composition baselines,
-and reusable result tables. Its main value is not a new modelling claim,
-but a lower-friction way to make protein model comparisons easier to
-reproduce and easier to audit.
+ProtBench is an evaluation layer, not a modelling claim: one task
+registry, shared probes and metrics, alignment and composition baselines,
+and per-task provenance, so protein model comparisons can be reproduced
+and audited.
 
 \subsection{References}\label{references}
 

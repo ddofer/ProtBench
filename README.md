@@ -291,6 +291,34 @@ The alignment baselines call the same `prepare_data` the model side uses, so
 they see byte-identical inputs — the comparison is not confounded by
 preprocessing.
 
+## Checking your corpus for test-set leakage
+
+Structural benchmarks here — `cath_eat`, `scope40_retrieval`, `remote_homology`,
+`contact_probe` — are drawn from the PDB. Any pretraining corpus built from
+UniRef or the PDB overlaps them, so a model can score well by recall rather than
+generalisation. `decontaminate.py` searches each task's test split against your
+corpus and reports what to drop:
+
+```bash
+python decontaminate.py --corpus pretrain.fasta \
+    --tasks cath_eat remote_homology scope40_retrieval \
+    --min-seq-id 0.3 --coverage 0.8 -o stoplist.txt
+
+python decontaminate.py --corpus pretrain.fasta --tasks cath_eat \
+    --write-filtered clean.fasta
+```
+
+It pulls the test sequences through the same `prepare_data` the benchmark uses,
+so you filter against exactly what you will later be scored on. Needs `mmseqs`
+(same requirement as the MMseqs2 baseline).
+
+The defaults (30% identity over 80% coverage) are the usual redundancy-reduction
+line. **Lower them for fold-level tasks** — remote homologues leak fold
+information at well under 30% identity, which is the entire premise of
+`cath_eat`. Coverage uses the weaker of query and target, so a short test protein
+contained inside a long corpus protein does not drag in every sequence sharing a
+common domain.
+
 ## Contact prediction
 
 Contact prediction asks whether a representation encodes tertiary structure: for

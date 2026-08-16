@@ -25,8 +25,15 @@ alignment = ["pyhmmer>=0.10"]
 # Only final_benchmark_report.py plots, and it imports matplotlib inside the
 # function, so probe runs never need it.
 plots = ["matplotlib"]
-# transformers 5.5.0 declares kernels<0.13; 0.13+ breaks `import transformers`.
-kernels = ["kernels>=0.12,<0.13"]
+# Defer to whatever window the resolved transformers declares, rather than
+# restating it here -- the hardcoded <0.13 was written against transformers 5.5
+# and went unsatisfiable by 5.15, which asks for >=0.16.
+kernels = ["transformers[kernels]"]
+
+# README documents `pytest -m "not slow"`, so pytest has to come from a plain
+# `uv sync` -- dependency-groups are installed by default, extras are not.
+[dependency-groups]
+dev = ["pytest"]
 
 # ponytail: flat script repo, not an installable package. Callers run
 # `python protein_benchmark_suite.py` or put this dir on sys.path.
