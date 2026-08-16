@@ -49,7 +49,13 @@ ModelType = Literal[
 
 # Flash attention availability (cached at import time)
 try:
-    HAS_FLASH_ATTN = importlib.util.find_spec("flash_attn") is not None
+    # Probe the symbol, not the spec: flash_attn_4 installs a `flash_attn/` tree
+    # holding only `cute`, so find_spec resolves it as a namespace package and
+    # reports True while `from flash_attn import flash_attn_varlen_func` still
+    # raises — sending fa2-varlen checkpoints down a load path that then fails.
+    from flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func  # noqa: F401
+
+    HAS_FLASH_ATTN = True
 except Exception:
     HAS_FLASH_ATTN = False
 
