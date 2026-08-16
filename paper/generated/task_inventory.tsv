@@ -7,6 +7,7 @@ cafa5	CAFA5 (Protein Function)	multilabel	F1_Macro	explicit-only	andrewdalpino/C
 cath_eat	CATH v4.3 Superfamily Transfer (midnight zone)	multiclass	Accuracy	no-fast/default	GrimSqueaker/cath43-eat
 cloning_clf	Cloning Classification	regression	Spearman	no-fast/default	biomap-research/cloning_clf
 conservation_flip	Residue Conservation (FLIP)	token_classification	Spearman	very-fast	data/conservation_flip
+contact_probe	Contact Prediction (TAPE ProteinNet)	contact_prediction	P@L/5_long	no-fast/default	heya5/protein_contact_map
 disorder	Disorder (NetSurfP-SS3 mask)	token_classification	MCC	no-fast/default	agemagician/NetSurfP-SS3
 disprot	Intrinsic Disorder (DisProt)	token_classification	MCC	fast	data/disprot
 ec_classification	EC Classification	multilabel	F1_Micro	fast	AI4Protein/EC
@@ -14,6 +15,8 @@ enzyme_catalytic_efficiency	Enzyme Catalytic Efficiency	regression	Spearman	fast
 flip2_amylase	Alpha-Amylase Fitness (FLIP2)	regression	Spearman	no-fast/default	data/flip2_amylase
 flip2_rhomax	Rhodopsin Fitness (FLIP2)	regression	Spearman	no-fast/default	data/flip2_rhomax
 fluorescence	Fluorescence (TAPE)	regression	Spearman	very-fast	cradle-bio/tape-fluorescence
+go_bp	Biological Process (GO)	multilabel	F1_Macro	explicit-only	AI4Protein/GO_BP
+go_cc	Cellular Component (GO)	multilabel	F1_Macro	explicit-only	AI4Protein/GO_CC
 go_mf	Molecular Function (GO)	multilabel	F1_Macro	explicit-only	AI4Protein/GO_MF
 material_production	Material Production	binary	AUC	no-fast/default	biomap-research/material_production
 meltome	Meltome (Melting Temperature Tm)	regression	MSE	no-fast/default	hazemessam/meltome
@@ -37,6 +40,17 @@ signal_peptide	Signal Peptide (SignalP6)	token_classification	F1_Macro	no-fast/d
 signalp_binary	Signal Peptide Prediction (SignalP/ProteinBERT)	binary	AUC	fast	GrimSqueaker/SignalP_Binary
 solubility	Solubility (DeepSol)	binary	AUC	very-fast	proteinea/solubility
 ss3	Secondary Structure 3 (NetSurfP-SS3)	token_classification	F1_Macro	very-fast	agemagician/NetSurfP-SS3
+ss3_casp12	Secondary Structure 3 (CASP12)	token_classification	F1_Macro	explicit-only	proteinea/secondary_structure_prediction
+ss3_casp13	Secondary Structure 3 (CASP13)	token_classification	F1_Macro	explicit-only	proteinea/secondary_structure_prediction
+ss3_casp14	Secondary Structure 3 (CASP14)	token_classification	F1_Macro	explicit-only	proteinea/secondary_structure_prediction
+ss3_cb513	Secondary Structure 3 (CB513)	token_classification	F1_Macro	explicit-only	proteinea/secondary_structure_prediction
+ss3_ts115	Secondary Structure 3 (TS115)	token_classification	F1_Macro	explicit-only	proteinea/secondary_structure_prediction
+ss8	Secondary Structure 8 (DSSP8)	token_classification	F1_Macro	no-fast/default	GleghornLab/SS8
+ss8_casp12	Secondary Structure 8 (CASP12)	token_classification	F1_Macro	explicit-only	proteinea/secondary_structure_prediction
+ss8_casp13	Secondary Structure 8 (CASP13)	token_classification	F1_Macro	explicit-only	proteinea/secondary_structure_prediction
+ss8_casp14	Secondary Structure 8 (CASP14)	token_classification	F1_Macro	explicit-only	proteinea/secondary_structure_prediction
+ss8_cb513	Secondary Structure 8 (CB513)	token_classification	F1_Macro	explicit-only	proteinea/secondary_structure_prediction
+ss8_ts115	Secondary Structure 8 (TS115)	token_classification	F1_Macro	explicit-only	proteinea/secondary_structure_prediction
 stability	Stability (Biomap)	regression	Spearman	very-fast	biomap-research/stability_prediction
 subcellular_loc	Subcellular Localisation	multiclass	AUC	fast	proteinea/deeploc
 temperature_stability	Temperature Stability	multiclass	AUC	no-fast/default	biomap-research/temperature_stability

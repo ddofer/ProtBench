@@ -53,9 +53,20 @@ logger = logging.getLogger(__name__)
 
 # Task-specific label alphabets / class names.
 _SS3_ALPHABET = "HEC"
+# Must match protein_benchmark_suite._SS8_ALPHABET so a fine-tuned SS8 model and
+# a frozen SS8 probe report against the same class ids. `D` (unassigned) is not
+# a class in either; it becomes -100, which HF Trainer already ignores.
+_SS8_ALPHABET = "GHIBESTC"
 _DISORDER_ALPHABET = "01"
 
-_RESIDUE_TASKS = ("ss3", "disorder", "signal_peptide", "conservation_flip", "disprot")
+_RESIDUE_TASKS = (
+    "ss3",
+    "ss8",
+    "disorder",
+    "signal_peptide",
+    "conservation_flip",
+    "disprot",
+)
 
 
 def _decode_disorder_label(label_str: Any) -> List[int]:
@@ -89,6 +100,14 @@ def _decode_disorder_label(label_str: Any) -> List[int]:
 def _decode_labels(task: str, label_str: Any) -> List[int]:
     if task == "ss3":
         return decode_string_label(str(label_str), _SS3_ALPHABET)
+    if task == "ss8":
+        # Unassigned residues (GleghornLab/SS8's `D`) become -100, HF Trainer's
+        # ignore index, rather than being dropped -- dropping would shorten the
+        # list and shift every later label against its token.
+        return [
+            _SS8_ALPHABET.index(c) if c in _SS8_ALPHABET else -100
+            for c in str(label_str)
+        ]
     if task == "disorder":
         return _decode_disorder_label(label_str)
     if task == "disprot":
@@ -113,6 +132,8 @@ def _decode_labels(task: str, label_str: Any) -> List[int]:
 def _build_label_meta(task: str, all_label_lists: List[List[int]]) -> Dict[str, Any]:
     if task == "ss3":
         names = list(_SS3_ALPHABET)
+    elif task == "ss8":
+        names = list(_SS8_ALPHABET)
     elif task in ("disorder", "disprot"):
         names = list(_DISORDER_ALPHABET)  # binary 0/1 (ordered/disordered)
     else:  # signal_peptide — infer from data

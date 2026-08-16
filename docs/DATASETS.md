@@ -19,6 +19,8 @@ distinction matters.
 |---|---|---|---|
 | `ec_classification` | [`AI4Protein/EC`](https://huggingface.co/datasets/AI4Protein/EC) | multilabel | F1_Micro |
 | `go_mf` | [`AI4Protein/GO_MF`](https://huggingface.co/datasets/AI4Protein/GO_MF) | multilabel | F1_Macro |
+| `go_bp` | [`AI4Protein/GO_BP`](https://huggingface.co/datasets/AI4Protein/GO_BP) | multilabel | F1_Macro |
+| `go_cc` | [`AI4Protein/GO_CC`](https://huggingface.co/datasets/AI4Protein/GO_CC) | multilabel | F1_Macro |
 | `profet_np_sp_cleaved` | [`GrimSqueaker/ProFET_NP_SP_Cleaved`](https://huggingface.co/datasets/GrimSqueaker/ProFET_NP_SP_Cleaved) | binary | AUC |
 | `signalp_binary` | [`GrimSqueaker/SignalP_Binary`](https://huggingface.co/datasets/GrimSqueaker/SignalP_Binary) | binary | AUC |
 | `cath_eat` | [`GrimSqueaker/cath43-eat`](https://huggingface.co/datasets/GrimSqueaker/cath43-eat) | multiclass | Accuracy |
@@ -52,6 +54,9 @@ distinction matters.
 | `subcellular_loc` | [`proteinea/deeploc`](https://huggingface.co/datasets/proteinea/deeploc) | multiclass | AUC |
 | `solubility` | [`proteinea/solubility`](https://huggingface.co/datasets/proteinea/solubility) | binary | AUC |
 | `scope40_retrieval` | [`tattabio/scope40_test`](https://huggingface.co/datasets/tattabio/scope40_test) | retrieval | Recall@10 |
+| `contact_probe` | [`heya5/protein_contact_map`](https://huggingface.co/datasets/heya5/protein_contact_map) | contact_prediction | P@L/5_long |
+| `ss8` | [`GleghornLab/SS8`](https://huggingface.co/datasets/GleghornLab/SS8) | token_classification | F1_Macro |
+| `ss3_casp12`, `ss3_casp13`, `ss3_casp14`, `ss3_cb513`, `ss3_ts115`, `ss8_casp12`, `ss8_casp13`, `ss8_casp14`, `ss8_cb513`, `ss8_ts115` | [`proteinea/secondary_structure_prediction`](https://huggingface.co/datasets/proteinea/secondary_structure_prediction) | token_classification | F1_Macro |
 
 Local `data/...` entries are **not** downloaded and are **not** in a fresh
 clone. Build them first with the matching script in `scripts/`:
@@ -68,6 +73,9 @@ tasks here are both called "disorder" and must not be compared to each other.
 | `ss3`, `disorder` | [`agemagician/NetSurfP-SS3`](https://huggingface.co/datasets/agemagician/NetSurfP-SS3) | Klausen et al., *NetSurfP-2.0*, Proteins 2019 ([doi:10.1002/prot.25674](https://doi.org/10.1002/prot.25674)) |  Train/val reshuffled from paper's 10,337/500 to 10,792/646. **CB513 = 511 chains** (vs 513 in paper); **CASP12 = 20** (vs 21). Disorder = PDB-missing-coordinate mask, NOT DisProt / CAID2 — do not cross-compare. |
 | `signal_peptide` | [`SaProtHub/Dataset-Signal-Peptides`](https://huggingface.co/datasets/SaProtHub/Dataset-Signal-Peptides) | Teufel et al., *SignalP 6.0*, Nat Biotechnol 2022 ([doi:10.1038/s41587-021-01156-3](https://doi.org/10.1038/s41587-021-01156-3)) | All 25,693 rows packed into HF `train` split; partition is in the `stage` column (20,490 / 2,569 / 2,634).|
 | `disprot` | [`LiteFold/DisProt`](https://huggingface.co/datasets/LiteFold/DisProt) | Aspromonte et al., *DisProt 2024*, NAR ([doi:10.1093/nar/gkad928](https://doi.org/10.1093/nar/gkad928)) | Built to local Arrow `data/disprot/` by `scripts/prep_disprot.py`. Per-residue 0/1 = union of curated `region_terms == 'disorder'` spans. Split via DisProt's deterministic `split_bucket` (sha256(id)%10): test=bucket0 (324), val=bucket1 (340), train=buckets2-9 (2,535). **This is the manually-curated CAID-style target — distinct from the NetSurfP `disorder` mask above.** Headline metric MCC (imbalanced, ~17% disordered). |
+| `contact_probe` | [`heya5/protein_contact_map`](https://huggingface.co/datasets/heya5/protein_contact_map) | Rao et al., *TAPE*, NeurIPS 2019 ([arXiv:1906.08230](https://arxiv.org/abs/1906.08230)); ProteinNet, AlQuraishi 2019 ([doi:10.1186/s12859-019-2932-0](https://doi.org/10.1186/s12859-019-2932-0)) | TAPE's ProteinNet LMDB converted to parquet: 25,299 train / 224 valid / 40 test (CASP12 targets). `tertiary` is CB coordinates in Ångström, `valid_mask` flags resolved residues (unresolved ones carry `(0,0,0)` and **must** be masked out, or they invent contacts at the origin). Contact = CB–CB < 8 Å. Measured long-range contact rate on the test split: **0.028**, which is the chance floor for `P@L/5_long`. |
+| `ss8` | [`GleghornLab/SS8`](https://huggingface.co/datasets/GleghornLab/SS8) | Klausen et al., *NetSurfP-2.0*, Proteins 2019 ([doi:10.1002/prot.25674](https://doi.org/10.1002/prot.25674)) | 10,792 / 626 / 50. The label column carries 9 symbols: the 8 DSSP states `GHIBESTC` plus `D` for **unassigned**. `D` is **not scored** — it is 6.7% of train and 11.5% of test residues, 91% of them in terminal runs and so trivially predictable from position. Counting it would inflate Accuracy and make F1_Macro a 9-class average that no published Q8 number compares to. Those residues are marked ignore and dropped before fitting, exactly as standard Q8 evaluation masks them. |
+| `ss3_*`, `ss8_*` (10 held-out sets) | [`proteinea/secondary_structure_prediction`](https://huggingface.co/datasets/proteinea/secondary_structure_prediction) | Elnaggar et al., *ProtTrans*, TPAMI 2021 ([doi:10.1109/TPAMI.2021.3095381](https://doi.org/10.1109/TPAMI.2021.3095381)); data from NetSurfP-2.0 | Raw CSVs with no HF split config, so each task pins `data_files={"train": "training_hhblits.csv", "test": "<SET>.csv"}`. **Their columns do not match each other** — `CASP13.csv` carries `xyz_coordinates`, `CASP14.csv` also an `Unnamed: 0` index, `training_hhblits.csv` a `cb513_mask` — so each split is loaded separately; one combined `load_dataset` call fails trying to unify the schemas. `dssp3` and `dssp8` are separate columns over the same sequences, so `ss3_cb513` and `ss8_cb513` differ only in label granularity. `dssp8` here emits exactly the 8 DSSP states, matching the `ss8` class ids. |
 
 ## Best-effort upstream sources
 
@@ -83,7 +91,8 @@ citation, not as the citation itself.
 | `beta_lactamase_peer` | PEER | Xu et al. 2022, arXiv:2206.02096 |
 | `scope40_retrieval` | SCOPe | Fox et al. 2014, doi:10.1093/nar/gkt1240 |
 | `subcellular_loc`, `binary_subcellular_localization` | DeepLoc | Almagro Armenteros et al. 2017, doi:10.1093/bioinformatics/btx431 |
-| `fluorescence` | TAPE, from Sarkisyan et al. | Rao et al. 2019, arXiv:1906.08230 |
+| `fluorescence`, `contact_probe` | TAPE | Rao et al. 2019, arXiv:1906.08230 |
+| `go_bp`, `go_cc`, `go_mf` | GO term prediction, DeepFRI-derived splits | Gligorijević et al. 2021, doi:10.1038/s41467-021-23303-9 |
 | `ppi_bernett` | Gold-standard PPI splits | Bernett et al. 2024, doi:10.1093/bib/bbae076 |
 | `cafa5` | CAFA challenge series | Zhou et al. 2019, doi:10.1186/s13059-019-1835-8 |
 | `profet_np_sp_cleaved` | ProFET | Ofer & Linial 2015, doi:10.1093/bioinformatics/btv345 |

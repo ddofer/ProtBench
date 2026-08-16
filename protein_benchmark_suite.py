@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import random
+import re
 import shutil
 import sys
 import tempfile
@@ -70,6 +71,8 @@ def seed_all(seed: int) -> None:
 
 # Bootstrap resamples for metric CIs. 0 disables; --bootstrap N sets it.
 BOOTSTRAP_N = 0
+# Training proteins for the pairwise contact probe; --contact_train_proteins.
+CONTACT_TRAIN_PROTEINS = 400
 
 
 def _boot_ci(metric_fn, y_true, y_pred, n_boot: int, seed: int) -> Dict[str, float]:
@@ -1200,25 +1203,65 @@ def _subsample_paired_data(
     return [sequences[i] for i in keep], [labels[i] for i in keep]
 
 
+# Per-residue label meaning "no ground truth here" -- excluded from fitting and
+# from scoring, so it never becomes a predictable pseudo-class.
+IGNORE_LABEL = -1
+
 _SS3_ALPHABET = "HEC"
+# The 8 DSSP states, and only those -- this is the published Q8 label set, so
+# `ss8` (GleghornLab) and `ss8_cb513` (proteinea) assign the same id to the same
+# state and their F1_Macro values are comparable.
+_SS8_ALPHABET = "GHIBESTC"
+# GleghornLab/SS8 additionally marks unassigned residues `D`: 6.4% of train and
+# 11.5% of test residues, 91% of them in terminal runs and so trivially
+# predictable from position alone. Scoring them as a 9th class would inflate
+# Accuracy and turn F1_Macro into a 9-class average that no published Q8 number
+# can be compared against, so they are marked IGNORE_LABEL and dropped at fit
+# time. Standard Q8 evaluation masks them out the same way.
 _DISORDER_ALPHABET = "01"
 
 
 def _decode_residue_label(task_name: str, label_col: str, raw: Any) -> List[int]:
     """Decode per-residue labels.
 
-    SS3 / Disorder use string alphabets (``HEC`` / ``01``); other tasks
-    expect already-tokenized integer lists or comma-separated strings.
-    Robust to lists, strings, and falls back to ``int(c)``.
+    SS3 / SS8 / Disorder use string alphabets (``HEC`` / ``GHIBESTC`` / ``01``);
+    other tasks expect already-tokenized integer lists or comma-separated
+    strings. Robust to lists, strings, and falls back to ``int(c)``.
+
+    Residues with no ground truth decode to ``IGNORE_LABEL`` and are dropped
+    later by ``token_classification_probe.drop_ignored_residues``.
     """
     if isinstance(raw, list):
         return [int(x) for x in raw]
     s = str(raw)
     name_lower = task_name.lower()
-    if "ss3" in name_lower or "secondary structure" in name_lower:
-        return [_SS3_ALPHABET.index(c) for c in s if c in _SS3_ALPHABET]
-    if "disorder" in name_lower or label_col == "disorder":
+    # Branch ORDER is load-bearing. Task names overlap -- "Disorder (NetSurfP-SS3
+    # mask)" contains "ss3", and an 8-state task is also named "Secondary
+    # Structure ..." -- and every alphabet branch DROPS symbols it does not
+    # recognise rather than raising. A mis-routed task therefore returns a short
+    # or empty label list that the residue probe silently truncates against,
+    # producing a plausible number computed on the wrong residues. Most specific
+    # match first: disorder, then 8-state, then 3-state.
+    if "disorder" in name_lower or label_col.startswith("disorder"):
+        # NetSurfP ships this column as a stringified float list,
+        # "['0.0', '1.0', ...]", not as bare 0/1 characters.
+        if "." in s or "[" in s:
+            return [int(float(tok)) for tok in re.findall(r"-?\d+(?:\.\d+)?", s)]
         return [_DISORDER_ALPHABET.index(c) for c in s if c in _DISORDER_ALPHABET]
+    if label_col == "dssp8" or "ss8" in name_lower or "dssp8" in name_lower:
+        # Unassigned residues map to IGNORE_LABEL rather than being dropped:
+        # dropping them would shorten the list and SHIFT every later label
+        # against its residue embedding.
+        return [
+            _SS8_ALPHABET.index(c) if c in _SS8_ALPHABET else IGNORE_LABEL for c in s
+        ]
+    if "ss3" in name_lower or "secondary structure" in name_lower:
+        # Same ignore-don't-drop rule as the SS8 branch, so the two alphabets
+        # agree on what an unrecognised symbol means. No shipped dataset emits
+        # one, but dropping would silently shift every later label.
+        return [
+            _SS3_ALPHABET.index(c) if c in _SS3_ALPHABET else IGNORE_LABEL for c in s
+        ]
     if "," in s:
         return [int(tok) for tok in s.split(",") if tok.strip()]
     # Fallback: try character-by-character int parsing
@@ -1234,6 +1277,141 @@ def _prepare_token_classification_data(
 
     Mirrors the split-selection logic of ``prepare_data`` but emits
     per-residue label lists (not sequence-level scalars).
+    """
+    train_data, eval_data, split_metadata = _load_residue_splits(
+        cfg, max_samples, eval_split
+    )
+    seq_col = cfg.input_map.get("seq", "sequence")
+
+    def _decode_split(split_data) -> Tuple[List[str], List[List[int]]]:
+        seqs = [str(x) for x in split_data[seq_col]]
+        if cfg.remove_sequence_whitespace:
+            seqs = ["".join(s.split()) for s in seqs]
+        labs = [
+            _decode_residue_label(cfg.name, cfg.label_col, raw)
+            for raw in split_data[cfg.label_col]
+        ]
+        return seqs, labs
+
+    train_seqs, train_labels = _decode_split(train_data)
+    if eval_data is not None and len(eval_data) > 0:
+        test_seqs, test_labels = _decode_split(eval_data)
+    else:
+        test_seqs, test_labels = None, None
+
+    logger.info(
+        "  Residue task: %d train sequences, %s eval sequences (%s)",
+        len(train_seqs),
+        len(test_seqs) if test_seqs is not None else "CV-fallback",
+        split_metadata["eval_strategy"],
+    )
+    return train_seqs, train_labels, test_seqs, test_labels, split_metadata
+
+
+def load_dataset_splits(dataset: str, data_files: Optional[Dict[str, str]] = None, **kwargs):
+    """``load_dataset`` that tolerates per-split files with different columns.
+
+    Handing several CSVs to one ``load_dataset`` call makes the builder unify
+    their schemas, and raw hub CSV repos rarely agree: in
+    ``proteinea/secondary_structure_prediction``, `CASP13.csv` carries
+    `xyz_coordinates`, `CASP14.csv` also carries an `Unnamed: 0` index column,
+    and `training_hhblits.csv` carries `cb513_mask`. Unifying them raises
+    "Please either edit the data files to have matching columns".
+
+    Loading each split on its own sidesteps that entirely -- the tasks only ever
+    read the sequence and label columns, which every file does share.
+    """
+    from datasets import DatasetDict, load_dataset
+
+    if not data_files:
+        return load_dataset(dataset, **kwargs)
+    return DatasetDict(
+        {
+            split: load_dataset(
+                dataset, data_files={split: files}, split=split, **kwargs
+            )
+            for split, files in data_files.items()
+        }
+    )
+
+
+def _unwrap_encoder_tokenizer(model_obj, is_sbert: bool):
+    """Return ``(tokenizer, encoder)`` for the per-token extraction paths.
+
+    A SentenceTransformer wraps the encoder, so reach through to the underlying
+    HF model and its native tokenizer -- ``.encode()`` only ever hands back a
+    pooled vector, and both the residue probe and the contact probe need the
+    per-token hidden states.
+    """
+    if is_sbert:
+        first_module = list(model_obj._modules.values())[0]
+        return first_module.tokenizer, first_module.auto_model
+    tokenizer, encoder = model_obj
+    return tokenizer, encoder
+
+
+def _prepare_contact_data(
+    cfg: TaskConfig,
+    max_samples: Optional[int],
+    eval_split: str,
+    train_proteins: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], Optional[List[Dict[str, Any]]], Dict[str, Any]]:
+    """Load a contact-prediction dataset: sequences plus CB coordinates.
+
+    Returns one record per protein, ``{"seq", "tertiary", "valid_mask"}``. The
+    coordinates build the contact LABELS in ``contact_metrics``; the model is
+    only ever shown ``seq``.
+
+    ``train_proteins`` truncates the train split BEFORE the rows are pulled out
+    of Arrow. The probe only ever uses that many, and materialising all 25k
+    coordinate arrays as Python lists costs an order of magnitude more memory
+    than the 167 MB the dataset occupies on disk.
+    """
+    train_data, eval_data, split_metadata = _load_residue_splits(
+        cfg, max_samples, eval_split
+    )
+    seq_col = cfg.input_map.get("seq", "seq")
+
+    def _records(split_data) -> List[Dict[str, Any]]:
+        return [
+            {
+                "seq": str(row[seq_col]),
+                "tertiary": row[cfg.label_col],
+                "valid_mask": row.get("valid_mask"),
+            }
+            for row in split_data
+        ]
+
+    if train_proteins and len(train_data) > train_proteins:
+        # Shuffle first, matching every other subsampling site. Taking rows in
+        # file order would make --fast (which shuffles via max_samples) and
+        # --no-fast train on different subsets and report non-comparable numbers.
+        train_data = train_data.shuffle(seed=BENCHMARK_SEED).select(
+            range(train_proteins)
+        )
+    train_records = _records(train_data)
+    eval_records = (
+        _records(eval_data) if eval_data is not None and len(eval_data) > 0 else None
+    )
+    logger.info(
+        "  Contact task: %d train proteins, %s eval proteins (%s)",
+        len(train_records),
+        len(eval_records) if eval_records is not None else "CV-fallback",
+        split_metadata["eval_strategy"],
+    )
+    return train_records, eval_records, split_metadata
+
+
+def _load_residue_splits(
+    cfg: TaskConfig,
+    max_samples: Optional[int],
+    eval_split: str,
+):
+    """Split selection for the per-protein task paths (residue and contact).
+
+    Mirrors ``prepare_data``'s split logic but returns the raw HF splits, since
+    neither per-residue labels nor coordinate arrays survive the sequence-level
+    parser. Returns ``(train_data, eval_data_or_None, split_metadata)``.
     """
     from datasets import load_dataset
 
@@ -1264,19 +1442,11 @@ def _prepare_token_classification_data(
             load_kwargs["name"] = cfg.dataset_config
         if cfg.data_dir:
             load_kwargs["data_dir"] = cfg.data_dir
-        ds = load_dataset(cfg.dataset, **load_kwargs)
+        ds = load_dataset_splits(
+            cfg.dataset, data_files=cfg.data_files, **load_kwargs
+        )
 
     all_keys = [str(k) for k in ds.keys()]
-
-    seq_col = cfg.input_map.get("seq", "sequence")
-
-    def _decode_split(split_data) -> Tuple[List[str], List[List[int]]]:
-        seqs = [str(x) for x in split_data[seq_col]]
-        labs = [
-            _decode_residue_label(cfg.name, cfg.label_col, raw)
-            for raw in split_data[cfg.label_col]
-        ]
-        return seqs, labs
 
     train_data = None
     eval_data = None
@@ -1313,6 +1483,20 @@ def _prepare_token_classification_data(
             else:
                 split_metadata["eval_strategy"] = "validation_cv4_train"
                 split_metadata["cv_fallback"] = True
+                # A task can have a real held-out test set and no validation
+                # split -- the CASP/CB513 secondary-structure sets are exactly
+                # that. Falling back to CV on train then answers a different
+                # question than the task exists to ask, and every sibling task
+                # sharing the train file reports the same number. It is recorded
+                # in the EvalStrategy column, but say so out loud too.
+                if cfg.test_split in all_keys:
+                    logger.warning(
+                        "%s has no validation split, so --eval_split validation "
+                        "is 4-fold CV over TRAIN -- not the held-out '%s' set. "
+                        "Use --eval_split test to score the held-out set.",
+                        cfg.name,
+                        cfg.test_split,
+                    )
         else:
             if cfg.test_split in all_keys:
                 eval_data = get_split_data(ds, cfg.test_split, all_keys)
@@ -1324,19 +1508,7 @@ def _prepare_token_classification_data(
     if max_samples and eval_data is not None and len(eval_data) > max_samples:
         eval_data = eval_data.shuffle(seed=BENCHMARK_SEED).select(range(max_samples))
 
-    train_seqs, train_labels = _decode_split(train_data)
-    if eval_data is not None and len(eval_data) > 0:
-        test_seqs, test_labels = _decode_split(eval_data)
-    else:
-        test_seqs, test_labels = None, None
-
-    logger.info(
-        "  Residue task: %d train sequences, %s eval sequences (%s)",
-        len(train_seqs),
-        len(test_seqs) if test_seqs is not None else "CV-fallback",
-        split_metadata["eval_strategy"],
-    )
-    return train_seqs, train_labels, test_seqs, test_labels, split_metadata
+    return train_data, eval_data, split_metadata
 
 
 def prepare_data(
@@ -1399,11 +1571,18 @@ def prepare_data(
             logger.info("  Loading local dataset from disk: %s", local_dataset_path)
             ds = _load_local_dataset(local_dataset_path)
         else:
-            ds = load_dataset(cfg.dataset, **load_kwargs)
+            ds = load_dataset_splits(
+                cfg.dataset, data_files=cfg.data_files, **load_kwargs
+            )
     except Exception as e:
         logger.warning(f"Standard load failed, trying with trust_remote_code: {e}")
         try:
-            ds = load_dataset(cfg.dataset, trust_remote_code=True, **load_kwargs)
+            ds = load_dataset_splits(
+                cfg.dataset,
+                data_files=cfg.data_files,
+                trust_remote_code=True,
+                **load_kwargs,
+            )
         except Exception as e2:
             raise RuntimeError(f"Failed to load dataset {cfg.dataset}: {e2}")
 
@@ -2922,14 +3101,7 @@ def evaluate_task(
         eval_strategy = str(
             split_metadata.get("eval_strategy", DEFAULT_RESULT_EVAL_STRATEGY)
         )
-        if is_sbert:
-            # SentenceTransformer wraps the encoder; unwrap to the underlying
-            # HF model + native tokenizer so we can do per-token extraction.
-            first_module = list(model_obj._modules.values())[0]
-            encoder = first_module.auto_model
-            tokenizer = first_module.tokenizer
-        else:
-            tokenizer, encoder = model_obj
+        tokenizer, encoder = _unwrap_encoder_tokenizer(model_obj, is_sbert)
         cache_root = None
         if embed_save_path:
             cache_root = Path(embed_save_path).parent / "residue_cache"
@@ -2949,6 +3121,34 @@ def evaluate_task(
             cache=cache,
             model_hash=model_hash,
             task_key=cfg.name,
+        )
+        return metrics, resolved_eval_split, eval_strategy
+
+    # Pairwise residue-residue tasks. Same reason for dispatching early: the
+    # sequence-level parser cannot carry coordinate arrays. See contact_probe.py.
+    if cfg.problem_type == "contact_prediction":
+        from contact_probe import evaluate_contact_prediction
+
+        train_records, test_records, split_metadata = _prepare_contact_data(
+            cfg, max_samples, eval_split, train_proteins=CONTACT_TRAIN_PROTEINS
+        )
+        resolved_eval_split = str(
+            split_metadata.get("resolved_eval_split", DEFAULT_RESULT_EVAL_SPLIT)
+        )
+        eval_strategy = str(
+            split_metadata.get("eval_strategy", DEFAULT_RESULT_EVAL_STRATEGY)
+        )
+        tokenizer, encoder = _unwrap_encoder_tokenizer(model_obj, is_sbert)
+        metrics = evaluate_contact_prediction(
+            encoder=encoder,
+            tokenizer=tokenizer,
+            train_records=train_records,
+            test_records=test_records,
+            device=device,
+            batch_size=batch_size,
+            max_length=max_length,
+            train_proteins=CONTACT_TRAIN_PROTEINS,
+            seed=BENCHMARK_SEED,
         )
         return metrics, resolved_eval_split, eval_strategy
 
@@ -3431,6 +3631,11 @@ class ResultTracker:
 
         safe_model_name = self.model_name.replace("/", "_").replace("\\", "_")
         filename = f"bench_{safe_model_name}.csv"
+        # Create the directory here rather than relying on each caller. Saving is
+        # the LAST thing a run does, so a missing output dir discards the whole
+        # run's compute at the final step -- an hour of contact_catjac scoring,
+        # in the case that prompted this.
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
         filepath = Path(output_dir) / filename
 
         # Merge with existing results if the file already exists
@@ -3622,6 +3827,16 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--contact_train_proteins",
+        type=int,
+        default=CONTACT_TRAIN_PROTEINS,
+        help=(
+            "Training proteins for the contact_probe pairwise probe "
+            f"(default: {CONTACT_TRAIN_PROTEINS}). Lower it for a smoke test; "
+            "the full train split is 25k proteins and does not fit in memory."
+        ),
+    )
+    parser.add_argument(
         "--output_dir",
         "-o",
         type=str,
@@ -3795,7 +4010,7 @@ def parse_args():
 
 def main():
     """Main execution function."""
-    global BENCHMARK_SEED, BOOTSTRAP_N
+    global BENCHMARK_SEED, BOOTSTRAP_N, CONTACT_TRAIN_PROTEINS
 
     args = parse_args()
 
@@ -3810,6 +4025,7 @@ def main():
     BOOTSTRAP_N = args.bootstrap
     if BOOTSTRAP_N:
         logger.info("Bootstrap CIs enabled: %d resamples per metric", BOOTSTRAP_N)
+    CONTACT_TRAIN_PROTEINS = args.contact_train_proteins
 
     # Several older copies of this suite still exist on disk, and they disagree
     # about the task registry (ec_classification in particular). Record which one
@@ -4080,10 +4296,14 @@ def main():
                 # Token-classification tasks run residue-level logistic
                 # regression; cap sequences tighter than FAST_MAX_SAMPLES to
                 # stay within a few minutes on CPU (~400k residues at 2k seqs).
+                # Contact prediction is capped by --contact_train_proteins
+                # instead; it embeds every sampled protein and then expands each
+                # into O(L^2) pairs, so a sequence-count cap is the wrong knob.
                 _task_max_samples = (
                     FAST_TOKEN_CLASS_MAX_SAMPLES
                     if (
-                        cfg.problem_type == "token_classification"
+                        cfg.problem_type
+                        in ("token_classification", "contact_prediction")
                         and _raw_max_samples is not None
                         and _raw_max_samples > FAST_TOKEN_CLASS_MAX_SAMPLES
                     )

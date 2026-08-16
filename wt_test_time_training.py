@@ -80,7 +80,11 @@ def resolve_mlm_head(model, tokenizer) -> MLMHeadRefs:
         )
     special_ids = list(getattr(tokenizer, "all_special_ids", []) or [])
 
-    if mtype == "AMPLIFY":
+    # Case-insensitive: config.model_type is not a reliable casing, which is why
+    # model_utils.detect_model_type falls back to a name match. An AMPLIFY
+    # checkpoint reporting lowercase would otherwise fall through to the generic
+    # branch and get a 0/1 attention mask instead of the additive one it needs.
+    if mtype.lower() == "amplify":
         if not (hasattr(model, "transformer_encoder") and hasattr(model, "decoder")):
             raise ValueError(
                 "AMPLIFY model is missing transformer_encoder/decoder; cannot run TTT."
@@ -171,9 +175,54 @@ def resolve_mlm_head(model, tokenizer) -> MLMHeadRefs:
             special_ids=special_ids,
         )
 
+    # Generic HF ``*ForMaskedLM``: forward returns .logits [B, T, vocab] and the
+    # head is a plain lm_head. Covers stock ESM2/ESM-1b and any other HF MaskedLM
+    # export, so a new architecture does not need its own branch. Zero-shot
+    # scoring works here; TTT is unvalidated for arbitrary architectures, so
+    # `encoder_blocks` is best-effort and may be empty.
+    #
+    # The gate demands POSITIVE evidence of a MASKED LM, never just "has a head".
+    # A causal LM also owns an `lm_head` and returns `.logits`, but its logits at
+    # position t are the distribution for token t+1 -- accepting one produces a
+    # silently one-residue-shifted contact map and mis-positioned variant scores,
+    # with no error raised anywhere.
+    architectures = getattr(getattr(model, "config", None), "architectures", None) or []
+    is_masked_lm = type(model).__name__.endswith("ForMaskedLM") or any(
+        str(a).endswith("ForMaskedLM") for a in architectures
+    )
+    head = (
+        getattr(model, "lm_head", None)
+        or getattr(model, "cls", None)
+        or getattr(model, "decoder", None)
+    )
+    if is_masked_lm and head is not None:
+
+        def forward_logits(input_ids, attention_mask):
+            out = model(input_ids=input_ids, attention_mask=attention_mask)
+            logits = getattr(out, "logits", None)
+            if logits is None:
+                raise ValueError(
+                    f"model_type={mtype!r} exposes a head but its forward returned "
+                    f"no .logits ({type(out).__name__}); cannot score MLM."
+                )
+            return logits
+
+        base = getattr(model, "esm", None) or getattr(model, "bert", None) or model
+        encoder = getattr(base, "encoder", None)
+        blocks = getattr(encoder, "layer", None) or getattr(encoder, "layers", None)
+        return MLMHeadRefs(
+            forward_logits=forward_logits,
+            encoder_blocks=blocks if blocks is not None else nn.ModuleList(),
+            final_norm=getattr(encoder, "emb_layer_norm_after", None),
+            head_module=head,
+            mask_token_id=int(mask_id),
+            special_ids=special_ids,
+        )
+
     raise ValueError(
-        f"WT test-time training is not supported for model_type={mtype!r}. "
-        "Supported: AMPLIFY, proteva, ESMplusplus. Load a model exposing an MLM/decoder head."
+        f"No masked-LM head reachable for {type(model).__name__} "
+        f"(model_type={mtype!r}). Load the *ForMaskedLM or pretraining checkpoint "
+        "rather than an encoder-only AutoModel export."
     )
 
 

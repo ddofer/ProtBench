@@ -33,6 +33,7 @@ DISPLAY_TYPE = {
     "regression": "Regression",
     "retrieval": "Retrieval",
     "token_classification": "Residue-level token classification",
+    "contact_prediction": "Pairwise residue-residue contact prediction",
 }
 
 SAFE_RESULT_SOURCES = [

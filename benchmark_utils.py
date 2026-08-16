@@ -59,6 +59,10 @@ METRIC_PRIORITY = [
     "Recall@10",
     "Recall@1",
     "Recall@30",
+    # Contact prediction. Long-range precision-at-L/5 is the conventional
+    # headline; without it a contact row matches nothing here and --compare
+    # silently reports no metric for the task.
+    "P@L/5_long",
     "F1_Micro",
 ]
 
@@ -69,6 +73,8 @@ TASK_GROUP_COLORS = {
     "Multilabel": "#2ca02c",
     "Regression": "#d62728",
     "Retrieval": "#9467bd",
+    "Residue": "#8c564b",
+    "Contact": "#17becf",
     "Other": "#7f7f7f",
 }
 
@@ -360,6 +366,8 @@ def task_group_map(include_non_standard: bool = False) -> dict[str, str]:
         "multilabel": "Multilabel",
         "regression": "Regression",
         "retrieval": "Retrieval",
+        "token_classification": "Residue",
+        "contact_prediction": "Contact",
     }
     return {
         cfg.name: group_name_map.get(cfg.problem_type, "Other")

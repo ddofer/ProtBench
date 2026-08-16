@@ -17,9 +17,10 @@ difference reflects the model or the evaluation harness.
 
 **Results:** ProtBench is an open benchmark suite for evaluating protein
 representations under shared data handling, probe fitting, and metric reporting.
-The current registry contains 43 public tasks covering sequence-level
+The current registry contains 57 public tasks covering sequence-level
 classification and regression, multilabel function prediction, retrieval,
-residue-level labelling, and ProteinGym variant-effect prediction. It supports
+residue-level labelling, pairwise residue-residue contact prediction, and
+ProteinGym variant-effect prediction. It supports
 frozen probes, fine-tuning modes, ProteinGym zero-shot scoring, and non-neural
 k-mer, MMseqs2, and phmmer baselines. Results are written as explicit per-task
 CSV rows and can be collected into a long-format table for model comparison. A
@@ -93,9 +94,21 @@ prepared query and target splits as model probes [@steinegger2017mmseqs2;
 @eddy2011accelerated; @larralde2023pyhmmer]. These baselines are important for
 tasks where sequence similarity is already highly informative.
 
+Contact prediction is scored two ways from primary sequence alone. A supervised
+pairwise probe builds features from frozen per-residue embeddings of residues
+`i` and `j` and fits a logistic model, so it runs against any model the registry
+loads. A zero-shot categorical Jacobian substitutes all twenty amino acids at
+each position and measures the resulting shift in the model's output
+distribution elsewhere, yielding a coupling matrix without any training; it
+requires a masked-language-model head and so ships as a separate script. Both
+report precision over the top `L/k` ranked pairs within short, medium, and
+long-range sequence-separation bands, so the two are directly comparable.
+Structural coordinates build the labels only and are never model input, and no
+multiple-sequence alignment is used.
+
 ## 4 Benchmark Composition
 
-The registry currently spans 43 tasks: 12 binary, 5 multiclass, 3 multilabel, and 17 regression tasks, plus 1 retrieval and 5 residue-level token classification tasks. Thirty-five are standard probe tasks; 8 are ProteinGym evaluations. The generated task inventory in `paper/generated/task_inventory.tsv` records each task key, display name, metric, preset, and dataset identifier.
+The registry currently spans 57 tasks: 12 binary, 5 multiclass, 5 multilabel, and 17 regression tasks, plus 1 retrieval, 16 residue-level token classification tasks, and 1 pairwise contact-prediction task. Forty-nine are standard probe tasks; 8 are ProteinGym evaluations. The generated task inventory in `paper/generated/task_inventory.tsv` records each task key, display name, metric, preset, and dataset identifier.
 
 Dataset provenance is tracked separately from implementation details. Verified
 entries include NetSurfP-2.0 secondary structure and missing-coordinate disorder,

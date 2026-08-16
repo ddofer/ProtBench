@@ -111,36 +111,30 @@ def _last_hidden_state(outputs) -> "Any":
     raise RuntimeError(f"could not extract hidden states from {type(outputs)}")
 
 
-def extract_residue_embeddings(
+def iter_residue_embeddings(
     *,
     encoder,
     tokenizer,
     sequences: Sequence[str],
-    labels: Sequence[Sequence[int]],
     device: str = "cpu",
     batch_size: int = 8,
     max_length: int = 1024,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Run ``encoder`` once per protein, return stacked per-residue
-    embeddings + per-residue labels.
+):
+    """Yield one ``(L_i, H)`` per-residue embedding array per input sequence.
+
+    Protein boundaries are preserved, which pairwise tasks (contact prediction)
+    need and ``extract_residue_embeddings`` throws away when it concatenates.
 
     Padding and special-token positions are excluded via the union of
     ``attention_mask`` (= 0 on PAD) AND ``special_tokens_mask`` (= 1
     on CLS / SEP / PAD). Only positions where the mask is 1 AND the
-    special_tokens_mask is 0 are kept.
-
-    Per-protein truncation matches the tokenizer's ``max_length``; the
-    label list is sliced to the surviving non-special token count.
+    special_tokens_mask is 0 are kept. ``L_i`` is therefore the truncated
+    length when a sequence exceeds ``max_length``, not the raw length.
     """
     import torch
 
-    if len(sequences) != len(labels):
-        raise ValueError(
-            f"sequences ({len(sequences)}) and labels ({len(labels)}) length mismatch"
-        )
     if not sequences:
-        # 0-dim embedding column count is unknown at this point.
-        return np.zeros((0, 0), dtype="float32"), np.zeros((0,), dtype="int64")
+        return
 
     encoder.eval() if hasattr(encoder, "eval") else None
 
@@ -158,12 +152,8 @@ def extract_residue_embeddings(
         _amplify_param = next(encoder.parameters(), None)
         _amplify_dtype = _amplify_param.dtype if _amplify_param is not None else None
 
-    all_X: List[np.ndarray] = []
-    all_y: List[np.ndarray] = []
-
     for start in range(0, len(sequences), batch_size):
         chunk_seqs = list(sequences[start : start + batch_size])
-        chunk_labels = list(labels[start : start + batch_size])
         toks = tokenizer(
             chunk_seqs,
             return_tensors="pt",
@@ -215,17 +205,53 @@ def extract_residue_embeddings(
         hidden_np = hidden.detach().to("cpu").float().numpy()
         keep_np = keep.detach().to("cpu").numpy()
 
-        for i, lab_list in enumerate(chunk_labels):
-            n_keep = int(keep_np[i].sum())
-            if n_keep == 0:
-                continue
-            row_hidden = hidden_np[i][keep_np[i]]  # (n_keep, H)
-            # Truncate per-residue labels to match the surviving residue
-            # count (matters when sequences exceeded ``max_length``).
-            row_labels = np.asarray(lab_list[:n_keep], dtype="int64")
-            n = min(row_hidden.shape[0], row_labels.shape[0])
-            all_X.append(row_hidden[:n])
-            all_y.append(row_labels[:n])
+        for i in range(len(chunk_seqs)):
+            yield hidden_np[i][keep_np[i]].astype("float32")  # (n_keep, H)
+
+
+def extract_residue_embeddings(
+    *,
+    encoder,
+    tokenizer,
+    sequences: Sequence[str],
+    labels: Sequence[Sequence[int]],
+    device: str = "cpu",
+    batch_size: int = 8,
+    max_length: int = 1024,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Run ``encoder`` once per protein, return stacked per-residue
+    embeddings + per-residue labels.
+
+    Per-protein truncation matches the tokenizer's ``max_length``; the
+    label list is sliced to the surviving non-special token count.
+    """
+    if len(sequences) != len(labels):
+        raise ValueError(
+            f"sequences ({len(sequences)}) and labels ({len(labels)}) length mismatch"
+        )
+    if not sequences:
+        # 0-dim embedding column count is unknown at this point.
+        return np.zeros((0, 0), dtype="float32"), np.zeros((0,), dtype="int64")
+
+    all_X: List[np.ndarray] = []
+    all_y: List[np.ndarray] = []
+    per_protein = iter_residue_embeddings(
+        encoder=encoder,
+        tokenizer=tokenizer,
+        sequences=sequences,
+        device=device,
+        batch_size=batch_size,
+        max_length=max_length,
+    )
+    for row_hidden, lab_list in zip(per_protein, labels):
+        if row_hidden.shape[0] == 0:
+            continue
+        # Truncate per-residue labels to match the surviving residue count
+        # (matters when sequences exceeded ``max_length``).
+        row_labels = np.asarray(lab_list[: row_hidden.shape[0]], dtype="int64")
+        n = min(row_hidden.shape[0], row_labels.shape[0])
+        all_X.append(row_hidden[:n])
+        all_y.append(row_labels[:n])
 
     if not all_X:
         return np.zeros((0, 0), dtype="float32"), np.zeros((0,), dtype="int64")
@@ -237,6 +263,24 @@ def extract_residue_embeddings(
 # ---------------------------------------------------------------------------
 # Linear probe
 # ---------------------------------------------------------------------------
+
+
+def drop_ignored_residues(
+    X: np.ndarray, y: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Drop residues carrying ``IGNORE_LABEL`` from the embeddings AND labels.
+
+    Some datasets mark residues with no ground truth (SS8's unassigned termini).
+    They must be removed from both arrays together -- removing them earlier, at
+    decode time, would shorten the label list and shift every later label
+    against its residue embedding.
+    """
+    if y.size == 0:
+        return X, y
+    keep = y >= 0
+    if keep.all():
+        return X, y
+    return X[keep], y[keep]
 
 
 def fit_residue_linear_probe(
@@ -365,10 +409,25 @@ def evaluate_token_classification(
             cache.put(cache_key(model_hash, task, split), X, y)
         return X, y
 
-    X_tr, y_tr = _extract_or_load(train_sequences, train_labels, "train")
+    def _extract_scorable(seqs, labs, split: str) -> Tuple[np.ndarray, np.ndarray]:
+        # Drop AFTER the cache write so the cache stays a faithful record of the
+        # split and stays valid if the ignore rule ever changes.
+        X, y = _extract_or_load(seqs, labs, split)
+        X_kept, y_kept = drop_ignored_residues(X, y)
+        if y_kept.size != y.size:
+            logger.info(
+                "  %s/%s: %d of %d residues carry no ground truth; excluded",
+                task,
+                split,
+                y.size - y_kept.size,
+                y.size,
+            )
+        return X_kept, y_kept
+
+    X_tr, y_tr = _extract_scorable(train_sequences, train_labels, "train")
 
     if test_sequences is not None and test_labels is not None:
-        X_te, y_te = _extract_or_load(test_sequences, test_labels, "test")
+        X_te, y_te = _extract_scorable(test_sequences, test_labels, "test")
         probe = fit_residue_linear_probe(
             X_tr, y_tr, problem_type=cfg.problem_type or "multiclass"
         )

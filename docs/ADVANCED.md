@@ -62,8 +62,8 @@ only path that *also* re-scores indels via embedding cosine).
 
 Two on-demand HF-Trainer wrappers live alongside the linear-probe path:
 
-- `finetune_residue.py` — token classification (SS3, intrinsic disorder,
-  signal peptides). Modes: `probe` (frozen, default), `full`, `lora`, `last_n`.
+- `finetune_residue.py` — token classification (SS3, SS8, intrinsic disorder,
+  signal peptides, conservation). Modes: `probe` (frozen, default), `full`, `lora`, `last_n`.
 - `finetune_sequence.py` — sequence-level fine-tuning for any task in
   `TASKS` whose `problem_type` is `binary / multiclass / regression`.
   Modes: `probe` (default), `full`, `lora` (PEFT), `last_n`.
@@ -84,7 +84,7 @@ CUDA_VISIBLE_DEVICES=0 $PY finetune_residue.py \
     --task ss3 --mode probe --max_length 512 \
     --output_dir results/
 
-# All three residue tasks sequentially:
+# All residue tasks sequentially:
 CUDA_VISIBLE_DEVICES=0 $PY finetune_residue.py \
     --model_name chandar-lab/AMPLIFY_120M --task all
 

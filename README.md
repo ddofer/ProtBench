@@ -1,7 +1,7 @@
 # ProtBench
 
 Benchmark protein models — language models, alignment search, or a k-mer count —
-on 43 tasks, scored identically and written to one CSV.
+on 57 tasks, scored identically and written to one CSV.
 
 The point is comparability. A protein language model, a LoRA fine-tune, an
 MMseqs2 search and a bag of amino-acid triplets all go through the same splits, the
@@ -86,9 +86,9 @@ Python environment without installing the full benchmark stack.
 python protein_benchmark_suite.py --list_tasks
 ```
 
-Prints all 43 with their type, metric, and which preset includes them.
+Prints all 57 with their type, metric, and which preset includes them.
 
-**Run the broad set.** `--no-fast` gives you 32 tasks:
+**Run the broad set.** `--no-fast` gives you 34 tasks:
 
 ```bash
 python protein_benchmark_suite.py -m facebook/esm2_t33_650M_UR50D \
@@ -101,12 +101,26 @@ The presets are not nested, which surprises people:
 | --- | --- | --- |
 | `--very-fast` | 8 | Curated scout subset. |
 | `--fast` *(default)* | 18 | Includes `scope40_retrieval`. |
-| `--no-fast` | 32 | The broad set — but **not** a superset of `--fast`. Drops `scope40_retrieval`. |
+| `--no-fast` | 34 | The broad set — but **not** a superset of `--fast`. Drops `scope40_retrieval`. |
 | `--proteingym` | +8 | Large and slow, so opt-in. |
 
-`cafa5` and `go_mf` are in **no** preset — they have thousands of labels and
-would dominate a sweep. Request them by name with `--tasks`. So is
+`cafa5`, `go_mf`, `go_bp` and `go_cc` are in **no** preset — they have thousands
+of labels and would dominate a sweep. Request them by name with `--tasks`. So is
 `scope40_retrieval` if you want it alongside `--no-fast`.
+
+The ten held-out secondary-structure sets (`ss3_casp12` … `ss8_ts115`) are also
+opt-in. They train on the same data as `ss3`/`ss8` and differ only in which
+standard test set they score against, so they answer "how does this compare to
+the published CASP/CB513 numbers", not "is this model good".
+
+**They require `--eval_split test`** — they have no validation split, so the
+default `validation` cross-validates on the shared training file instead, and
+all five `ss8_*` tasks then report the same number. The run warns when this
+happens, and the CSV records it as `EvalStrategy=validation_cv4_train`.
+
+```bash
+python protein_benchmark_suite.py -m <model> --tasks ss8_cb513 --eval_split test
+```
 
 **Run the fast subset on two models.** The suite takes one model at a time; loop
 in the shell. Point both at the same `--output_dir` so the results land together:
@@ -178,7 +192,7 @@ No refitting, so it costs seconds.
 
 These are the ones that produce a wrong number rather than an error.
 
-**`--fast` is on by default.** A bare run does 18 tasks, not all 43. See the
+**`--fast` is on by default.** A bare run does 18 tasks, not all 57. See the
 preset table above — the presets are not nested.
 
 **Result CSVs accumulate.** Re-running into the same `--output_dir` merges into
@@ -232,6 +246,7 @@ metrics, and which appear depends on the task type:
 | regression | Spearman, Pearson, MSE, MAE, R2 |
 | retrieval | Recall@1, Recall@10, Recall@30 |
 | token_classification | Accuracy, MCC, F1 (per residue, not per protein) |
+| contact_prediction | P@L, P@L/2, P@L/5 × short / medium / long range |
 
 The less obvious ones:
 
@@ -242,6 +257,18 @@ The less obvious ones:
 - **MCC** is the Matthews correlation coefficient, a correlation between
   prediction and truth on a −1..1 scale. 0 is chance.
 - **BalancedAccuracy** is the mean per-class recall.
+- **P@L/k** is contact-prediction precision: rank every residue pair, take the
+  top `L/k` (where `L` is the sequence length), and report the fraction that are
+  real contacts. `_short` / `_medium` / `_long` restrict to pairs `6-11`,
+  `12-23` and `24+` apart in sequence. Long-range is the hard one and the
+  conventional headline. Chance is the contact rate itself — **0.028** on this
+  test split, so read `P@L/5_long` against that, not against 0.5.
+
+Residues with no ground truth are excluded from residue-level scoring rather
+than treated as a class of their own — `ss8`'s source marks 11.5% of its test
+residues "unassigned", almost all at chain termini, and scoring those would
+inflate accuracy with a position-predictable pseudo-class. The run log names the
+count it dropped.
 
 Prefer **MCC** and **BalancedAccuracy** on imbalanced tasks. Several tasks here
 are 90/10 or worse, where always predicting the majority class scores 0.90
@@ -263,6 +290,48 @@ A representation claim needs a floor to clear. Three are built in:
 The alignment baselines call the same `prepare_data` the model side uses, so
 they see byte-identical inputs — the comparison is not confounded by
 preprocessing.
+
+## Contact prediction
+
+Contact prediction asks whether a representation encodes tertiary structure: for
+every pair of residues, are they within 8 Å in the folded protein? Labels come
+from CB coordinates in the TAPE ProteinNet set, but the model only ever sees the
+primary sequence — no MSA, no `.a3m` file, no structure input.
+
+There are two paths, and they answer different questions:
+
+| | `contact_probe` | `contact_catjac` |
+| --- | --- | --- |
+| Method | Supervised pairwise linear probe on frozen per-residue embeddings | Categorical Jacobian, zero-shot |
+| Runs on | Any model the registry loads | Models with a reachable MLM head |
+| Asks | Is contact information linearly readable from the embeddings? | Has the model learned the coupling directly? |
+
+```bash
+# probe: a task in the suite, one row in bench_<model>.csv like anything else
+python protein_benchmark_suite.py -m <model> --tasks contact_probe --eval_split test
+
+# categorical Jacobian: separate script, because it needs the MLM head
+python contact_catjac.py -m <model>
+```
+
+The Jacobian mutates each position to all 20 amino acids and measures how the
+model's predictions shift everywhere else — a model that learned a coupling
+between two residues changes its mind at one when the other changes. That costs
+`L × 20` forward passes per protein, so `--max_len` (default 512) skips longer
+ones and **logs which**, and `--max_proteins` caps the count. Both paths write
+the same metric columns, so the numbers sit side by side.
+
+Measured here on all 40 test proteins with ESM2-650M: the Jacobian reaches
+`P@L/5_long` = 0.454, the frozen probe 0.135, against a 0.028 chance floor. The
+Jacobian figure matches the ~0.45 published for ESM2-650M attention contact
+heads, without a trained head — a linear probe on pooled pair features cannot
+express coupling the way the Jacobian measures it directly. Read the per-protein
+spread too (median 0.488, range 0.00–0.90): free-modeling CASP targets score near
+zero while template-based ones exceed 0.8, so a single mean hides most of it.
+
+`contact_probe` trains on `--contact_train_proteins` proteins (default 400) out
+of the 25k available; the full split does not fit in memory once each protein
+expands into O(L²) pairs.
 
 ## The CATH midnight-zone task
 

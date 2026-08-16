@@ -32,6 +32,9 @@ class TaskConfig:
     main_metric: str
     dataset_config: Optional[str] = None
     data_dir: Optional[str] = None  # For datasets that use data_dir (e.g., ProteinGym)
+    data_files: Optional[Dict[str, str]] = (
+        None  # split -> file, for hub repos with no split config (raw CSV repos)
+    )
     train_split: str = "train"
     test_split: str = "test"
     validation_split: Optional[str] = None
@@ -65,6 +68,7 @@ class TaskConfig:
             "regression",
             "retrieval",
             "token_classification",
+            "contact_prediction",
         }
         if self.problem_type not in valid_types:
             raise ValueError(f"problem_type must be one of {valid_types}")
@@ -191,6 +195,39 @@ def _proteingym_tasks(eval_mode: str) -> Dict[str, TaskConfig]:
             eval_mode=f"proteingym_{eval_mode}",
             bin_col=bin_col,
         )
+    return tasks
+
+
+# Standard held-out secondary-structure evaluation sets (ProtTrans / NetSurfP-2.0
+# distribution). Every one trains on the same `training_hhblits.csv` and differs
+# only in the test CSV, so they are generated rather than written out ten times.
+_SS_HELDOUT_SETS = {
+    "casp12": "CASP12.csv",
+    "casp13": "CASP13.csv",
+    "casp14": "CASP14.csv",
+    "cb513": "CB513.csv",
+    "ts115": "TS115.csv",
+}
+_SS_HELDOUT_LABELS = {"ss3": "dssp3", "ss8": "dssp8"}
+_SS_HELDOUT_DATASET = "proteinea/secondary_structure_prediction"
+_SS_HELDOUT_TRAIN_FILE = "training_hhblits.csv"
+
+
+def _ss_heldout_tasks() -> Dict[str, TaskConfig]:
+    """Generate `ss3_casp12` ... `ss8_ts115` (2 label columns x 5 test sets)."""
+    tasks = {}
+    for states, label_col in _SS_HELDOUT_LABELS.items():
+        for set_key, filename in _SS_HELDOUT_SETS.items():
+            tasks[f"{states}_{set_key}"] = TaskConfig(
+                name=f"Secondary Structure {states[-1]} ({set_key.upper()})",
+                dataset=_SS_HELDOUT_DATASET,
+                data_files={"train": _SS_HELDOUT_TRAIN_FILE, "test": filename},
+                input_map={"seq": "input"},
+                label_col=label_col,
+                problem_type="token_classification",
+                main_metric="F1_Macro",
+                test_split="test",
+            )
     return tasks
 
 
@@ -340,6 +377,27 @@ TASKS: Dict[str, TaskConfig] = {
         main_metric="F1_Macro",
         validation_split="validation",
         # top_k_labels=300,
+    ),
+    # GO Biological Process / Cellular Component. Same DeepFRI-derived splits and
+    # column layout as go_mf above; excluded from the presets for the same reason
+    # (thousands of labels each would dominate a sweep). Request by name.
+    "go_bp": TaskConfig(
+        name="Biological Process (GO)",
+        dataset="AI4Protein/GO_BP",
+        input_map={"seq": "aa_seq"},
+        label_col="label",
+        problem_type="multilabel",
+        main_metric="F1_Macro",
+        validation_split="validation",
+    ),
+    "go_cc": TaskConfig(
+        name="Cellular Component (GO)",
+        dataset="AI4Protein/GO_CC",
+        input_map={"seq": "aa_seq"},
+        label_col="label",
+        problem_type="multilabel",
+        main_metric="F1_Macro",
+        validation_split="validation",
     ),
     "cafa5": TaskConfig(
         name="CAFA5 (Protein Function)",
@@ -565,6 +623,18 @@ TASKS: Dict[str, TaskConfig] = {
         validation_split="validation",
         test_split="test",
     ),
+    # Full 8-state DSSP. Labels use a 9-symbol alphabet (the 8 DSSP states plus
+    # `D` for unassigned termini); see `_SS8_ALPHABET` in protein_benchmark_suite.
+    "ss8": TaskConfig(
+        name="Secondary Structure 8 (DSSP8)",
+        dataset="GleghornLab/SS8",
+        input_map={"seq": "seqs"},
+        label_col="labels",
+        problem_type="token_classification",
+        main_metric="F1_Macro",
+        validation_split="valid",
+        test_split="test",
+    ),
     "disorder": TaskConfig(
         name="Disorder (NetSurfP-SS3 mask)",
         dataset="agemagician/NetSurfP-SS3",
@@ -602,6 +672,28 @@ TASKS: Dict[str, TaskConfig] = {
         test_split="test",
     ),
     # =========================================================================
+    # Contact prediction (pairwise residue-residue)
+    # =========================================================================
+    # TAPE ProteinNet, converted from the original LMDB to parquet. `tertiary`
+    # holds CB coordinates in Angstrom and `valid_mask` flags resolved residues;
+    # contacts are CB-CB < 8A. The coordinates build the LABELS only -- the model
+    # sees the primary sequence and nothing else, so this runs against any model
+    # in the registry, with no MSA and no structure input.
+    "contact_probe": TaskConfig(
+        name="Contact Prediction (TAPE ProteinNet)",
+        dataset="heya5/protein_contact_map",
+        input_map={"seq": "seq"},
+        label_col="tertiary",
+        problem_type="contact_prediction",
+        main_metric="P@L/5_long",
+        validation_split="valid",
+        test_split="test",
+    ),
+    # =========================================================================
+    # Secondary structure on the standard held-out sets (opt-in by name)
+    # =========================================================================
+    **_ss_heldout_tasks(),
+    # =========================================================================
     # ProteinGym — Zero-Shot (cosine similarity WT vs mutant, per-assay Spearman/AUC)
     # =========================================================================
     **_proteingym_tasks("zeroshot"),
@@ -623,12 +715,21 @@ RETRIEVAL_TASKS = sorted(
 # labels each); request them explicitly with --tasks.
 # (results are kept in TASKS for historical compatibility, but these are
 # not counted in model comparisons and not run by default).
-MULTILABEL_EXCLUDED_TASKS = frozenset({"go_mf", "cafa5"})
+MULTILABEL_EXCLUDED_TASKS = frozenset({"go_mf", "go_bp", "go_cc", "cafa5"})
+
+# Held-out secondary-structure evaluation sets. Ten near-duplicates of `ss3` /
+# `ss8` differing only in the test set, so they would bloat a default sweep
+# without adding a new signal. Opt-in by name, e.g. `--tasks ss8_cb513`.
+SS_HELDOUT_TASKS = sorted(_ss_heldout_tasks())
 
 # Default tasks for --no-fast: all standard probe tasks, excluding ProteinGym,
-# opt-in retrieval tasks, and multilabel-excluded tasks.
+# opt-in retrieval tasks, multilabel-excluded tasks, and the held-out SS sets.
 DEFAULT_TASKS = [
     k
     for k in TASKS
-    if k not in set(PROTEINGYM_TASKS) | set(RETRIEVAL_TASKS) | MULTILABEL_EXCLUDED_TASKS
+    if k
+    not in set(PROTEINGYM_TASKS)
+    | set(RETRIEVAL_TASKS)
+    | MULTILABEL_EXCLUDED_TASKS
+    | set(SS_HELDOUT_TASKS)
 ]
