@@ -25,8 +25,7 @@ k-mer, MMseqs2, and phmmer baselines. Results are written as explicit per-task
 CSV rows and can be collected into a long-format table for model comparison. A
 shared evaluation slice exposes divergent effects of training objectives: while
 scale (ESM-2 150M) and sentence-level contrastive learning (ProtSent) improve
-homology matching, contrastive training severely degrades local fitness tasks,
-whereas joint-embedding prediction (ProtJepa) improves structural regression.
+homology matching, contrastive training severely degrades local fitness tasks.
 
 **Availability and implementation:** ProtBench is implemented in Python with
 Hugging Face integrations and optional specialty tools. Source code, task
@@ -116,19 +115,19 @@ in the software but flagged in the supplement and dataset documentation.
 
 ## 5 Biological Insights from Training Objectives
 
-A unified harness reveals how different training interventions structurally alter model representations. Table 1 compares a vanilla ESM-2 baseline against parameter scaling (ESM-2 150M), contrastive sentence-transformer tuning (ProtSent-V2) [@protsent2026], and joint-embedding predictive architecture co-training (ProtJepa: MLM+JEPA) [@proteinjepa2026]. All rows use the identical frozen linear-probe test split.
+A unified harness reveals how different training interventions structurally alter model representations. Table 1 compares a vanilla ESM-2 baseline against parameter scaling (ESM-2 150M) and contrastive sentence-transformer tuning (ProtSent-V2) [@protsent2026]. All rows use the identical frozen linear-probe test split.
 
-**Table 1. Biological insights across model scales and training objectives.** Higher is better. Vanilla runs and ProtJepa originate from the ProteinJEPA benchmark suite; ProtSent is from the ProtSent suite.
+**Table 1. Biological insights across model scales and training objectives.** Higher is better. Vanilla runs originate from the ProteinJEPA benchmark suite; ProtSent is from the ProtSent suite.
 
-| Task | Metric | Vanilla 35M | Vanilla 150M | ProtSent 35M | ProtJepa 35M |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Remote homology | Accuracy | 0.647 | 0.688 | 0.702 | 0.663 |
-| Solubility | AUC | 0.697 | 0.721 | 0.698 | 0.698 |
-| beta-lactamase | Spearman | 0.733 | 0.811 | 0.609 | 0.738 |
-| Variant effect | Spearman | 0.844 | 0.843 | 0.813 | 0.847 |
-| Stability | Spearman | 0.437 | 0.704 | 0.388 | 0.502 |
+| Task | Metric | Vanilla 35M | Vanilla 150M | ProtSent 35M |
+| --- | --- | ---: | ---: | ---: |
+| Remote homology | Accuracy | 0.647 | 0.688 | 0.702 |
+| Solubility | AUC | 0.697 | 0.721 | 0.698 |
+| beta-lactamase | Spearman | 0.733 | 0.811 | 0.609 |
+| Variant effect | Spearman | 0.844 | 0.843 | 0.813 |
+| Stability | Spearman | 0.437 | 0.704 | 0.388 |
 
-The results show performance does not move in a single direction. Contrastive learning (ProtSent) improves global structure retrieval (homology) but severely collapses local mutational fitness (beta-lactamase, stability, variant effect). Conversely, augmenting standard MLM with a JEPA objective provides massive gains on structural regression tasks (stability) without parameter scaling. Relying on isolated literature metrics across different preprocessing pipelines would obscure these divergent trade-offs.
+The results show performance does not move in a single direction. First, parameter scaling (Vanilla 35M to 150M) provides massive gains on structural regression tasks (e.g., Stability jumps from 0.437 to 0.704), while local mutational fitness capabilities often saturate early (Variant effect stays flat at ~0.84)—a dynamic previously observed in models like ProteinBERT [@brandes2022proteinbert]. Second, contrastive learning (ProtSent) improves global structure retrieval (homology) but severely collapses local mutational fitness (beta-lactamase, stability, variant effect). Relying on isolated literature metrics across different preprocessing pipelines would obscure these divergent trade-offs.
 
 The CATH v4.3 superfamily transfer task exemplifies ProtBench's task-design
 approach. Its queries have no detectable sequence-alignment relative in the
