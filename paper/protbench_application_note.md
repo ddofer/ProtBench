@@ -4,7 +4,7 @@ Author: Dan Ofer
 
 Affiliation: The Hebrew University of Jerusalem
 
-Contact: Dan Ofer
+Correspondence: Dan Ofer
 
 Repository: <https://github.com/ddofer/ProtBench>
 
