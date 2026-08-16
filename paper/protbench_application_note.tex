@@ -101,8 +101,8 @@
 
 \begin{document}
 
-\section{ProtBench: a unified benchmark suite for protein representation
-evaluation}\label{protbench-a-unified-benchmark-suite-for-protein-representation-evaluation}
+\section{ProtEval: a unified benchmark suite for protein representation
+evaluation}\label{proteval-a-unified-benchmark-suite-for-protein-representation-evaluation}
 
 Author: Dan Ofer
 
@@ -120,7 +120,7 @@ subsets, metrics, and probe implementations. This makes it difficult to
 decide whether an observed difference reflects the model or the
 evaluation harness.
 
-\textbf{Results:} ProtBench is an open benchmark suite for evaluating
+\textbf{Results:} ProtEval is an open benchmark suite for evaluating
 protein representations under shared data handling, probe fitting, and
 metric reporting. The current registry contains 57 public tasks covering
 sequence-level classification and regression, multilabel function
@@ -135,7 +135,7 @@ scale (ESM-2 150M) and sentence-level contrastive learning (ProtSent)
 improve homology matching, contrastive training severely degrades local
 fitness tasks.
 
-\textbf{Availability and implementation:} ProtBench is implemented in
+\textbf{Availability and implementation:} ProtEval is implemented in
 Python with Hugging Face integrations and optional specialty tools.
 Source code, task definitions, and dataset provenance notes are
 available at \url{https://github.com/ddofer/ProtBench}.
@@ -151,7 +151,7 @@ pooling strategies, probe implementations, and whether sequence
 alignment baselines are included. These differences are enough to
 obscure small or task-specific gains.
 
-ProtBench addresses this evaluation problem rather than proposing a new
+ProtEval addresses this evaluation problem rather than proposing a new
 model. It provides a single task registry and command-line harness for
 running many protein model families through the same splits, embedding
 path, probes, and metrics. The default use case is frozen-probe
@@ -175,7 +175,7 @@ came from rather than to a rehost.
 
 \subsection{3 System and Methods}\label{system-and-methods}
 
-ProtBench is organized around a \texttt{TaskConfig} registry in
+ProtEval is organized around a \texttt{TaskConfig} registry in
 \texttt{benchmark\_tasks.py}. Each task records the dataset source,
 sequence and label columns, problem type, split handling, and primary
 metric. The main benchmark runner loads a model, embeds the relevant
@@ -282,10 +282,10 @@ previously observed in models like ProteinBERT
 collapses local mutational fitness (beta-lactamase, stability, variant
 effect).
 
-The CATH v4.3 superfamily transfer task exemplifies ProtBench's
+The CATH v4.3 superfamily transfer task exemplifies ProtEval's
 task-design approach. Its queries have no detectable sequence-alignment
 relative in the lookup set, making it a stress test for whether
-embeddings preserve fold relationships beyond sequence search. ProtBench
+embeddings preserve fold relationships beyond sequence search. ProtEval
 exposes this task through the standard k-NN annotation-transfer
 interface. The scorer (\texttt{cath\_levels.py}) and optional
 Tucker-head training reproduction
@@ -294,7 +294,7 @@ validation modes.
 
 \subsection{6 Reproducibility and Use}\label{reproducibility-and-use}
 
-ProtBench is designed to be run from a fresh clone with public data.
+ProtEval is designed to be run from a fresh clone with public data.
 Most tasks download through \texttt{datasets.load\_dataset}; local tasks
 such as DisProt, conservation labels, and FLIP2 subtasks are built with
 scripts in \texttt{scripts/}. The command below runs one model on a
@@ -330,7 +330,7 @@ isolate learned effects.
 
 \subsection{8 Conclusion}\label{conclusion}
 
-ProtBench is an evaluation layer, not a modelling claim: one task
+ProtEval is an evaluation layer, not a modelling claim: one task
 registry, shared probes and metrics, alignment and composition baselines,
 and per-task provenance, so protein model comparisons can be reproduced
 and audited.
