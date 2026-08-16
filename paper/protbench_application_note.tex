@@ -1,0 +1,346 @@
+% Options for packages loaded elsewhere
+\PassOptionsToPackage{unicode}{hyperref}
+\PassOptionsToPackage{hyphens}{url}
+\documentclass[
+]{article}
+\usepackage{xcolor}
+\usepackage{amsmath,amssymb}
+\setcounter{secnumdepth}{-\maxdimen} % remove section numbering
+\usepackage{iftex}
+\ifPDFTeX
+  \usepackage[T1]{fontenc}
+  \usepackage[utf8]{inputenc}
+  \usepackage{textcomp} % provide euro and other symbols
+\else % if luatex or xetex
+  \usepackage{unicode-math} % this also loads fontspec
+  \defaultfontfeatures{Scale=MatchLowercase}
+  \defaultfontfeatures[\rmfamily]{Ligatures=TeX,Scale=1}
+\fi
+\usepackage{lmodern}
+\ifPDFTeX\else
+  % xetex/luatex font selection
+\fi
+% Use upquote if available, for straight quotes in verbatim environments
+\IfFileExists{upquote.sty}{\usepackage{upquote}}{}
+\IfFileExists{microtype.sty}{% use microtype if available
+  \usepackage[]{microtype}
+  \UseMicrotypeSet[protrusion]{basicmath} % disable protrusion for tt fonts
+}{}
+\makeatletter
+\@ifundefined{KOMAClassName}{% if non-KOMA class
+  \IfFileExists{parskip.sty}{%
+    \usepackage{parskip}
+  }{% else
+    \setlength{\parindent}{0pt}
+    \setlength{\parskip}{6pt plus 2pt minus 1pt}}
+}{% if KOMA class
+  \KOMAoptions{parskip=half}}
+\makeatother
+\usepackage{color}
+\usepackage{fancyvrb}
+\newcommand{\VerbBar}{|}
+\newcommand{\VERB}{\Verb[commandchars=\\\{\}]}
+\DefineVerbatimEnvironment{Highlighting}{Verbatim}{commandchars=\\\{\}}
+% Add ',fontsize=\small' for more characters per line
+\newenvironment{Shaded}{}{}
+\newcommand{\AlertTok}[1]{\textcolor[rgb]{1.00,0.00,0.00}{\textbf{#1}}}
+\newcommand{\AnnotationTok}[1]{\textcolor[rgb]{0.38,0.63,0.69}{\textbf{\textit{#1}}}}
+\newcommand{\AttributeTok}[1]{\textcolor[rgb]{0.49,0.56,0.16}{#1}}
+\newcommand{\BaseNTok}[1]{\textcolor[rgb]{0.25,0.63,0.44}{#1}}
+\newcommand{\BuiltInTok}[1]{\textcolor[rgb]{0.00,0.50,0.00}{#1}}
+\newcommand{\CharTok}[1]{\textcolor[rgb]{0.25,0.44,0.63}{#1}}
+\newcommand{\CommentTok}[1]{\textcolor[rgb]{0.38,0.63,0.69}{\textit{#1}}}
+\newcommand{\CommentVarTok}[1]{\textcolor[rgb]{0.38,0.63,0.69}{\textbf{\textit{#1}}}}
+\newcommand{\ConstantTok}[1]{\textcolor[rgb]{0.53,0.00,0.00}{#1}}
+\newcommand{\ControlFlowTok}[1]{\textcolor[rgb]{0.00,0.44,0.13}{\textbf{#1}}}
+\newcommand{\DataTypeTok}[1]{\textcolor[rgb]{0.56,0.13,0.00}{#1}}
+\newcommand{\DecValTok}[1]{\textcolor[rgb]{0.25,0.63,0.44}{#1}}
+\newcommand{\DocumentationTok}[1]{\textcolor[rgb]{0.73,0.13,0.13}{\textit{#1}}}
+\newcommand{\ErrorTok}[1]{\textcolor[rgb]{1.00,0.00,0.00}{\textbf{#1}}}
+\newcommand{\ExtensionTok}[1]{#1}
+\newcommand{\FloatTok}[1]{\textcolor[rgb]{0.25,0.63,0.44}{#1}}
+\newcommand{\FunctionTok}[1]{\textcolor[rgb]{0.02,0.16,0.49}{#1}}
+\newcommand{\ImportTok}[1]{\textcolor[rgb]{0.00,0.50,0.00}{\textbf{#1}}}
+\newcommand{\InformationTok}[1]{\textcolor[rgb]{0.38,0.63,0.69}{\textbf{\textit{#1}}}}
+\newcommand{\KeywordTok}[1]{\textcolor[rgb]{0.00,0.44,0.13}{\textbf{#1}}}
+\newcommand{\NormalTok}[1]{#1}
+\newcommand{\OperatorTok}[1]{\textcolor[rgb]{0.40,0.40,0.40}{#1}}
+\newcommand{\OtherTok}[1]{\textcolor[rgb]{0.00,0.44,0.13}{#1}}
+\newcommand{\PreprocessorTok}[1]{\textcolor[rgb]{0.74,0.48,0.00}{#1}}
+\newcommand{\RegionMarkerTok}[1]{#1}
+\newcommand{\SpecialCharTok}[1]{\textcolor[rgb]{0.25,0.44,0.63}{#1}}
+\newcommand{\SpecialStringTok}[1]{\textcolor[rgb]{0.73,0.40,0.53}{#1}}
+\newcommand{\StringTok}[1]{\textcolor[rgb]{0.25,0.44,0.63}{#1}}
+\newcommand{\VariableTok}[1]{\textcolor[rgb]{0.10,0.09,0.49}{#1}}
+\newcommand{\VerbatimStringTok}[1]{\textcolor[rgb]{0.25,0.44,0.63}{#1}}
+\newcommand{\WarningTok}[1]{\textcolor[rgb]{0.38,0.63,0.69}{\textbf{\textit{#1}}}}
+\usepackage{longtable,booktabs,array}
+\newcounter{none} % for unnumbered tables
+\usepackage{calc} % for calculating minipage widths
+% Correct order of tables after \paragraph or \subparagraph
+\usepackage{etoolbox}
+\makeatletter
+\patchcmd\longtable{\par}{\if@noskipsec\mbox{}\fi\par}{}{}
+\makeatother
+% Allow footnotes in longtable head/foot
+\IfFileExists{footnotehyper.sty}{\usepackage{footnotehyper}}{\usepackage{footnote}}
+\makesavenoteenv{longtable}
+\setlength{\emergencystretch}{3em} % prevent overfull lines
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\usepackage[]{biblatex}
+\usepackage{bookmark}
+\IfFileExists{xurl.sty}{\usepackage{xurl}}{} % add URL line breaks if available
+\urlstyle{same}
+\hypersetup{
+  hidelinks,
+  pdfcreator={LaTeX via pandoc}}
+
+\author{}
+\date{}
+
+\begin{document}
+
+\section{ProtBench: a unified benchmark suite for protein representation
+evaluation}\label{protbench-a-unified-benchmark-suite-for-protein-representation-evaluation}
+
+Author: Dan Ofer
+
+Affiliation: The Hebrew University of Jerusalem
+
+Correspondence: Dan Ofer
+
+Repository: \url{https://github.com/ddofer/ProtBench}
+
+\subsection{Abstract}\label{abstract}
+
+\textbf{Motivation:} Protein language models and sequence-based protein
+predictors are often evaluated with different train/test splits, task
+subsets, metrics, and probe implementations. This makes it difficult to
+decide whether an observed difference reflects the model or the
+evaluation harness.
+
+\textbf{Results:} ProtBench is an open benchmark suite for evaluating
+protein representations under shared data handling, probe fitting, and
+metric reporting. The current registry contains 43 public tasks covering
+sequence-level classification and regression, multilabel function
+prediction, retrieval, residue-level labelling, and ProteinGym
+variant-effect prediction. It supports frozen probes, fine-tuning modes,
+ProteinGym zero-shot scoring, and non-neural k-mer, MMseqs2, and phmmer
+baselines. Results are written as explicit per-task CSV rows and can be
+collected into a long-format table for model comparison. A shared
+evaluation slice exposes divergent effects of training objectives: while
+scale (ESM-2 150M) and sentence-level contrastive learning (ProtSent)
+improve homology matching, contrastive training severely degrades local
+fitness tasks.
+
+\textbf{Availability and implementation:} ProtBench is implemented in
+Python with Hugging Face integrations and optional specialty tools.
+Source code, task definitions, and dataset provenance notes are
+available at \url{https://github.com/ddofer/ProtBench}.
+
+\subsection{1 Introduction}\label{introduction}
+
+Protein language models such as ESM and ProtTrans models are now common
+starting points for protein sequence analysis
+\autocite{rives2021biological,lin2023evolutionary,elnaggar2021prottrans}.
+New models are usually reported on a subset of downstream tasks, but the
+evaluation details vary: papers differ in splits, metric choices,
+pooling strategies, probe implementations, and whether sequence
+alignment baselines are included. These differences are enough to
+obscure small or task-specific gains.
+
+ProtBench addresses this evaluation problem rather than proposing a new
+model. It provides a single task registry and command-line harness for
+running many protein model families through the same splits, embedding
+path, probes, and metrics. The default use case is frozen-probe
+evaluation: a model is used once to embed each protein, then a small
+supervised probe is trained on those embeddings. This measures
+information that is accessible in the pretrained representation, and it
+is cheap enough to run early during model development. More expensive
+fine-tuning and zero-shot variant-effect modes are available when the
+scientific question requires them.
+
+\subsection{2 Design Principles}\label{design-principles}
+
+ProtBench enforces four principles for reproducible protein model
+evaluation.
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  \textbf{Evaluation contracts are explicit.} Task, split, metric,
+  probe, seed, and result row are fixed and reused across models.
+\item
+  \textbf{Frozen probes measure accessible information.} They test what
+  is already present in the representation, independent of task-specific
+  adaptation. Fine-tuning and zero-shot modes answer related questions.
+\item
+  \textbf{Baselines clarify the contribution.} k-mer, MMseqs2, and
+  phmmer separate composition, homology, and learned effects.
+\item
+  \textbf{Provenance is auditable.} Sources are verified, mapped, or
+  flagged; results can be traced back to original benchmarks.
+\end{enumerate}
+
+\subsection{3 System and Methods}\label{system-and-methods}
+
+ProtBench is organized around a \texttt{TaskConfig} registry in
+\texttt{benchmark\_tasks.py}. Each task records the dataset source,
+sequence and label columns, problem type, split handling, and primary
+metric. The main benchmark runner loads a model, embeds the relevant
+sequences, fits the selected probe, evaluates on a declared split, and
+writes one CSV row per task, split, seed, and probe. The same registry
+is reused by comparison, result-collection, fine-tuning, residue-probe,
+and alignment-baseline scripts.
+
+Linear probes measure accessible information independent of task
+adaptation. k-nearest neighbour probes test whether embedding distance
+preserves local structure, which is useful for retrieval and annotation
+transfer. Gradient-boosted trees test non-linear separability.
+Sequence-level fine-tuning supports frozen probes, full fine-tuning,
+last-layer updates, and LoRA adapters \autocite{hu2021lora}.
+Residue-level tasks use token embeddings and per-residue metrics.
+ProteinGym zero-shot tasks use masked-marginal scoring for substitutions
+and pseudo-log-likelihood differences for indels, with the clinical sign
+convention chosen so higher scores correspond to the positive/pathogenic
+class \autocite{notin2023proteingym}.
+
+Three non-neural baselines are included. k-mer frequencies provide a
+composition floor. MMseqs2 and phmmer provide alignment-based baselines
+using the same prepared query and target splits as model probes
+\autocite{steinegger2017mmseqs2,eddy2011accelerated,larralde2023pyhmmer}.
+These baselines are important for tasks where sequence similarity is
+already highly informative.
+
+\subsection{4 Benchmark Composition}\label{benchmark-composition}
+
+The registry currently spans 43 tasks: 12 binary, 5 multiclass, 3
+multilabel, and 17 regression tasks, plus 1 retrieval and 5
+residue-level token classification tasks. Thirty-five are standard probe
+tasks; 8 are ProteinGym evaluations. The generated task inventory in
+\texttt{paper/generated/task\_inventory.tsv} records each task key,
+display name, metric, preset, and dataset identifier.
+
+Dataset provenance is tracked separately from implementation details.
+Verified entries include NetSurfP-2.0 secondary structure and
+missing-coordinate disorder, SignalP 6.0 signal peptide labels, and a
+locally built DisProt 2024 residue-level disorder task
+\autocite{klausen2019netsurfp,teufel2022signalp,aspromonte2024disprot}.
+Mapped entries are linked to original benchmark papers but still need
+per-task reverification; best-effort entries are third-party rehosts
+requiring manual confirmation. Mapped resources include ProteinGym,
+FLIP, CATH/EAT, SCOPe, DeepLoc, CAFA, TAPE/GFP fluorescence, Meltome
+Atlas, PEER, ProFET, and PPI benchmark splits
+\autocite{notin2023proteingym,dallago2021flip,heinzinger2022contrastive,fox2014scope,almagro2017deeploc,zhou2019cafa,rao2019tape,sarkisyan2016local,jarzab2020meltome,xu2022peer,ofer2015profet,bernett2024ppi}.
+Results should cite these original sources rather than Hugging Face
+mirrors. Tasks whose Hugging Face rehosts have not yet been traced to an
+original paper are retained in the software but flagged in the
+supplement and dataset documentation.
+
+\subsection{5 Biological Insights from Training
+Objectives}\label{biological-insights-from-training-objectives}
+
+A unified harness reveals how different training interventions
+structurally alter model representations. Table 1 compares a vanilla
+ESM-2 baseline against parameter scaling (ESM-2 150M) and contrastive
+sentence-transformer tuning (ProtSent-V2) \autocite{protsent2026}. All
+rows use the identical frozen linear-probe test split.
+
+\textbf{Table 1. Biological insights across model scales and training
+objectives.} Higher is better. Vanilla runs originate from the
+ProteinJEPA benchmark suite; ProtSent is from the ProtSent suite.
+
+{\def\LTcaptype{none} % do not increment counter
+\begin{longtable}[]{@{}llrrr@{}}
+\toprule\noalign{}
+Task & Metric & Vanilla 35M & Vanilla 150M & ProtSent 35M \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Remote homology & Accuracy & 0.647 & 0.688 & 0.702 \\
+Solubility & AUC & 0.697 & 0.721 & 0.698 \\
+beta-lactamase & Spearman & 0.733 & 0.811 & 0.609 \\
+Variant effect & Spearman & 0.844 & 0.843 & 0.813 \\
+Stability & Spearman & 0.437 & 0.704 & 0.388 \\
+\end{longtable}
+}
+
+The results show performance does not move in a single direction. First,
+parameter scaling (Vanilla 35M to 150M) provides massive gains on
+structural regression tasks (e.g., Stability jumps from 0.437 to 0.704),
+while local mutational fitness capabilities often saturate early
+(Variant effect stays flat at \textasciitilde0.84)---a dynamic
+previously observed in models like ProteinBERT
+\autocite{brandes2022proteinbert}. Second, contrastive learning
+(ProtSent) improves global structure retrieval (homology) but severely
+collapses local mutational fitness (beta-lactamase, stability, variant
+effect). Relying on isolated literature metrics across different
+preprocessing pipelines would obscure these divergent trade-offs.
+
+The CATH v4.3 superfamily transfer task exemplifies ProtBench's
+task-design approach. Its queries have no detectable sequence-alignment
+relative in the lookup set, making it a stress test for whether
+embeddings preserve fold relationships beyond sequence search. ProtBench
+exposes this task through the standard k-NN annotation-transfer
+interface. The scorer (\texttt{cath\_levels.py}) and optional
+Tucker-head training reproduction
+(\texttt{train\_cath\_tucker\_head.py}) both include self-check
+validation modes. New CATH accuracy claims are deferred until committed
+result artifacts are available; current usage is a demonstration of task
+design and reproducible scoring.
+
+\subsection{6 Reproducibility and Use}\label{reproducibility-and-use}
+
+ProtBench is designed to be run from a fresh clone with public data.
+Most tasks download through \texttt{datasets.load\_dataset}; local tasks
+such as DisProt, conservation labels, and FLIP2 subtasks are built with
+scripts in \texttt{scripts/}. The command below runs one model on a
+single task and writes a benchmark CSV:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\ExtensionTok{python}\NormalTok{ protein\_benchmark\_suite.py }\AttributeTok{{-}m}\NormalTok{ facebook/esm2\_t6\_8M\_UR50D }\DataTypeTok{\textbackslash{}}
+    \AttributeTok{{-}{-}tasks}\NormalTok{ solubility }\AttributeTok{{-}p}\NormalTok{ linear }\AttributeTok{{-}{-}eval\_split}\NormalTok{ test}
+\end{Highlighting}
+\end{Shaded}
+
+For multi-model analysis, \texttt{collect\_bench\_results.py} normalizes
+probe CSVs and fine-tuning JSONL outputs into
+\texttt{results/bench\_results\_all.csv}, one row per model, task,
+probe, split, and metric. The paper assets can be refreshed with:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\ExtensionTok{python3}\NormalTok{ scripts/paper\_assets.py }\AttributeTok{{-}{-}out{-}dir}\NormalTok{ paper/generated}
+\end{Highlighting}
+\end{Shaded}
+
+\subsection{7 Limitations}\label{limitations}
+
+Frozen probes measure representation capacity before task adaptation;
+they do not replace full fine-tuning. Third-party dataset rehosts may
+have drifted provenance, filtering, or labels, so formal claims should
+be checked against the original sources. ProteinGym zero-shot indel
+scoring is slow on large assays. Task composition, homology, and
+imbalance often dominate results; k-mer and alignment baselines help
+isolate learned effects.
+
+\subsection{8 Conclusion}\label{conclusion}
+
+ProtBench provides a practical evaluation layer for protein
+representation work: one task registry, shared probes and metrics,
+public dataset provenance notes, alignment and composition baselines,
+and reusable result tables. Its main value is not a new modelling claim,
+but a lower-friction way to make protein model comparisons easier to
+reproduce and easier to audit.
+
+\subsection{References}\label{references}
+
+See \url{references.bib}.
+
+\printbibliography
+
+\end{document}
