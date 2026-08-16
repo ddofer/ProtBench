@@ -122,7 +122,7 @@ evaluation harness.
 
 \textbf{Results:} ProtEval is an open benchmark suite for evaluating
 protein representations under shared data handling, probe fitting, and
-metric reporting. The current registry contains 57 public tasks covering
+metric reporting. The current registry contains 60 public tasks covering
 sequence-level classification and regression, multilabel function
 prediction, retrieval, residue-level labelling, pairwise
 residue-residue contact prediction, and ProteinGym variant-effect
@@ -218,10 +218,10 @@ and no multiple-sequence alignment is used.
 
 \subsection{4 Benchmark Composition}\label{benchmark-composition}
 
-The registry currently spans 57 tasks: 12 binary, 5 multiclass, 5
-multilabel, and 17 regression tasks, plus 1 retrieval, 16
+The registry currently spans 60 tasks: 13 binary, 5 multiclass, 5
+multilabel, and 19 regression tasks, plus 1 retrieval, 16
 residue-level token classification tasks, and 1 pairwise
-contact-prediction task. Forty-nine are standard probe
+contact-prediction task. Fifty-two are standard probe
 tasks; 8 are ProteinGym evaluations. The generated task inventory in
 \texttt{paper/generated/task\_inventory.tsv} records each task key,
 display name, metric, preset, and dataset identifier.
@@ -235,8 +235,9 @@ Mapped entries are linked to original benchmark papers but still need
 per-task reverification; best-effort entries are third-party rehosts
 requiring manual confirmation. Mapped resources include ProteinGym,
 FLIP, CATH/EAT, SCOPe, DeepLoc, CAFA, TAPE/GFP fluorescence, Meltome
-Atlas, PEER, ProFET, and PPI benchmark splits
-\autocite{notin2023proteingym,dallago2021flip,heinzinger2022contrastive,fox2014scope,almagro2017deeploc,zhou2019cafa,rao2019tape,sarkisyan2016local,jarzab2020meltome,xu2022peer,ofer2015profet,bernett2024ppi}.
+Atlas, PEER, ProFET, PPI benchmark splits, and DeepET optimal growth
+temperatures
+\autocite{notin2023proteingym,dallago2021flip,heinzinger2022contrastive,fox2014scope,almagro2017deeploc,zhou2019cafa,rao2019tape,sarkisyan2016local,jarzab2020meltome,xu2022peer,ofer2015profet,bernett2024ppi,li2022deepet}.
 Results should cite these original sources rather than Hugging Face
 mirrors. Tasks whose Hugging Face rehosts have not yet been traced to an
 original paper are retained in the software but flagged in the

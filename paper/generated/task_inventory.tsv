@@ -8,6 +8,7 @@ cath_eat	CATH v4.3 Superfamily Transfer (midnight zone)	multiclass	Accuracy	no-f
 cloning_clf	Cloning Classification	regression	Spearman	no-fast/default	biomap-research/cloning_clf
 conservation_flip	Residue Conservation (FLIP)	token_classification	Spearman	very-fast	data/conservation_flip
 contact_probe	Contact Prediction (TAPE ProteinNet)	contact_prediction	P@L/5_long	no-fast/default	heya5/protein_contact_map
+deepet_topt	Optimal Growth Temperature (DeepET Topt)	regression	Spearman	no-fast/default	AI4Protein/DeepET_Topt
 disorder	Disorder (NetSurfP-SS3 mask)	token_classification	MCC	no-fast/default	agemagician/NetSurfP-SS3
 disprot	Intrinsic Disorder (DisProt)	token_classification	MCC	fast	data/disprot
 ec_classification	EC Classification	multilabel	F1_Micro	fast	AI4Protein/EC
@@ -23,6 +24,7 @@ meltome	Meltome (Melting Temperature Tm)	regression	MSE	no-fast/default	hazemess
 metal_ion_binding	Metal Ion Binding	binary	AUC	very-fast	biomap-research/metal_ion_binding
 optimal_ph	Optimal pH	regression	Spearman	no-fast/default	biomap-research/optimal_ph
 peptide_hla	Peptide-HLA Binding	binary	AUC	fast	biomap-research/peptide_HLA_MHC_affinity
+ppi_affinity	PPI Binding Affinity	regression	Spearman	no-fast/default	Synthyra/ppi_affinity
 ppi_bernett	PPI (Bernett Gold Standard)	binary	AUC	fast	Synthyra/bernett_gold_ppi
 profet_np_sp_cleaved	Neuropeptide Precursor Prediction (ProFET/NeuroPID)	binary	AUC	fast	GrimSqueaker/ProFET_NP_SP_Cleaved
 proteingym_clinical_indels_supervised	ProteinGym Clinical Indels (Supervised)	binary	AUC	proteingym	OATML-Markslab/ProteinGym_v1
@@ -53,6 +55,7 @@ ss8_cb513	Secondary Structure 8 (CB513)	token_classification	F1_Macro	explicit-o
 ss8_ts115	Secondary Structure 8 (TS115)	token_classification	F1_Macro	explicit-only	proteinea/secondary_structure_prediction
 stability	Stability (Biomap)	regression	Spearman	very-fast	biomap-research/stability_prediction
 subcellular_loc	Subcellular Localisation	multiclass	AUC	fast	proteinea/deeploc
+tcr_pmhc_affinity	TCR-pMHC Binding	binary	AUC	no-fast/default	GleghornLab/tcr_pmhc_affinity
 temperature_stability	Temperature Stability	multiclass	AUC	no-fast/default	biomap-research/temperature_stability
 thermostability	Thermostability (FLIP)	regression	Spearman	no-fast/default	SaProtHub/Dataset-Thermostability-FLIP
 variant_effect	Variant Effect (GB1)	regression	Spearman	fast	biomap-research/fitness_prediction

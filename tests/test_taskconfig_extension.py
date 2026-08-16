@@ -63,3 +63,43 @@ def test_validator_rejects_bad_type():
             problem_type="foo",
             main_metric="Accuracy",
         )
+
+
+@pytest.mark.parametrize(
+    "key,problem_type,metric",
+    [
+        ("deepet_topt", "regression", "Spearman"),
+        ("ppi_affinity", "regression", "Spearman"),
+        ("tcr_pmhc_affinity", "binary", "AUC"),
+    ],
+)
+def test_growth_temperature_and_affinity_tasks(key, problem_type, metric):
+    cfg = TASKS[key]
+    assert cfg.problem_type == problem_type
+    assert cfg.main_metric == metric
+    assert cfg.validation_split is not None, "needs a real validation split"
+
+
+def test_ppi_affinity_is_the_pairwise_regression_task():
+    """`ppi_bernett` is pairwise BINARY; this is the only pairwise regression, so
+    it exercises the pair path (two pooled embeddings concatenated) against a
+    continuous target."""
+    cfg = TASKS["ppi_affinity"]
+    assert set(cfg.input_map) == {"seq1", "seq2"}
+    assert cfg.problem_type == "regression"
+    assert TASKS["ppi_bernett"].problem_type == "binary"
+
+
+def test_tcr_task_is_single_sequence_despite_packing_three_chains():
+    """The three chains arrive pre-joined as "CDR3a|CDR3b|peptide" in one
+    column, so this is a single-sequence task, not a pair task. Declaring it
+    seq1/seq2 would silently look for columns that do not exist."""
+    cfg = TASKS["tcr_pmhc_affinity"]
+    assert set(cfg.input_map) == {"seq"}
+
+
+def test_growth_temperature_is_distinct_from_melting_temperature():
+    """Three temperature tasks with different meanings; keeping their datasets
+    distinct is what stops them being read as replicates of each other."""
+    sources = {k: TASKS[k].dataset for k in ("deepet_topt", "thermostability", "meltome")}
+    assert len(set(sources.values())) == 3, sources

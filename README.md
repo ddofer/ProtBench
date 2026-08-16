@@ -1,7 +1,7 @@
 # ProtBench
 
 Benchmark protein models — language models, alignment search, or a k-mer count —
-on 57 tasks, scored identically and written to one CSV.
+on 60 tasks, scored identically and written to one CSV.
 
 The point is comparability. A protein language model, a LoRA fine-tune, an
 MMseqs2 search and a bag of amino-acid triplets all go through the same splits, the
@@ -86,9 +86,9 @@ Python environment without installing the full benchmark stack.
 python protein_benchmark_suite.py --list_tasks
 ```
 
-Prints all 57 with their type, metric, and which preset includes them.
+Prints all 60 with their type, metric, and which preset includes them.
 
-**Run the broad set.** `--no-fast` gives you 34 tasks:
+**Run the broad set.** `--no-fast` gives you 37 tasks:
 
 ```bash
 python protein_benchmark_suite.py -m facebook/esm2_t33_650M_UR50D \
@@ -101,7 +101,7 @@ The presets are not nested, which surprises people:
 | --- | --- | --- |
 | `--very-fast` | 8 | Curated scout subset. |
 | `--fast` *(default)* | 18 | Includes `scope40_retrieval`. |
-| `--no-fast` | 34 | The broad set — but **not** a superset of `--fast`. Drops `scope40_retrieval`. |
+| `--no-fast` | 37 | The broad set — but **not** a superset of `--fast`. Drops `scope40_retrieval`. |
 | `--proteingym` | +8 | Large and slow, so opt-in. |
 
 `cafa5`, `go_mf`, `go_bp` and `go_cc` are in **no** preset — they have thousands
@@ -192,7 +192,7 @@ No refitting, so it costs seconds.
 
 These are the ones that produce a wrong number rather than an error.
 
-**`--fast` is on by default.** A bare run does 18 tasks, not all 57. See the
+**`--fast` is on by default.** A bare run does 18 tasks, not all 60. See the
 preset table above — the presets are not nested.
 
 **Result CSVs accumulate.** Re-running into the same `--output_dir` merges into
@@ -232,6 +232,14 @@ tasks; check it if yours has long proteins.
 
 **Multiclass AUC may be skipped** with a warning when the test split does not
 contain every training class. Accuracy, F1 and MCC are still valid.
+
+**Three temperature tasks mean three different things.** `deepet_topt` is the
+optimal growth temperature of the *source organism*; `thermostability` and
+`meltome` are melting temperatures of the *protein*. They are not replicates and
+should not be averaged together.
+
+**`ppi_affinity` has a 200-pair test split.** That is small enough that a single
+run moves around a lot — use `--bootstrap` before reading anything into a gap.
 
 ## Reading the output
 

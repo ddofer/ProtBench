@@ -356,6 +356,20 @@ TASKS: Dict[str, TaskConfig] = {
         problem_type="multiclass",
         main_metric="AUC",
     ),
+    # TCR / peptide-MHC binding. `seqs` packs three chains into one string as
+    # "CDR3a|CDR3b|peptide". The `|` is out of vocabulary for every protein
+    # tokenizer here, so `patch_unknown_residue_tokens` maps it to X -- the
+    # separator survives as a single unknown residue between the segments, which
+    # is the intended encoding. Imbalanced (~17% binders), so AUC not accuracy.
+    "tcr_pmhc_affinity": TaskConfig(
+        name="TCR-pMHC Binding",
+        dataset="GleghornLab/tcr_pmhc_affinity",
+        input_map={"seq": "seqs"},
+        label_col="labels",
+        problem_type="binary",
+        main_metric="AUC",
+        validation_split="valid",
+    ),
     "temperature_stability": TaskConfig(
         name="Temperature Stability",
         dataset="biomap-research/temperature_stability",
@@ -475,6 +489,30 @@ TASKS: Dict[str, TaskConfig] = {
         label_col="score",
         problem_type="regression",
         main_metric="Spearman",
+    ),
+    # Optimal growth temperature of the source organism, in degrees C (2-120).
+    # Distinct from `thermostability` and `meltome`, which measure melting
+    # temperature of the protein itself rather than the organism's optimum.
+    "deepet_topt": TaskConfig(
+        name="Optimal Growth Temperature (DeepET Topt)",
+        dataset="AI4Protein/DeepET_Topt",
+        input_map={"seq": "aa_seq"},
+        label_col="label",
+        problem_type="regression",
+        main_metric="Spearman",
+        validation_split="validation",
+    ),
+    # Protein-protein binding affinity as a continuous value. The only pairwise
+    # REGRESSION task here; `ppi_bernett` is pairwise binary. Uses the same
+    # seq1/seq2 pair path, whose two pooled embeddings are concatenated.
+    "ppi_affinity": TaskConfig(
+        name="PPI Binding Affinity",
+        dataset="Synthyra/ppi_affinity",
+        input_map={"seq1": "SeqA", "seq2": "SeqB"},
+        label_col="labels",
+        problem_type="regression",
+        main_metric="Spearman",
+        validation_split="valid",
     ),
     "optimal_ph": TaskConfig(
         name="Optimal pH",
