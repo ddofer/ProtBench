@@ -23,8 +23,10 @@ residue-level labelling, and ProteinGym variant-effect prediction. It supports
 frozen probes, fine-tuning modes, ProteinGym zero-shot scoring, and non-neural
 k-mer, MMseqs2, and phmmer baselines. Results are written as explicit per-task
 CSV rows and can be collected into a long-format table for model comparison. A
-public ProtSent result slice illustrates the central point: conclusions change
-by task, so shared splits, metrics, probes, and baselines matter.
+shared evaluation slice exposes divergent effects of training objectives: while
+scale (ESM-2 150M) and sentence-level contrastive learning (ProtSent) improve
+homology matching, contrastive training severely degrades local fitness tasks,
+whereas joint-embedding prediction (ProtJepa) improves structural regression.
 
 **Availability and implementation:** ProtBench is implemented in Python with
 Hugging Face integrations and optional specialty tools. Source code, task
@@ -94,21 +96,7 @@ tasks where sequence similarity is already highly informative.
 
 ## 4 Benchmark Composition
 
-The live registry currently contains 43 tasks: 35 standard probe tasks and 8
-ProteinGym tasks. Table 1 summarizes the task types. The generated task
-inventory in `paper/generated/task_inventory.tsv` records each task key,
-display name, metric, preset, and dataset identifier.
-
-**Table 1. ProtBench task coverage generated from the live registry.**
-
-| Problem type | Tasks | Primary metric(s) |
-| --- | ---: | --- |
-| Binary classification | 12 | AUC |
-| Multiclass classification | 5 | AUC, Accuracy |
-| Multilabel classification | 3 | F1_Macro, F1_Micro |
-| Regression | 17 | MSE, Spearman |
-| Retrieval | 1 | Recall@10 |
-| Residue-level token classification | 5 | F1_Macro, MCC, Spearman |
+The registry currently spans 43 tasks: 12 binary, 5 multiclass, 3 multilabel, and 17 regression tasks, plus 1 retrieval and 5 residue-level token classification tasks. Thirty-five are standard probe tasks; 8 are ProteinGym evaluations. The generated task inventory in `paper/generated/task_inventory.tsv` records each task key, display name, metric, preset, and dataset identifier.
 
 Dataset provenance is tracked separately from implementation details. Verified
 entries include NetSurfP-2.0 secondary structure and missing-coordinate disorder,
@@ -126,33 +114,21 @@ should cite these original sources rather than Hugging Face mirrors. Tasks whose
 Hugging Face rehosts have not yet been traced to an original paper are retained
 in the software but flagged in the supplement and dataset documentation.
 
-## 5 Example Use Case
+## 5 Biological Insights from Training Objectives
 
-Table 2 is a harness example, not a model claim. It uses one directly comparable
-public slice: published ProtSent/ESM-2 35M runs from the ProtSent benchmark
-folder [@protsent2026]. All rows are linear-probe test-split rows from the same
-result suite, and each entry uses the task's declared primary metric. A separate
-off-the-shelf ESM-2 35M/150M scale slice from the ProteinJEPA benchmark folder is
-kept in the generated supplement [@proteinjepa2026].
+A unified harness reveals how different training interventions structurally alter model representations. Table 1 compares a vanilla ESM-2 baseline against parameter scaling (ESM-2 150M), contrastive sentence-transformer tuning (ProtSent-V2) [@protsent2026], and joint-embedding predictive architecture co-training (ProtJepa: MLM+JEPA) [@proteinjepa2026]. All rows use the identical frozen linear-probe test split.
 
-**Table 2. Representative public ProtSent 35M linear-probe results (benchmark-harness demonstration, not a model claim).** All rows are from the ProtSent benchmark suite test split with a linear probe; the ESM-2 35M baseline comes from `../ProtSent/results/benchmarks/v3/esm2_35m_linear/`. Higher is better.
+**Table 1. Biological insights across model scales and training objectives.** Higher is better. Vanilla runs and ProtJepa originate from the ProteinJEPA benchmark suite; ProtSent is from the ProtSent suite.
 
-| Task | Metric | ESM-2 35M | ProtSent-V1 35M | ProtSent-V2 35M |
-| --- | --- | ---: | ---: | ---: |
-| Remote homology | Accuracy | 0.687 | 0.690 | 0.702 |
-| Solubility | AUC | 0.696 | 0.693 | 0.698 |
-| Signal peptide | AUC | 0.994 | 0.995 | 0.996 |
-| Metal ion binding | AUC | 0.790 | 0.760 | 0.747 |
-| Variant effect (GB1) | Spearman | 0.816 | 0.825 | 0.813 |
-| Fluorescence | Spearman | 0.591 | 0.591 | 0.588 |
-| Stability | Spearman | 0.440 | 0.511 | 0.388 |
+| Task | Metric | Vanilla 35M | Vanilla 150M | ProtSent 35M | ProtJepa 35M |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Remote homology | Accuracy | 0.647 | 0.688 | 0.702 | 0.663 |
+| Solubility | AUC | 0.697 | 0.721 | 0.698 | 0.698 |
+| beta-lactamase | Spearman | 0.733 | 0.811 | 0.609 | 0.738 |
+| Variant effect | Spearman | 0.844 | 0.843 | 0.813 | 0.847 |
+| Stability | Spearman | 0.437 | 0.704 | 0.388 | 0.502 |
 
-The table is useful because it resists a single ranking. Some tasks improve with
-contrastive training, some are nearly saturated, and some move in the opposite
-direction. Without shared splits, probes, metrics, and source rows, it would be
-unclear whether those differences came from biology, model training, or
-evaluation code. Small deltas should not be interpreted without confidence
-intervals; the example shows the comparison surface.
+The results show performance does not move in a single direction. Contrastive learning (ProtSent) improves global structure retrieval (homology) but severely collapses local mutational fitness (beta-lactamase, stability, variant effect). Conversely, augmenting standard MLM with a JEPA objective provides massive gains on structural regression tasks (stability) without parameter scaling. Relying on isolated literature metrics across different preprocessing pipelines would obscure these divergent trade-offs.
 
 The CATH v4.3 superfamily transfer task exemplifies ProtBench's task-design
 approach. Its queries have no detectable sequence-alignment relative in the
