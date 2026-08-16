@@ -12,7 +12,6 @@ assets for ProtBench.
 - `references.bib` - working bibliography for the draft.
 - `generated/` - tables generated from the live task registry and local public
   result artifacts.
-- `figures/` - deterministic SVG figure outputs generated from code.
 
 ## Refresh Generated Tables
 
@@ -27,19 +26,9 @@ library. If the sibling result folders are not present, it still writes the task
 coverage and result-source manifest, and marks representative result tables as
 not generated.
 
-## Refresh Figures
-
-```bash
-python3 scripts/generate_paper_figures.py --out-dir paper/figures
-```
-
-The figure generator uses only the Python standard library and emits SVG vector
-figures. The graphics are intentionally schematic: they document the evaluation
-contract and task/provenance landscape rather than adding decorative artwork.
-
 ## Submission Notes
 
-Before submission, fill in author metadata, affiliations, contact email,
-repository release/DOI, and any journal-specific formatting. The main text is
-kept deliberately short; extended task inventory and private-result exclusion
-notes belong in the supplement while the main text stays compact.
+Before submission, fill in contact email, repository release/DOI, funding,
+conflicts, and any journal-specific formatting. The main text is kept deliberately
+short; extended task inventory and private-result exclusion notes belong in the
+supplement while the main text stays compact.

@@ -1,27 +1,7 @@
 # Supplementary Notes for the ProtBench Application Note
 
-## Generated Assets
-
-Refresh generated tables from the repository root:
-
-```bash
-python3 scripts/paper_assets.py --out-dir paper/generated
-```
-
-Generated files:
-
-- `paper/generated/task_coverage.md` - task and preset counts from the live
-  registry.
-- `paper/generated/task_inventory.tsv` - one row per registered task.
-- `paper/generated/result_source_manifest.md` - result sources separated into
-  safe candidates and excluded/private candidates.
-- `paper/generated/representative_results.md` - optional public result slices
-  from sibling project folders when those local files exist.
-
-Generated figure files:
-
-- `paper/figures/protbench_graphical_abstract.svg` - workflow/graphical abstract.
-- `paper/figures/task_provenance_landscape.svg` - task coverage by provenance tier.
+Generated tables live under `paper/generated/`; refresh them with
+`python3 scripts/paper_assets.py --out-dir paper/generated`.
 
 ## Result Inclusion Rules
 
@@ -43,7 +23,7 @@ Excluded unless explicitly approved:
 ## CATH Midnight-Zone Status
 
 The `cath_eat` task is included in the live task registry as a CATH v4.3
-superfamily-transfer stress test. It should be discussed as a benchmark design
+superfamily transfer stress test. It should be discussed as a benchmark design
 example unless validated result artifacts are present.
 
 Current checked status:
@@ -58,10 +38,10 @@ artifact is committed or otherwise supplied. The main paper may state that
 ProtBench includes the task and that the scorer/Tucker-head reproduction scripts
 are self-checked.
 
-## Citation Checks Before Submission
+## Dataset Provenance Checks
 
-The main text should cite original dataset papers rather than Hugging Face
-dataset cards. The current high-priority checks are:
+The main text cites original dataset papers rather than Hugging Face dataset
+cards where sources are known. Remaining high-priority checks are:
 
 - `AI4Protein/EC` and `AI4Protein/GO_MF`: trace the original source and label
   definitions before making a formal dataset claim.
@@ -74,15 +54,4 @@ dataset cards. The current high-priority checks are:
 - `SaProtHub/DATASET-CAPE-RhlA-seqlabel`: verify the CAPE/RhlA source.
 - Any model in the main result table should have a model paper citation or a
   clearly marked unpublished/internal status.
-
-## Draft Compression Rules
-
-Use these before submitting to a four-page venue:
-
-- Keep the main table compact; move full task grids to generated supplement.
-- Avoid broad claims such as "comprehensive" or "state of the art" unless the
-  sentence states the exact scope.
-- Keep implementation details that do not affect interpretation in the
-  supplement.
-- Retain the limitations paragraph. It prevents the resource claim from sounding
-  larger than the evidence supports.
+Full per-task provenance notes remain in `docs/DATASETS.md`.
