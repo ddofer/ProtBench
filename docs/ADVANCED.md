@@ -40,22 +40,59 @@ logic is single-source. `--probe`/`--split` restrict to one view.
 ### ProteinGym zero-shot — 4 benchmarks, MLM-family scoring
 
 `proteingym_mlm_zeroshot.py` scores all **4** ProteinGym benchmarks (default
-`--tasks` = all 4), so AUC is available for every one:
+`--tasks` = all 4):
 
 | Benchmark | Scorer | Metric | Sign |
 |---|---|---|---|
-| DMS substitutions | masked-marginal Σ per-pos logP delta | Spearman (+ median-binarized AUC) | higher = fitter |
-| DMS indels | pseudo-log-likelihood `PLL(mut)−PLL(WT)` | AUC (median-binarized) | higher = fitter |
-| Clinical substitutions | masked-marginal | AUC | **negated** (pathogenic = lower logP) |
-| Clinical indels | pseudo-log-likelihood | AUC | **negated** |
+| DMS substitutions | masked-marginal Σ per-pos logP delta | Spearman (hierarchical: UniProt → functional category) | higher = fitter |
+| DMS indels | strided masked PLL, `PLL(mut)−PLL(WT)` | Spearman | higher = fitter |
+| Clinical substitutions | masked-marginal | AUC (per-gene mean) | **negated** (pathogenic = lower logP) |
+| Clinical indels | strided masked PLL | AUC (pooled across genes) | **negated** |
 
-PLL = Σᵢ log P(seqᵢ \| seq with i masked) over the whole sequence — the
-encoder/masked-LM analogue of a sequence likelihood (ESM-1v/ESM2 style); it
-needs no position alignment, so indels are scorable. `--max_variants_per_assay`
-(default 200) bounds the per-mutant PLL forward passes on large DMS-indel
-assays (substitutions share the WT table and are unaffected). The cosine
-zero-shot path is a weak proxy (clinical AUC ~0.68 after the sign fix vs MLM
-~0.90) and is **default-off** (`PLM_BENCH_PGYM_COSINE=1` to restore — it is the
+AUC is reported for the DMS benchmarks only where the official `DMS_score_bin`
+column exists; there is no median-split fallback.
+
+**Cost, and why the two task shapes differ.** Substitutions amortize: one masked
+forward at a position yields log-probs for every amino acid there, so all
+variants at that position are scored from it. The scorer takes the union of
+mutated positions per assay, so DMS substitutions (217 assays, 2.47M variants)
+cost **~86k forwards**, and clinical substitutions (2,525 genes, 62.7k variants)
+fewer still. Both run in wall-clock minutes. `--max_variants_per_assay` (default
+`None` = all variants, leaderboard-faithful) does not change substitution cost.
+
+Indels cannot amortize — every variant is a distinct sequence — so cost is
+`forwards per variant × variants`:
+
+| `--indel_score_mode` | forwards/variant | DMS indels (287k variants) | note |
+|---|---|---|---|
+| `strided` (default) | `--indel_pll_passes` (32) | ~9.2M, ~7 h | leakage-free few-pass masked PLL |
+| `masked_pll` | L | ~10⁸ | exact, unusable at this scale |
+| `single_pass` | 1 | ~287k | **broken by leakage** (Spearman 0.50→0.31); reference only |
+| `embedding_span`, `embedding_red` | 1 | ~287k | embedding readouts, see below |
+
+Three ways to make indels affordable, best first: lower `--indel_pll_passes`
+(cost is exactly linear in it); use an embedding arm; or `--skip_huge_assays
+10000`, which drops the two `CAPSD_AAV2S` assays (87% of indel compute) at the
+cost of leaderboard comparability.
+
+**Embedding arms** (`--indel_score_mode embedding_span|embedding_red`,
+`variant_embedding_scores.py`) need one forward per sequence instead of 32.
+`embedding_span` pools per-residue embeddings over the derived edit span only —
+whole-sequence pooling dilutes a few edited residues across hundreds of
+unchanged ones — and `embedding_red` uses residue-diversity delta. They are also
+the arms to reach for on **multi-mutation** variants, where masked-marginal sums
+independent per-position log-ratios and is blind to epistasis. Accuracy on
+proteins is **not yet benchmarked**; the numbers behind these readouts come from
+DNA tasks and do not transfer.
+
+**Measured (ESM-C 300M / `Synthyra/ESMplusplus_small`, substitutions, all assays,
+no capping):** DMS Spearman **0.407** (hierarchical; flat 0.433), AUC 0.727 ·
+clinical AUC **0.869** (per-gene mean, 2,525 genes, 0 variants skipped).
+
+The suite's own `proteingym_*_zeroshot` tasks use embedding cosine instead, which
+costs one forward per mutant (2.47M on DMS substitutions) and scores ~0.68
+clinical AUC against masked-marginal's ~0.87. It is **default-off**; set
+`PLM_BENCH_PGYM_COSINE=1` to restore — it is the
 only path that *also* re-scores indels via embedding cosine).
 
 ## Fine-tuning scripts (residue + sequence; LoRA)

@@ -202,3 +202,40 @@ def test_auto_is_resolved_before_any_probe_is_built():
     src = inspect.getsource(evaluate_task)
     assert "effective_probe_type(cfg, probe_type)" in src
     assert TASKS  # registry loaded
+
+
+def test_proteingym_block_is_skipped_when_already_scored(tmp_path):
+    """The MLM zero-shot JSONL is the record of what ran, same as the CSV is for probes."""
+    from run_bench import pending_zeroshot_tasks
+
+    jsonl = tmp_path / "mlm_zeroshot_m.jsonl"
+    jsonl.write_text(
+        '{"task": "proteingym_dms_substitutions_zeroshot", "mode": "mlm_zeroshot"}\n'
+    )
+    tasks = ["proteingym_dms_substitutions_zeroshot", "proteingym_clinical_substitutions_zeroshot"]
+    assert pending_zeroshot_tasks(tasks, jsonl) == [
+        "proteingym_clinical_substitutions_zeroshot"
+    ]
+    assert pending_zeroshot_tasks(tasks, tmp_path / "missing.jsonl") == tasks
+
+
+def test_summary_honours_the_task_registry_main_metric(tmp_path):
+    """Each task declares its headline metric (EC is F1_Micro, remote_homology
+    Accuracy, disprot MCC). The repo-wide METRIC_PRIORITY is for cross-task
+    comparison and must not override that in a per-task summary."""
+    csv = tmp_path / "bench_m.csv"
+    pd.DataFrame([
+        {"Model": "m", "Task": "EC Classification", "Probe": "torch_linear", "EvalSplit": "test",
+         "EvalStrategy": "test_split", "Samples": "Full", "F1_Micro": 0.8144, "F1_Macro": 0.6454,
+         "Accuracy": 0.39, "ProbeFitSec": 14.8},
+        {"Model": "m", "Task": "Remote Homology (Fold)", "Probe": "torch_linear", "EvalSplit": "test",
+         "EvalStrategy": "test_split", "Samples": "Full", "Accuracy": 0.5644, "F1_Macro": 0.2783,
+         "ProbeFitSec": 7.9},
+        {"Model": "m", "Task": "Intrinsic Disorder (DisProt)", "Probe": "linear", "EvalSplit": "test",
+         "EvalStrategy": "test_split", "Samples": "Full", "MCC": 0.3828, "F1_Macro": 0.6783,
+         "ProbeFitSec": 60.0},
+    ]).to_csv(csv, index=False)
+    text = summarize(csv, tmp_path / "SUMMARY.md").read_text()
+    assert "| F1_Micro | 0.8144 |" in text
+    assert "| Accuracy | 0.5644 |" in text
+    assert "| MCC | 0.3828 |" in text

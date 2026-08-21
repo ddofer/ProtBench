@@ -368,3 +368,26 @@ def test_classification_metrics_bootstrap_is_capped_on_huge_arrays():
     assert bootstrap_draws_for(1000, n_rows=500) == 1000
     assert bootstrap_draws_for(1000, n_rows=500_000) < 1000
     assert bootstrap_draws_for(0, n_rows=500_000) == 0
+
+
+def test_cosine_proteingym_zeroshot_is_off_unless_opted_in(monkeypatch):
+    """Cosine costs one forward per variant (2.47M on DMS subs) for ~0.68 clinical
+    AUC; masked-marginal costs ~86k for ~0.87. Off by default, as the docs say."""
+    import protein_benchmark_suite as pbs
+
+    monkeypatch.delenv("PLM_BENCH_PGYM_COSINE", raising=False)
+    assert pbs.cosine_zeroshot_enabled() is False
+    monkeypatch.setenv("PLM_BENCH_PGYM_COSINE", "1")
+    assert pbs.cosine_zeroshot_enabled() is True
+
+
+def test_disabled_cosine_zeroshot_points_at_the_mlm_scorer(monkeypatch):
+    """A disabled path must say what to run instead, not fail silently or burn forwards."""
+    import protein_benchmark_suite as pbs
+    from benchmark_tasks import TASKS
+
+    monkeypatch.delenv("PLM_BENCH_PGYM_COSINE", raising=False)
+    cfg = TASKS["proteingym_dms_substitutions_zeroshot"]
+    metrics, _, strategy = pbs.evaluate_task(cfg, model_obj=None, is_sbert=False, device="cpu")
+    assert strategy == "task_exception"
+    assert "proteingym_mlm_zeroshot.py" in metrics["Error"]

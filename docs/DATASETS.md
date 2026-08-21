@@ -24,7 +24,8 @@ distinction matters.
 | `profet_np_sp_cleaved` | [`GrimSqueaker/ProFET_NP_SP_Cleaved`](https://huggingface.co/datasets/GrimSqueaker/ProFET_NP_SP_Cleaved) | binary | AUC |
 | `signalp_binary` | [`GrimSqueaker/SignalP_Binary`](https://huggingface.co/datasets/GrimSqueaker/SignalP_Binary) | binary | AUC |
 | `cath_eat` | [`GrimSqueaker/cath43-eat`](https://huggingface.co/datasets/GrimSqueaker/cath43-eat) | multiclass | Accuracy |
-| `proteingym_clinical_indels_supervised`, `proteingym_clinical_indels_zeroshot`, `proteingym_clinical_substitutions_supervised`, `proteingym_clinical_substitutions_zeroshot`, `proteingym_dms_indels_supervised`, `proteingym_dms_indels_zeroshot`, `proteingym_dms_substitutions_supervised`, `proteingym_dms_substitutions_zeroshot` | [`OATML-Markslab/ProteinGym_v1`](https://huggingface.co/datasets/OATML-Markslab/ProteinGym_v1) | binary | AUC |
+| `proteingym_clinical_indels_*`, `proteingym_clinical_substitutions_*` (supervised + zeroshot) | [`OATML-Markslab/ProteinGym_v1`](https://huggingface.co/datasets/OATML-Markslab/ProteinGym_v1) | binary | AUC |
+| `proteingym_dms_indels_*`, `proteingym_dms_substitutions_*` (supervised + zeroshot) | [`OATML-Markslab/ProteinGym_v1`](https://huggingface.co/datasets/OATML-Markslab/ProteinGym_v1) | regression | Spearman |
 | `rhla_enzyme_mutations` | [`SaProtHub/DATASET-CAPE-RhlA-seqlabel`](https://huggingface.co/datasets/SaProtHub/DATASET-CAPE-RhlA-seqlabel) | regression | Spearman |
 | `aav_flip` | [`SaProtHub/Dataset-AAV-FLIP`](https://huggingface.co/datasets/SaProtHub/Dataset-AAV-FLIP) | regression | Spearman |
 | `beta_lactamase_peer` | [`SaProtHub/Dataset-Beta_Lactamase-PEER`](https://huggingface.co/datasets/SaProtHub/Dataset-Beta_Lactamase-PEER) | regression | Spearman |

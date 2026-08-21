@@ -20,6 +20,7 @@ records which, so rows stay comparable.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import subprocess
 import sys
@@ -36,6 +37,7 @@ from benchmark_tasks import (  # noqa: E402
     DEFAULT_TASKS,
     FAST_MAX_SAMPLES,
     FAST_TASKS,
+    PROTEINGYM_TASKS,
     RETRIEVAL_TASKS,
     TASK_NAME_TO_KEY,
     TASKS,
@@ -56,6 +58,27 @@ PRESETS = {
 _PRESET_FLAGS = {"very-fast": "--very-fast", "fast": "--fast", "no-fast": "--no-fast"}
 # Fine-tuning goes through finetune_sequence.py, which is sequence-level only.
 FINETUNABLE = {"binary", "multiclass", "regression"}
+
+
+def pending_zeroshot_tasks(tasks, jsonl_path: Path) -> list[str]:
+    """ProteinGym MLM zero-shot tasks this model has not been scored on yet.
+
+    The scorer appends one JSON record per task, so the JSONL is the record of
+    what ran -- the same role the CSV plays for probes.
+    """
+    done = set()
+    path = Path(jsonl_path)
+    if path.exists():
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("mode") == "mlm_zeroshot":
+                done.add(rec.get("task"))
+    return [t for t in tasks if t not in done]
 
 
 def preset_flag(preset: str) -> str:
@@ -128,9 +151,11 @@ def pending_tasks(
 def summarize(csv_path: Path, out_path: Path) -> Path:
     """Write one markdown row per task: main metric, value, probe, fit seconds.
 
-    Metric choice and markdown rendering both come from the shared helpers, so
-    this table headlines the same metric as ``bench_results_all.csv`` and
-    ``COMPARISON.md`` for a given row instead of a fourth private priority list.
+    The headline metric is the one the task declares (``TaskConfig.main_metric``
+    -- EC is F1_Micro, remote_homology Accuracy, disprot MCC), falling back to the
+    shared ``get_best_metric_for_task`` when the row lacks it. The repo-wide
+    METRIC_PRIORITY exists to compare ACROSS tasks and would otherwise headline
+    F1_Macro for all three. Rendering comes from the shared markdown helper.
     """
     from benchmark_comparison import _to_markdown_table
     from benchmark_utils import get_best_metric_for_task
@@ -140,7 +165,9 @@ def summarize(csv_path: Path, out_path: Path) -> Path:
     for _, r in df.sort_values("Task").iterrows():
         task = TASK_NAME_TO_KEY.get(str(r["Task"]), str(r["Task"]))
         cfg = TASKS.get(task)
-        metric, _ = get_best_metric_for_task(r)
+        metric = getattr(cfg, "main_metric", None)
+        if metric is None or metric not in df.columns or pd.isna(r.get(metric)):
+            metric, _ = get_best_metric_for_task(r)
         fit = r.get("ProbeFitSec")
         rows.append({
             "task": task,
@@ -179,6 +206,11 @@ def main(argv=None) -> int:
     p.add_argument("--eval_split", default="test", choices=("test", "validation"))
     p.add_argument("--finetune", default="none", choices=("none", "lora", "last_n", "full"),
                    help="Also fine-tune on sequence-level tasks (default: probes only).")
+    p.add_argument("--proteingym", action="store_true",
+                   help="Also run ProteinGym zero-shot (masked-marginal). Substitutions only "
+                        "by default; add --proteingym_indels for the indel benchmarks.")
+    p.add_argument("--proteingym_indels", action="store_true",
+                   help="Include the ProteinGym indel benchmarks (much slower; see docs).")
     p.add_argument("--output_dir", "-o", default="results/benchmarks")
     p.add_argument("--force", action="store_true", help="Re-run tasks that already have results")
     p.add_argument("--probe_args", nargs=argparse.REMAINDER, default=[],
@@ -229,6 +261,23 @@ def main(argv=None) -> int:
         _run([sys.executable, "protein_benchmark_suite.py", "-m", args.model_name,
               *selector, "-p", probe, "--eval_split", args.eval_split,
               "--cache_embeddings", "-o", str(out_dir), *args.probe_args])
+
+    if args.proteingym:
+        # Masked-marginal, NOT the suite's cosine zero-shot: one masked forward per
+        # mutated POSITION serves every variant there (~86k forwards for 2.47M DMS
+        # substitutions), and it scores ~0.87 clinical AUC against cosine's ~0.68.
+        zs_tasks = [t for t in PROTEINGYM_TASKS if t.endswith("_zeroshot")]
+        if not args.proteingym_indels:
+            zs_tasks = [t for t in zs_tasks if "indel" not in t]
+        jsonl = out_dir / f"mlm_zeroshot_{safe_model_name(args.model_name)}.jsonl"
+        todo = zs_tasks if args.force else pending_zeroshot_tasks(zs_tasks, jsonl)
+        if todo:
+            logger.info("=== ProteinGym zero-shot: %s", " ".join(todo))
+            _run([sys.executable, "proteingym_mlm_zeroshot.py",
+                  "--model_name", args.model_name, "--tasks", *todo,
+                  "--output_dir", str(out_dir)])
+        else:
+            logger.info("ProteinGym: already scored in %s", jsonl)
 
     if args.finetune != "none":
         ft_tasks = [t for t in tasks if TASKS[t].problem_type in FINETUNABLE]

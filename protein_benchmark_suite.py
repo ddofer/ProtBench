@@ -323,6 +323,26 @@ def _result_eval_mode(cfg: TaskConfig) -> str:
     return cfg.eval_mode or DEFAULT_RESULT_EVAL_MODE
 
 
+def cosine_zeroshot_enabled() -> bool:
+    """Whether the embedding-cosine ProteinGym zero-shot path is enabled.
+
+    Off by default. It embeds every mutant (2.47M forwards on DMS substitutions)
+    to score ~0.68 clinical AUC, while ``proteingym_mlm_zeroshot.py`` scores
+    ~0.87 from ~86k masked forwards -- one per mutated POSITION, shared by every
+    variant at that position. Set ``PLM_BENCH_PGYM_COSINE=1`` to restore it, e.g.
+    to reproduce an older row or to score a model with no reachable MLM head.
+    """
+    return os.environ.get("PLM_BENCH_PGYM_COSINE", "") not in ("", "0", "false", "False")
+
+
+_PGYM_COSINE_DISABLED = (
+    "ProteinGym zero-shot via embedding cosine is disabled (29x the forwards of "
+    "masked-marginal for a much weaker score). Run: python proteingym_mlm_zeroshot.py "
+    "--model_name <model>  (or scripts/run_bench.py --proteingym). "
+    "Set PLM_BENCH_PGYM_COSINE=1 to restore the cosine path."
+)
+
+
 def _auto_probe_type(cfg: TaskConfig) -> str:
     """Resolve ``-p auto`` to the probe that is fastest for this task's shape.
 
@@ -3239,6 +3259,18 @@ def evaluate_task(
     probe_type = effective_probe_type(cfg, probe_type)
 
     logger.info(f"Evaluating: {cfg.name}")
+
+    # The cosine zero-shot path embeds every mutant -- 2.47M forwards on DMS
+    # substitutions -- for a much weaker score than the masked-marginal scorer in
+    # proteingym_mlm_zeroshot.py (~86k forwards). Refuse early and say what to
+    # run instead, rather than spending the GPU time.
+    if cfg.eval_mode == "proteingym_zeroshot" and not cosine_zeroshot_enabled():
+        logger.warning("  %s", _PGYM_COSINE_DISABLED)
+        return (
+            {"Error": _PGYM_COSINE_DISABLED},
+            DEFAULT_RESULT_EVAL_SPLIT,
+            "task_exception",
+        )
 
     # Residue-level (per-token) tasks use a separate linear-probe path that
     # extracts per-residue hidden states + fits a LogisticRegression. The
