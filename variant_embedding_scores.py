@@ -15,8 +15,25 @@ the two task shapes have opposite cost structures.
 
 ``red`` is ported from diploid_glm's covariance_pooling branch
 (``embedding/covariance_pooling/auxfeat.py``), whose own upstream is a protein
-library (flair-bio/proseqo). Numbers there are from DNA tasks and do not transfer;
-treat protein accuracy as unmeasured until benchmarked.
+library (flair-bio/proseqo).
+
+**Measured on proteins** (ESM-C 300M, 2 ProteinGym DMS-indel assays, Spearman
+against experimental fitness; ``docs/ADVANCED.md`` has the table):
+
+===================  ==========  ==========  ==========
+arm                  S22A1       PTEN        forwards/variant
+===================  ==========  ==========  ==========
+strided PLL k=32     0.343       0.756       32
+``embedding_red``    **0.471**   0.710       1
+``embedding_span``   0.194       0.569       1
+no-model position    0.083       0.540       0
+===================  ==========  ==========  ==========
+
+So RED is competitive with 32-pass PLL at ~28x less compute -- better on one
+assay, slightly worse on the other -- and well clear of the position-only
+control. Note this CONTRADICTS the DNA-domain numbers the port came with (0.53
+AUROC there), and the direction is opposite to the obvious assumption: residue
+diversity rises with fitness, so the raw delta is negated here.
 """
 
 from __future__ import annotations
@@ -127,7 +144,11 @@ def score_indel_variants(
     Arms:
       * ``span`` -- pool over the derived edit span only (default), see
         ``span_pooled_score``;
-      * ``red``  -- ``RED(mut) - RED(wt)``, whole-sequence residue diversity.
+      * ``red``  -- ``RED(wt) - RED(mut)``, whole-sequence residue diversity.
+        Negated deliberately: measured on ProteinGym indels, residue diversity
+        RISES with fitness, the opposite of the DNA-domain assumption (see the
+        module docstring), so the raw delta is flipped to keep every arm on the
+        same "higher = more disrupted" convention.
 
     Returns one score per variant, aligned with ``variants``; ``None`` where a
     sequence exceeds ``model_window``, matching the skip contract of
@@ -154,7 +175,7 @@ def score_indel_variants(
             continue
         mut_X = next(scored)
         if arm == "red":
-            out.append(float(red(mut_X) - wt_red))
+            out.append(float(wt_red - red(mut_X)))
         else:
             out.append(span_pooled_score(wt_X, mut_X, edit_span(wt, variant), metric=metric))
     return out

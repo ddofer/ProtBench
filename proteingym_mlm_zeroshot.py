@@ -409,7 +409,7 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
                max_assays=None, max_variants_per_assay=None,
                model_window=1022, indel_long_policy="skip",
                skip_huge_assays=None, indel_score_mode="strided",
-               indel_pll_passes=32, assay_shard=0, assay_num_shards=1,
+               indel_pll_passes=16, assay_shard=0, assay_num_shards=1,
                residue_embedder=None):
     cfg = TASKS[task_key]
     is_indel = task_key in INDEL_ZS
@@ -836,11 +836,14 @@ def main(argv=None):
                          "cost of strided) reading the mutant's residue embeddings -- pooled "
                          "over the derived edit span, or residue-diversity delta. Cheap; "
                          "accuracy on proteins not yet benchmarked.")
-    ap.add_argument("--indel_pll_passes", type=int, default=32,
-                    help="strided mode: forward passes per sequence (k). Each pass masks "
-                         "every k-th residue; larger k -> closer to exact masked_pll "
-                         "(k=32 validated within 0.02 Spearman; k=64 within 0.012). k>=L "
-                         "reproduces exact. Default 32.")
+    ap.add_argument("--indel_pll_passes", type=int, default=16,
+                    help="strided mode: forward passes per sequence (k), and the whole "
+                         "indel cost is linear in it. Each pass masks every k-th residue; "
+                         "larger k -> closer to exact masked_pll (k>=L reproduces it). "
+                         "Default 16, calibrated on ESM-C 300M over 2 DMS-indel assays: "
+                         "k=16 is within 0.012 Spearman of k=32 for half the compute "
+                         "(0.331/0.755 vs 0.343/0.756), while k=8 loses up to 0.07 "
+                         "(0.271/0.729). See docs/ADVANCED.md.")
     ap.add_argument("--rope_extrapolate", action="store_true",
                     help="OPT-IN: grow the Proteva RoPE cache to --max_length and "
                          "score long sequences whole via extrapolation (OOD; the "

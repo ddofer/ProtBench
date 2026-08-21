@@ -190,3 +190,16 @@ def test_embedder_wiring_yields_one_matrix_per_sequence():
     out = embedder(["ACDEF", "ACD"])
     assert [x.shape[0] for x in out] == [5, 3]
     assert out[0].shape[1] == 8
+
+
+def test_red_arm_is_negated_to_match_the_shared_convention():
+    """Measured on ProteinGym indels (ESM-C 300M): residue diversity RISES with
+    fitness, the opposite of the DNA-domain assumption the port came with. The
+    raw delta is therefore flipped so every arm reads "higher = more disrupted".
+    A scorer wired with the wrong sign is worse than no scorer."""
+    wt = "ACDEFGHIKLMNPQRSTVWY" * 5
+    mut = wt[:40] + "WWWW" + wt[44:]
+    wt_X, mut_X = _toy_embeddings(wt), _toy_embeddings(mut)
+    raw_delta = red(mut_X) - red(wt_X)
+    (score,) = score_indel_variants(wt, [mut], _fake_embedder, arm="red")
+    assert score == -raw_delta != 0.0

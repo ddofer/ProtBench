@@ -75,6 +75,31 @@ Three ways to make indels affordable, best first: lower `--indel_pll_passes`
 10000`, which drops the two `CAPSD_AAV2S` assays (87% of indel compute) at the
 cost of leaderboard comparability.
 
+**Calibration (ESM-C 300M, 2 mid-size DMS-indel assays, Spearman vs experimental
+fitness).** Every variant in both assays is a single-residue deletion, so
+sequence length is constant and cannot confound the comparison:
+
+| arm | S22A1 (490 variants) | PTEN (314 variants) | forwards/variant | seconds (S22A1) |
+|---|---|---|---|---|
+| strided PLL k=32 | 0.343 | 0.756 | 32 | 202 |
+| strided PLL **k=16** (default) | 0.331 | 0.755 | 16 | 96 |
+| strided PLL k=8 | 0.271 | 0.729 | 8 | 48 |
+| strided PLL k=4 | 0.222 | 0.692 | 4 | 25 |
+| `embedding_red` | **0.471** | 0.710 | 1 | 7 |
+| `embedding_span` | 0.194 | 0.569 | 1 | 12 |
+| *no-model control: deletion position* | *0.083* | *0.540* | *0* | *0* |
+
+k=16 is within 0.012 of k=32 on both assays for half the compute, so it is the
+default; k=8 costs up to 0.07 and is too low. `embedding_red` is competitive
+with 32-pass PLL at ~28x less compute — better on one assay, slightly worse on
+the other — and clears the position-only control on both, so its signal is not
+just "where the deletion is". This **contradicts** the DNA-domain numbers the
+readout was ported with (~0.53 AUROC there), and its direction is the opposite
+of the obvious assumption: residue diversity *rises* with fitness, so
+`variant_embedding_scores` negates the raw delta to keep every arm on one
+"higher = more disrupted" convention. Two assays are a calibration, not a
+benchmark — treat the embedding arms as promising, not settled.
+
 **Embedding arms** (`--indel_score_mode embedding_span|embedding_red`,
 `variant_embedding_scores.py`) need one forward per sequence instead of 32.
 `embedding_span` pools per-residue embeddings over the derived edit span only —
