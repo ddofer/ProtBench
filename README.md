@@ -116,6 +116,45 @@ python3 scripts/paper_assets.py --out-dir paper/generated
 The generator imports only `benchmark_tasks.py`, so it can run in a minimal
 Python environment without installing the full benchmark stack.
 
+## Benchmarking a whole model: `scripts/run_bench.py`
+
+One command per model or checkpoint. It picks the probe that is fastest for
+each task, skips tasks this model already has results for, and writes a
+readable summary:
+
+```bash
+python scripts/run_bench.py -m Synthyra/ESMplusplus_small              # --preset fast (17 tasks)
+python scripts/run_bench.py -m /path/to/checkpoint --preset no-fast    # everything
+python scripts/run_bench.py -m MODEL --tasks solubility ss3            # explicit tasks
+python scripts/run_bench.py -m MODEL --finetune lora                   # probes + LoRA fine-tuning
+```
+
+Outputs, all under `--output_dir` (default `results/benchmarks/`):
+
+| File | What it is |
+| --- | --- |
+| `bench_<model>.csv` | the usual per-task result rows |
+| `SUMMARY_<model>.md` | one markdown row per task: main metric, value, probe, eval strategy, fit seconds |
+| `results/bench_results_all.csv` | long-format table across every model (via `collect_bench_results.py`) |
+
+**Resumable.** A task counts as done only when the CSV already holds a row for
+it with the same probe *and* the same eval split, so an interrupted sweep
+continues where it stopped and a failed task is retried next run. `--force`
+re-runs everything.
+
+**Probe per task.** `linear` everywhere except where sklearn scales badly in
+the number of outputs: multilabel (OvR fits one model per label) and 1000+
+class tasks (`remote_homology`, `cath_eat`) get `torch_linear`. The `Probe`
+column records which one ran, so rows stay comparable across models — as long
+as the models are compared with the same rule, which this script guarantees.
+
+**Fine-tuning** is opt-in (`--finetune lora|last_n|full`) and runs
+`finetune_sequence.py` with early stopping on the sequence-level tasks only;
+those results land in `finetune_sequence_<model>.jsonl` and are folded into
+`bench_results_all.csv`. Frozen probes stay the default: they answer "what is
+in the representation", cost one forward pass, and do not need a
+hyperparameter search to be fair.
+
 ## Recipes
 
 **See what tasks exist.**

@@ -6,6 +6,7 @@ description = "Unified protein model benchmark suite: frozen probes, finetuning,
 requires-python = ">=3.10"
 dependencies = [
     "datasets",
+    "einops>=0.8.2",
     "numpy",
     "pandas",
     "pyarrow",
