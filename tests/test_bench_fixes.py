@@ -327,3 +327,44 @@ def test_regression_spearman_nan_warns_and_returns_zero(caplog):
         out = cm((preds, labels))
     assert out["Spearman"] == 0.0        # aggregation-compatible sentinel kept
     assert "spearman" in caplog.text.lower()  # ...but the collapse is surfaced
+
+
+def test_timed_fit_is_one_helper_used_by_every_probe_path():
+    """Four copy-pasted perf_counter blocks meant four places to keep in step."""
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+
+    from protein_benchmark_suite import timed_fit
+
+    X = np.random.RandomState(0).randn(50, 4)
+    y = (X[:, 0] > 0).astype(int)
+    model = LogisticRegression()
+    seconds = timed_fit(model, X, y)
+    assert seconds > 0
+    assert hasattr(model, "coef_"), "timed_fit must actually fit the model"
+
+
+def test_probe_fit_seconds_is_a_total_not_a_per_fold_mean():
+    """CV rows route through _aggregate_cv_metrics, which means over folds. One
+    column must not carry two units."""
+    from protein_benchmark_suite import _aggregate_cv_metrics
+
+    folds = [
+        {"Accuracy": 0.8, "ProbeFitSec": 2.0},
+        {"Accuracy": 0.6, "ProbeFitSec": 4.0},
+    ]
+    out = _aggregate_cv_metrics(folds)
+    assert out["Accuracy"] == 0.7  # metrics still average
+    assert out["ProbeFitSec"] == 6.0  # time sums
+
+
+def test_classification_metrics_bootstrap_is_capped_on_huge_arrays():
+    """Residue tasks resample 150k-600k rows; an uncapped bootstrap costs minutes
+    per task against a ~60s probe fit."""
+    import numpy as np
+
+    from protein_benchmark_suite import bootstrap_draws_for
+
+    assert bootstrap_draws_for(1000, n_rows=500) == 1000
+    assert bootstrap_draws_for(1000, n_rows=500_000) < 1000
+    assert bootstrap_draws_for(0, n_rows=500_000) == 0

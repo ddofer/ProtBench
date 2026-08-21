@@ -159,7 +159,7 @@ def test_iter_residue_embeddings_preserves_protein_boundaries():
 
     # The stacked helper must still return exactly the concatenation.
     labels = [list(range(len(s))) for s in sequences]
-    X, y = extract_residue_embeddings(
+    X, y, _ = extract_residue_embeddings(
         encoder=_StubEncoder(),
         tokenizer=_StubTokenizer(),
         sequences=sequences,

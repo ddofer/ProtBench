@@ -41,14 +41,19 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+CACHE_VERSION = "v2"  # v2 stores protein groups; older entries are plain misses
+
+
 def cache_key(model_hash: str, task: str, split: str) -> str:
     """Stable cache key keyed by (model, task, split). Different model
     hashes always produce different keys so different encoders never
-    collide on cache files."""
+    collide on cache files. The version tag turns a format change into an
+    ordinary miss -- the cache is a derived artifact, so re-extracting is
+    cheaper than carrying a compatibility branch forever."""
     safe_model = hashlib.sha1(model_hash.encode("utf-8")).hexdigest()[:16]
     safe_task = "".join(c if c.isalnum() or c in "_-" else "_" for c in task)
     safe_split = "".join(c if c.isalnum() or c in "_-" else "_" for c in split)
-    return f"{safe_model}__{safe_task}__{safe_split}"
+    return f"{safe_model}__{safe_task}__{safe_split}__{CACHE_VERSION}"
 
 
 @dataclass
@@ -58,7 +63,7 @@ class EmbeddingCache:
     Layout::
 
         <root>/<key>.npz   (arrays: ``X`` float32, ``y`` int64,
-                            optional ``g`` int64 = protein index per residue)
+                            ``g`` int64 = protein index per residue)
     """
 
     root: Path
@@ -73,17 +78,16 @@ class EmbeddingCache:
     def has(self, key: str) -> bool:
         return self._path(key).exists()
 
-    def get(self, key: str) -> Tuple[np.ndarray, np.ndarray]:
+    def get(self, key: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Always ``(X, y, groups)``. ``seq_embed_cache`` reuses this class for
+        whole-sequence embeddings and has neither labels nor proteins, so those
+        come back as zeros rather than changing the arity per caller."""
         path = self._path(key)
         if not path.exists():
             raise KeyError(f"cache miss: {path}")
         data = np.load(path)
-        return data["X"], data["y"]
-
-    def get_groups(self, key: str) -> Optional[np.ndarray]:
-        """Protein index per residue, or None for entries written before ``g`` existed."""
-        data = np.load(self._path(key))
-        return data["g"] if "g" in data.files else None
+        g = data["g"] if "g" in data.files else np.zeros(len(data["y"]), dtype="int64")
+        return data["X"], data["y"], g
 
     def put(
         self, key: str, X: np.ndarray, y: np.ndarray, groups: Optional[np.ndarray] = None
@@ -95,7 +99,10 @@ class EmbeddingCache:
         # already ends in ``.npz`` is a no-op for the extension.
         tmp = path.with_name(path.stem + ".tmp.npz")
         with open(tmp, "wb") as fh:
-            arrays = {"X": X.astype("float32", copy=False), "y": y.astype("int64", copy=False)}
+            arrays = {
+                "X": X.astype("float32", copy=False),
+                "y": y.astype("int64", copy=False),
+            }
             if groups is not None:
                 arrays["g"] = np.asarray(groups).astype("int64", copy=False)
             np.savez(fh, **arrays)
@@ -236,11 +243,10 @@ def extract_residue_embeddings(
     device: str = "cpu",
     batch_size: int = 8,
     max_length: int = 1024,
-    return_groups: bool = False,
-):
-    """Run ``encoder`` once per protein, return stacked per-residue
-    embeddings + per-residue labels (+ protein index per residue when
-    ``return_groups``; needed for protein-level CV).
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Run ``encoder`` once per protein, return stacked per-residue embeddings,
+    per-residue labels, and the protein index per residue (needed for
+    protein-level CV, and 8 bytes/residue against a float32 (T, d) block).
 
     Per-protein truncation matches the tokenizer's ``max_length``; the
     label list is sliced to the surviving non-special token count. A
@@ -254,8 +260,11 @@ def extract_residue_embeddings(
         )
     if not sequences:
         # 0-dim embedding column count is unknown at this point.
-        empty = np.zeros((0, 0), dtype="float32"), np.zeros((0,), dtype="int64")
-        return (*empty, np.zeros((0,), dtype="int64")) if return_groups else empty
+        return (
+            np.zeros((0, 0), dtype="float32"),
+            np.zeros((0,), dtype="int64"),
+            np.zeros((0,), dtype="int64"),
+        )
 
     all_X: List[np.ndarray] = []
     all_y: List[np.ndarray] = []
@@ -293,13 +302,16 @@ def extract_residue_embeddings(
         logger.warning("  %s; extra positions dropped", msg)
 
     if not all_X:
-        empty = np.zeros((0, 0), dtype="float32"), np.zeros((0,), dtype="int64")
-        return (*empty, np.zeros((0,), dtype="int64")) if return_groups else empty
-    X = np.concatenate(all_X, axis=0).astype("float32")
-    y = np.concatenate(all_y, axis=0).astype("int64")
-    if return_groups:
-        return X, y, np.concatenate(all_g, axis=0)
-    return X, y
+        return (
+            np.zeros((0, 0), dtype="float32"),
+            np.zeros((0,), dtype="int64"),
+            np.zeros((0,), dtype="int64"),
+        )
+    # copy=False: the concat result is already float32, and a third full-size
+    # allocation is ~3 GB at 600k residues x 1280 dims.
+    X = np.concatenate(all_X, axis=0).astype("float32", copy=False)
+    y = np.concatenate(all_y, axis=0).astype("int64", copy=False)
+    return X, y, np.concatenate(all_g, axis=0)
 
 
 # ---------------------------------------------------------------------------
@@ -308,8 +320,8 @@ def extract_residue_embeddings(
 
 
 def drop_ignored_residues(
-    X: np.ndarray, y: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray]:
+    X: np.ndarray, y: np.ndarray, groups: Optional[np.ndarray] = None
+):
     """Drop residues carrying ``IGNORE_LABEL`` from the embeddings AND labels.
 
     Some datasets mark residues with no ground truth (SS8's unassigned termini).
@@ -317,12 +329,12 @@ def drop_ignored_residues(
     decode time, would shorten the label list and shift every later label
     against its residue embedding.
     """
-    if y.size == 0:
-        return X, y
-    keep = y >= 0
+    keep = y >= 0 if y.size else np.ones(0, dtype=bool)
     if keep.all():
-        return X, y
-    return X[keep], y[keep]
+        return (X, y) if groups is None else (X, y, groups)
+    if groups is None:
+        return X[keep], y[keep]
+    return X[keep], y[keep], groups[keep]
 
 
 def fit_residue_linear_probe(
@@ -428,11 +440,7 @@ def evaluate_token_classification(
         key = cache_key(model_hash, task, split) if cache is not None else None
         if key is not None and cache.has(key):
             logger.info("residue cache HIT: model=%s task=%s split=%s", model_hash, task, split)
-            X, y = cache.get(key)
-            g = cache.get_groups(key)
-            if g is not None:
-                return X, y, g
-            logger.info("  cache entry predates protein groups; re-extracting")
+            return cache.get(key)
         X, y, g = extract_residue_embeddings(
             encoder=encoder,
             tokenizer=tokenizer,
@@ -441,37 +449,34 @@ def evaluate_token_classification(
             device=device,
             batch_size=batch_size,
             max_length=max_length,
-            return_groups=True,
         )
         if key is not None:
-            cache.put(key, X, y, groups=g)
+            cache.put(key, X, y, g)
         return X, y, g
 
     def _extract_scorable(seqs, labs, split: str):
         # Drop AFTER the cache write so the cache stays a faithful record of the
         # split and stays valid if the ignore rule ever changes.
         X, y, g = _extract_or_load(seqs, labs, split)
-        keep = y >= 0
-        if not keep.all():
+        X_kept, y_kept, g_kept = drop_ignored_residues(X, y, g)
+        if y_kept.size != y.size:
             logger.info(
                 "  %s/%s: %d of %d residues carry no ground truth; excluded",
                 task,
                 split,
-                int((~keep).sum()),
+                y.size - y_kept.size,
                 y.size,
             )
-            X, y, g = X[keep], y[keep], g[keep]
-        return X, y, g
+        return X_kept, y_kept, g_kept
 
     X_tr, y_tr, g_tr = _extract_scorable(train_sequences, train_labels, "train")
     problem_type = "binary" if len(np.unique(y_tr)) == 2 else "multiclass"
 
     def _fit_score(X_a, y_a, X_b, y_b):
-        t0 = time.perf_counter()
-        probe = fit_residue_linear_probe(
-            X_a, y_a, problem_type=problem_type, probe_type=probe_type
-        )
-        fit_seconds = time.perf_counter() - t0
+        from protein_benchmark_suite import _make_probe_model_for_training_size, timed_fit
+
+        probe = _make_probe_model_for_training_size(probe_type, problem_type, len(X_a))
+        fit_seconds = timed_fit(probe, X_a, y_a)
         m = _compute_metrics(
             y_b, probe.predict(X_b), main_metric=cfg.main_metric, problem_type=problem_type
         )

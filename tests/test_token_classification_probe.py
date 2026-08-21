@@ -203,7 +203,7 @@ def test_extract_residue_embeddings_shape():
     enc = _TinyEncoder(hidden=8)
     tok = _TinyTokenizer()
     samples = [_Sample("ACDEFG", [0, 1, 2, 0, 1, 2]), _Sample("AAAA", [0, 0, 0, 0])]
-    X, y = extract_residue_embeddings(
+    X, y, _ = extract_residue_embeddings(
         encoder=enc,
         tokenizer=tok,
         sequences=[s.sequence for s in samples],
@@ -224,7 +224,7 @@ def test_padding_excluded():
     tok = _TinyTokenizer()
     # Two sequences of length 3 and 6 -> total non-special residues = 9
     samples = [_Sample("ACD", [0, 1, 2]), _Sample("EFGHIK", [2, 1, 0, 2, 1, 0])]
-    X, y = extract_residue_embeddings(
+    X, y, _ = extract_residue_embeddings(
         encoder=enc,
         tokenizer=tok,
         sequences=[s.sequence for s in samples],
@@ -244,7 +244,7 @@ def test_logreg_fit_predict_ss3():
     train = _toy_ss3_dataset(seed=1, n=64, length=20)
     test = _toy_ss3_dataset(seed=2, n=32, length=20)
 
-    X_tr, y_tr = extract_residue_embeddings(
+    X_tr, y_tr, _ = extract_residue_embeddings(
         encoder=enc,
         tokenizer=tok,
         sequences=[s.sequence for s in train],
@@ -253,7 +253,7 @@ def test_logreg_fit_predict_ss3():
         batch_size=8,
         max_length=64,
     )
-    X_te, y_te = extract_residue_embeddings(
+    X_te, y_te, _ = extract_residue_embeddings(
         encoder=enc,
         tokenizer=tok,
         sequences=[s.sequence for s in test],
@@ -277,7 +277,7 @@ def test_embedding_cache_roundtrip(tmp_path):
     y = np.arange(17, dtype="int64")
     key = "test_model_hash::ss3::train"
     cache.put(key, X, y)
-    X2, y2 = cache.get(key)
+    X2, y2, _ = cache.get(key)
     np.testing.assert_array_equal(X, X2)
     np.testing.assert_array_equal(y, y2)
 
@@ -404,7 +404,7 @@ def test_amplify_residue_embeddings_use_additive_mask():
     enc = _FakeAmplifyEncoder(hidden=8)
     tok = _TinyTokenizer()
     samples = [_Sample("ACDEFG", [0, 1, 2, 0, 1, 2]), _Sample("AAAA", [0, 0, 0, 0])]
-    X, y = extract_residue_embeddings(
+    X, y, _ = extract_residue_embeddings(
         encoder=enc,
         tokenizer=tok,
         sequences=[s.sequence for s in samples],
@@ -484,7 +484,6 @@ def test_extract_returns_protein_groups():
         device="cpu",
         batch_size=2,
         max_length=32,
-        return_groups=True,
     )
     assert groups.shape == (24,)
     np.testing.assert_array_equal(groups, np.repeat(np.arange(4), 6))
@@ -494,7 +493,7 @@ def test_cv_fallback_runs_without_test_split(tmp_path):
     metrics = _run_residue_eval(tmp_path, "linear", test=False)
     assert 0.0 <= metrics["Accuracy"] <= 1.0
     # protein groups were cached alongside X/y so the protein-level CV has them
-    data = np.load(next(Path(tmp_path).glob("*train.npz")))
+    data = np.load(next(Path(tmp_path).glob("*train*.npz")))
     assert "g" in data.files and data["g"].shape == data["y"].shape
 
 
@@ -530,3 +529,41 @@ def test_label_residue_mismatch_raises_when_not_truncation():
             batch_size=2,
             max_length=32,
         )
+
+
+def test_extract_always_returns_groups(tmp_path):
+    """Return arity must not depend on a flag: every caller gets (X, y, groups)."""
+    enc, tok = _TinyEncoder(hidden=8), _TinyTokenizer()
+    samples = _toy_ss3_dataset(seed=5, n=3, length=6)
+    result = extract_residue_embeddings(
+        encoder=enc,
+        tokenizer=tok,
+        sequences=[s.sequence for s in samples],
+        labels=[s.labels for s in samples],
+        device="cpu",
+        batch_size=2,
+        max_length=32,
+    )
+    assert len(result) == 3
+    X, y, groups = result
+    np.testing.assert_array_equal(groups, np.repeat(np.arange(3), 6))
+
+
+def test_drop_ignored_residues_keeps_groups_aligned():
+    """One definition of the IGNORE_LABEL rule, used by the live path."""
+    from token_classification_probe import drop_ignored_residues
+
+    X = np.arange(10, dtype="float32").reshape(5, 2)
+    y = np.array([0, -1, 2, -1, 1], dtype="int64")
+    g = np.array([0, 0, 1, 1, 2], dtype="int64")
+    X2, y2, g2 = drop_ignored_residues(X, y, g)
+    np.testing.assert_array_equal(y2, [0, 2, 1])
+    np.testing.assert_array_equal(g2, [0, 1, 2])
+    np.testing.assert_array_equal(X2, X[[0, 2, 4]])
+
+
+def test_cache_key_is_versioned_so_stale_entries_are_plain_misses():
+    """A cache without protein groups must miss, not trigger a compatibility branch."""
+    from token_classification_probe import CACHE_VERSION, cache_key
+
+    assert CACHE_VERSION in cache_key("m", "ss3", "train")

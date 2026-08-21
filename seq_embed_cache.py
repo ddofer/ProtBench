@@ -61,7 +61,7 @@ def cached_embed_sequences(
         cache = EmbeddingCache(Path(cache_root))
         key = _seq_cache_key(seqs, cfg_key)
         if cache.has(key):
-            X, _ = cache.get(key)
+            X, _, _ = cache.get(key)
             if X.shape[0] == len(seqs):
                 return X
             # Row count disagrees with this seq-set — ignore the stale/corrupt

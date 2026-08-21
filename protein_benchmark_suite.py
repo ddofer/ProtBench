@@ -73,6 +73,10 @@ def seed_all(seed: int) -> None:
 
 # Bootstrap resamples for metric CIs. 0 disables; --bootstrap N sets it.
 BOOTSTRAP_N = 0
+# Above this many evaluation rows the bootstrap draw count is scaled down: the
+# interval is already ~+/-0.001 and each draw recomputes the full metric block.
+_BOOTSTRAP_FULL_ROWS = 50_000
+_BOOTSTRAP_MIN_DRAWS = 100
 # Training proteins for the pairwise contact probe; --contact_train_proteins.
 CONTACT_TRAIN_PROTEINS = 400
 
@@ -91,6 +95,7 @@ def _boot_ci(metric_fn, y_true, y_pred, n_boot: int, seed: int) -> Dict[str, flo
     rng = np.random.default_rng(seed)
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
+    n_boot = bootstrap_draws_for(n_boot, len(y_true))
     draws: Dict[str, List[float]] = {}
     for _ in range(n_boot):
         idx = rng.integers(0, len(y_true), len(y_true))
@@ -142,6 +147,7 @@ from sklearn.ensemble import (
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import (
+    confusion_matrix,
     accuracy_score,
     average_precision_score,
     balanced_accuracy_score,
@@ -2487,9 +2493,7 @@ def evaluate_multilabel(
             ),
             n_jobs=DEFAULT_OVR_N_JOBS,
         )
-    fit_start = time.perf_counter()
-    clf.fit(X_train_f, y_train_f)
-    fit_seconds = time.perf_counter() - fit_start
+    fit_seconds = timed_fit(clf, X_train_f, y_train_f)
 
     preds = clf.predict(X_test_f)
 
@@ -2633,23 +2637,80 @@ def _make_probe_model_for_training_size(
     )
 
 
+def timed_fit(model, X, y) -> float:
+    """Fit ``model`` and return the wall seconds it took.
+
+    One definition so ``ProbeFitSec`` means the same thing on every path
+    (sequence, residue, multilabel, CV).
+    """
+    start = time.perf_counter()
+    model.fit(X, y)
+    return time.perf_counter() - start
+
+
+def bootstrap_draws_for(n_boot: int, n_rows: int) -> int:
+    """Scale the bootstrap draw count down on very large evaluation sets.
+
+    Residue tasks score 150k-600k rows; each draw recomputes the whole metric
+    block, which measures ~0.13 s at 150k rows and ~0.5 s at 600k -- 1000 draws
+    would cost minutes against a 60-120 s probe fit. The CI half-width is already
+    ~+/-0.001 there, so the extra draws buy nothing. Small evaluation sets, where
+    the interval is actually wide, keep the full count.
+    """
+    if n_boot <= 0 or n_rows <= _BOOTSTRAP_FULL_ROWS:
+        return n_boot
+    scaled = int(n_boot * _BOOTSTRAP_FULL_ROWS / n_rows)
+    return max(_BOOTSTRAP_MIN_DRAWS, min(n_boot, scaled))
+
+
 def classification_metrics(problem_type: str, y_true, y_pred) -> dict[str, float]:
     """Point metrics for binary / multiclass predictions.
 
     Single definition shared by the sequence-level probe evaluators and the
     residue-level probe (``token_classification_probe``), and the block that
     ``_boot_ci`` resamples -- so every path reports the same columns.
+
+    Derived from ONE confusion matrix rather than 4-5 independent sklearn passes
+    over the labels: each of those builds its own matrix internally, which is
+    ~6x slower on the 150k-600k-row residue arrays this is the inner loop for.
     """
+    y_true, y_pred = np.asarray(y_true), np.asarray(y_pred)
+    if y_true.size == 0:
+        zeros = {"Accuracy": 0.0, "F1_Macro": 0.0, "BalancedAccuracy": 0.0, "MCC": 0.0}
+        zeros["F1" if problem_type == "binary" else "F1_Weighted"] = 0.0
+        return zeros
+    labels = np.union1d(np.unique(y_true), np.unique(y_pred))
+    C = confusion_matrix(y_true, y_pred, labels=labels).astype(np.float64)
+    total = C.sum()
+
+    tp = np.diag(C)
+    pred_pos, actual_pos = C.sum(axis=0), C.sum(axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        precision = np.where(pred_pos > 0, tp / pred_pos, 0.0)
+        recall = np.where(actual_pos > 0, tp / actual_pos, 0.0)
+        denom = precision + recall
+        f1 = np.where(denom > 0, 2 * precision * recall / denom, 0.0)
+        present = actual_pos > 0
+        balanced = float(recall[present].mean()) if present.any() else 0.0
+
+    # MCC from the matrix (Gorodkin's multiclass form); matches matthews_corrcoef.
+    c, sk, pk = tp.sum(), actual_pos, pred_pos
+    cov_ytyp = c * total - float(sk @ pk)
+    cov_ytyt = total**2 - float(sk @ sk)
+    cov_ypyp = total**2 - float(pk @ pk)
+    mcc_denom = np.sqrt(cov_ytyt * cov_ypyp)
     metrics = {
-        "Accuracy": accuracy_score(y_true, y_pred),
-        "F1_Macro": f1_score(y_true, y_pred, average="macro", zero_division=0),
-        "BalancedAccuracy": balanced_accuracy_score(y_true, y_pred),
-        "MCC": matthews_corrcoef(y_true, y_pred),
+        "Accuracy": float(tp.sum() / total),
+        "F1_Macro": float(f1.mean()),
+        "BalancedAccuracy": balanced,
+        "MCC": float(cov_ytyp / mcc_denom) if mcc_denom > 0 else 0.0,
     }
     if problem_type == "binary":
-        metrics["F1"] = f1_score(y_true, y_pred, zero_division=0)
+        # Positive class = the larger label, matching sklearn's default pos_label.
+        pos = int(np.argmax(labels))
+        metrics["F1"] = float(f1[pos])
     else:
-        metrics["F1_Weighted"] = f1_score(y_true, y_pred, average="weighted", zero_division=0)
+        metrics["F1_Weighted"] = float((f1 * actual_pos).sum() / total)
     return metrics
 
 
@@ -2688,9 +2749,7 @@ def evaluate_classification_probe(
         knn_k=knn_k,
         knn_weights=knn_weights,
     )
-    fit_start = time.perf_counter()
-    classifier.fit(X_train, y_train)
-    fit_seconds = time.perf_counter() - fit_start
+    fit_seconds = timed_fit(classifier, X_train, y_train)
     predictions = classifier.predict(X_test)
 
     metrics = classification_metrics(problem_type, y_test, predictions)
@@ -2749,9 +2808,7 @@ def evaluate_regression_probe(
         knn_k=knn_k,
         knn_weights=knn_weights,
     )
-    fit_start = time.perf_counter()
-    regressor.fit(X_train, y_train)
-    fit_seconds = time.perf_counter() - fit_start
+    fit_seconds = timed_fit(regressor, X_train, y_train)
     predictions = regressor.predict(X_test)
     y_test_arr = np.asarray(y_test)
 
@@ -2807,6 +2864,10 @@ def _aggregate_cv_metrics(fold_metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
     # Select only numeric columns and drop missing
     df_num = df.select_dtypes(include=[np.number])
     aggregated = {k: float(v) for k, v in df_num.mean().items() if np.isfinite(v)}
+    # Fit time is a cost, not a score: report the total spent across folds so the
+    # column means the same thing as it does on a holdout row.
+    if "ProbeFitSec" in df_num:
+        aggregated["ProbeFitSec"] = float(df_num["ProbeFitSec"].sum())
     aggregated["CV_Folds"] = len(fold_metrics)
     return aggregated
 
@@ -3171,6 +3232,12 @@ def evaluate_task(
     test-time training on the ProteinGym zero-shot path; ignored elsewhere.
     """
 
+    # Resolve the probe ONCE, here, so every downstream evaluator receives a real
+    # probe rather than a request: 'auto' picks per task shape, and a probe the
+    # task cannot route through (knn on multilabel) collapses to the linear
+    # identity. Doing it at the entry point is what lets the per-branch guards go.
+    probe_type = effective_probe_type(cfg, probe_type)
+
     logger.info(f"Evaluating: {cfg.name}")
 
     # Residue-level (per-token) tasks use a separate linear-probe path that
@@ -3469,12 +3536,6 @@ def evaluate_task(
             dtype=object if cfg.problem_type == "multilabel" else None,
         )
 
-        if cfg.problem_type == "multilabel" and probe_type not in MULTILABEL_PROBES:
-            logger.info(
-                "  Multilabel tasks use the built-in linear evaluator; ignoring probe_type=%s",
-                probe_type,
-            )
-
         if cfg.problem_type == "binary":
             metrics = evaluate_classification_probe_cv(
                 probe_type,
@@ -3567,12 +3628,6 @@ def evaluate_task(
         norms_test = np.linalg.norm(X_test, axis=1, keepdims=True).clip(min=1e-12)
         X_test = X_test / norms_test
         logger.info("  Applied L2 normalization to embeddings")
-
-    if cfg.problem_type == "multilabel" and probe_type not in MULTILABEL_PROBES:
-        logger.info(
-            "  Multilabel tasks use the built-in linear evaluator; ignoring probe_type=%s",
-            probe_type,
-        )
 
     logger.info("  Training %s probe...", probe_label(probe_type))
     if cfg.problem_type == "binary":

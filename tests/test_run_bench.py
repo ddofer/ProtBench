@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 _BENCH = Path(__file__).resolve().parent.parent
 if str(_BENCH) not in sys.path:
@@ -186,3 +187,18 @@ def test_summary_escapes_pipes_in_cell_values(tmp_path):
     # escaped, so the row still has exactly as many real column separators as the header
     unescaped = lambda ln: len(re.findall(r"(?<!\\)\|", ln))
     assert unescaped(body) == unescaped(text.splitlines()[2])
+
+
+def test_auto_is_resolved_before_any_probe_is_built():
+    """'auto' is a request, not a probe: it must never reach make_probe_model."""
+    import inspect
+
+    from benchmark_tasks import TASKS
+    from protein_benchmark_suite import evaluate_task, make_probe_model
+
+    with pytest.raises(ValueError, match="Unsupported probe"):
+        make_probe_model("auto", "multiclass")  # the raw registry rejects it...
+    # ...so evaluate_task must resolve it first, for every caller, not just main()
+    src = inspect.getsource(evaluate_task)
+    assert "effective_probe_type(cfg, probe_type)" in src
+    assert TASKS  # registry loaded
