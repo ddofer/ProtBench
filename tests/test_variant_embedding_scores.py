@@ -203,3 +203,26 @@ def test_red_arm_is_negated_to_match_the_shared_convention():
     raw_delta = red(mut_X) - red(wt_X)
     (score,) = score_indel_variants(wt, [mut], _fake_embedder, arm="red")
     assert score == -raw_delta != 0.0
+
+
+def test_zeroshot_records_carry_the_code_version_and_scorer_settings():
+    """An indel score depends on the arm and k that produced it; a substitution
+    score depends on the code (the RED sign fix landed in one commit). The record
+    must say both, or old and new JSONL lines are indistinguishable."""
+    import json
+
+    import proteingym_mlm_zeroshot as pz
+    from benchmark_utils import code_version
+
+    rec = pz.build_record(
+        checkpoint="m",
+        task="proteingym_dms_indels_zeroshot",
+        model_type="esm",
+        metric={"eval_spearman": 0.5},
+        n_eval=10,
+        notes="",
+        ctx={"indel_score_mode": "embedding_red", "indel_pll_passes": 16},
+    )
+    assert rec["code_version"] == code_version()
+    assert rec["metric"]["indel_score_mode"] == "embedding_red"
+    json.dumps(rec)  # must stay serialisable

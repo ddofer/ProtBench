@@ -755,6 +755,34 @@ def _np_default(o):
     return float(o)
 
 
+def build_record(*, checkpoint, task, model_type, metric, n_eval, notes, ctx=None):
+    """Assemble one JSONL record, stamped with the code that produced it.
+
+    Two records can agree on model, task and metric and still be different
+    measurements: the indel arm and its ``k`` change the score, and so does a code
+    change (the RED arm's sign was corrected in one commit). ``timestamp_iso``
+    cannot express either, so the scorer settings ride in ``metric`` and the
+    git description in ``code_version``.
+    """
+    from benchmark_utils import code_version
+
+    metric = dict(metric)
+    ctx = ctx or {}
+    if task in INDEL_ZS and "indel_score_mode" in ctx:
+        metric.setdefault("indel_score_mode", ctx["indel_score_mode"])
+        metric.setdefault(
+            "indel_pll_passes",
+            ctx.get("indel_pll_passes") if ctx["indel_score_mode"] == "strided" else None,
+        )
+    return {
+        "checkpoint": checkpoint, "task": task, "mode": "mlm_zeroshot",
+        "split": "zeroshot", "model_type": model_type,
+        "metric": metric, "n_train": 0, "n_eval": n_eval,
+        "notes": notes, "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "code_version": code_version(),
+    }
+
+
 def _build_and_write(out, result, ctx, dms_ref):
     """Build the leaderboard metric_dict + JSONL record from a (possibly merged)
     ``result`` and a small ``ctx`` (model_window/strategy/indel-mode/etc). Shared by
@@ -775,13 +803,13 @@ def _build_and_write(out, result, ctx, dms_ref):
             "strided":     f"strided masked-PLL approx (own-method, k={ctx['indel_pll_passes']})",
             "masked_pll":  "exact masked-PLL (own-method)",
             "single_pass": "single-pass unmasked mean-logp (own-method; leakage, reference-only)",
+            "embedding_span": "edit-span pooled embedding distance (own-method, 1 forward/variant)",
+            "embedding_red": "residue-diversity delta (own-method, 1 forward/variant)",
         }[ctx["indel_score_mode"]]
-    rec = {
-        "checkpoint": ctx["checkpoint"], "task": task_key, "mode": "mlm_zeroshot",
-        "split": "zeroshot", "model_type": ctx.get("model_type"),
-        "metric": metric_dict, "n_train": 0, "n_eval": len(result["recs"]),
-        "notes": ctx.get("notes", ""), "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
-    }
+    rec = build_record(
+        checkpoint=ctx["checkpoint"], task=task_key, model_type=ctx.get("model_type"),
+        metric=metric_dict, n_eval=len(result["recs"]), notes=ctx.get("notes", ""), ctx=ctx,
+    )
     jsonl_path = write_jsonl_record(out, "mlm_zeroshot", ctx["checkpoint"], rec)
     (out / f"per_assay_{task_key}.json").write_text(json.dumps(
         {"task": task_key, "checkpoint": ctx["checkpoint"], "recs": result["recs"]},

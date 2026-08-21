@@ -239,3 +239,29 @@ def test_summary_honours_the_task_registry_main_metric(tmp_path):
     assert "| F1_Micro | 0.8144 |" in text
     assert "| Accuracy | 0.5644 |" in text
     assert "| MCC | 0.3828 |" in text
+
+
+def test_long_format_csv_keeps_rows_from_different_code_apart(tmp_path):
+    """bench_results_all.csv is the cross-model comparison table; if it collapses a
+    pre-fix and a post-fix row onto one key, the older number silently wins or
+    loses depending on date order."""
+    import subprocess
+    import sys as _sys
+
+    csv = tmp_path / "bench_m.csv"
+    pd.DataFrame([
+        {"Model": "m", "Task": "Solubility (DeepSol)", "Samples": "Full", "Date": "2026-08-01",
+         "Probe": "linear", "EvalMode": "standard", "EvalSplit": "test",
+         "EvalStrategy": "test_split", "AUC": 0.71},
+        {"Model": "m", "Task": "Solubility (DeepSol)", "Samples": "Full", "Date": "2026-08-21",
+         "Probe": "linear", "EvalMode": "standard", "EvalSplit": "test",
+         "EvalStrategy": "test_split", "AUC": 0.75, "CodeVersion": "abc1234"},
+    ]).to_csv(csv, index=False)
+    out = tmp_path / "all.csv"
+    subprocess.run(
+        [_sys.executable, "collect_bench_results.py", "--probe-csv", str(csv), "--out", str(out)],
+        cwd=_BENCH, check=True, capture_output=True,
+    )
+    got = pd.read_csv(out)
+    assert "code_version" in got.columns
+    assert set(got["code_version"].astype(str)) == {"unknown", "abc1234"}

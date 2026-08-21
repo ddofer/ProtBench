@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
 import numpy as np
+from functools import lru_cache
+
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -44,7 +46,13 @@ RESULT_IDENTITY_COLUMNS = (
     "EvalMode",
     "EvalSplit",
     "EvalStrategy",
+    "CodeVersion",
 )
+
+# Rows written before the stamp existed. They are NOT interchangeable with
+# stamped rows: the residue CV fallback, for one, moved from residue-level KFold
+# (which leaked residues of a protein across folds) to protein-level GroupKFold.
+UNKNOWN_CODE_VERSION = "unknown"
 
 # Ordered metric priority for selection: first valid metric in both runs is used.
 METRIC_PRIORITY = [
@@ -84,6 +92,36 @@ EPSILON = 1e-12
 # ============================================================================
 # File Resolution
 # ============================================================================
+
+
+@lru_cache(maxsize=1)
+def code_version() -> str:
+    """Short git description of the benchmark code that produced a result.
+
+    Two rows can share model, task, probe and split and still be different
+    measurements, because the code between them changed -- the residue CV
+    fallback moved from residue-level KFold to protein-level GroupKFold, and the
+    indel RED arm had its sign corrected. ``Date`` cannot express that; this can.
+    ``-dirty`` marks uncommitted changes. Falls back to ``unknown`` outside a git
+    checkout, which is also what old, unstamped rows read as.
+    """
+    import subprocess
+
+    repo = Path(__file__).resolve().parent
+    try:
+        sha = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5, check=True,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True, text=True, timeout=5, check=True,
+        ).stdout.strip()
+    except (subprocess.SubprocessError, OSError):
+        return UNKNOWN_CODE_VERSION
+    if not sha:
+        return UNKNOWN_CODE_VERSION
+    return f"{sha}-dirty" if dirty else sha
 
 
 def find_result_file(model_or_dir: str, output_dir: str = "results/benchmarks") -> Path:
@@ -201,6 +239,7 @@ def prepare_result_df(
         "EvalSplit": DEFAULT_RESULT_EVAL_SPLIT,
         "EvalStrategy": DEFAULT_RESULT_EVAL_STRATEGY,
         "Date": "",
+        "CodeVersion": UNKNOWN_CODE_VERSION,
     }
 
     # Merge any extra defaults provided

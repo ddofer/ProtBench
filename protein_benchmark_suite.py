@@ -188,6 +188,7 @@ from benchmark_tasks import (
     TaskConfig,
 )
 from benchmark_utils import (
+    code_version,
     DEFAULT_RESULT_EVAL_MODE,
     DEFAULT_RESULT_EVAL_SPLIT,
     DEFAULT_RESULT_EVAL_STRATEGY,
@@ -3755,6 +3756,10 @@ class ResultTracker:
             "EvalSplit": eval_split,
             "EvalStrategy": eval_strategy,
             "EmbeddingNorm": embedding_norm,
+            # Which benchmark code produced this row. Two rows can agree on model,
+            # task, probe and split and still be different measurements if the
+            # code moved between them; Date cannot say that.
+            "CodeVersion": code_version(),
         }
         if benchmark_seed is not None:
             row["BenchmarkSeed"] = benchmark_seed
@@ -3837,7 +3842,11 @@ class ResultTracker:
                     "EvalSplit",
                     "EvalStrategy",
                     "EmbeddingNorm",
+                    # A re-run under different code is a different measurement,
+                    # so it appends rather than overwriting the older row.
+                    "CodeVersion",
                 ]
+                dedup_cols = [c for c in dedup_cols if c in merged.columns]
                 merged = merged.drop_duplicates(subset=dedup_cols, keep="last")
                 new_df = merged
                 logger.info(

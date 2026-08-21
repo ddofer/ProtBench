@@ -273,6 +273,27 @@ python protein_benchmark_suite.py -m <model> --tasks stability --bootstrap 1000
 Adds `<Metric>_CI_low` / `_CI_high` columns by resampling the test predictions.
 No refitting, so it costs seconds.
 
+## Telling results apart
+
+Every result row records **`CodeVersion`** (git short SHA, `-dirty` if the tree
+had uncommitted changes) alongside `Date`, `Probe`, `EvalSplit`, `EvalStrategy`
+and `Samples`. It is part of the dedup identity, so a re-run under different code
+appends a row instead of overwriting the old one, and
+`results/bench_results_all.csv` carries it as `code_version`.
+
+That matters because some changes move numbers legitimately:
+
+| Change | What it affects | How to spot the old rows |
+| --- | --- | --- |
+| Residue CV fallback moved from residue-level `KFold` to protein-level `GroupKFold` | `ss3`/`ss8`/`conservation`/`disprot` rows scored with `EvalStrategy=validation_cv4_train` — the old ones leaked residues of a protein across folds and read **high** | no `CodeVersion`, or a SHA older than `943cff6` |
+| ProteinGym zero-shot moved from embedding cosine to masked-marginal | different files entirely: cosine rows are in `bench_<model>.csv` with `EvalMode=proteingym_zeroshot`; masked-marginal lives in `mlm_zeroshot_<model>.jsonl` with `mode=mlm_zeroshot` | file + `EvalMode` |
+| Indel `RED` arm sign corrected, `--indel_pll_passes` default 32 → 16 | ProteinGym indel scores | the JSONL record's `code_version`, plus `metric.indel_score_mode` / `metric.indel_pll_passes` |
+| `-p auto` routing | which probe ran | the `Probe` column already records the resolved probe, never `auto` |
+
+Rows written before the stamp existed read `unknown`. **They are not
+interchangeable with stamped rows** — treat a comparison that mixes them as
+suspect unless the affected paths above are irrelevant to it.
+
 ## Gotchas
 
 These are the ones that produce a wrong number rather than an error.

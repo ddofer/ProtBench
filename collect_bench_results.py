@@ -17,7 +17,12 @@ except ImportError:
 
 OUT_COLUMNS = ["date", "model", "notes", "probe_type", "task", "task_type",
                "split", "metric_name", "metric_value", "n_samples",
-               "runtime_s", "source_file"]
+               "runtime_s", "code_version", "source_file"]
+
+# Rows written before the code stamp existed. Kept distinct from stamped rows:
+# the code between them changed (residue CV moved to protein-level GroupKFold,
+# the indel RED arm had its sign corrected), so they are not the same measurement.
+UNKNOWN_CODE_VERSION = "unknown"
 
 # Probe CSVs (ResultTracker) write the DISPLAY name ("EC Classification") in the
 # `Task` column, but TASKS is keyed on short ids ("ec_classification"). Resolve
@@ -56,6 +61,7 @@ def normalize_probe_row(row: dict, main_metric: str, task_type: str,
         "metric_name": main_metric,
         "metric_value": float(val) if val not in ("", None) else None,
         "n_samples": row.get("Samples", ""), "runtime_s": runtime_s,
+        "code_version": row.get("CodeVersion") or UNKNOWN_CODE_VERSION,
         "source_file": source_file,
     }
 
@@ -93,6 +99,7 @@ def normalize_ft_record(rec: dict, main_metric: str, task_type: str,
         "metric_name": metric_name,
         "metric_value": float(value) if value is not None else None,
         "n_samples": rec.get("n_eval", ""), "runtime_s": runtime_s,
+        "code_version": rec.get("code_version") or UNKNOWN_CODE_VERSION,
         "source_file": source_file,
     }
 
@@ -110,7 +117,8 @@ def _dedup_key(r: dict) -> tuple:
     # (model, task, probe, split, metric), keeping the latest date. So notes
     # only keeps rows distinct WITHIN a single merge — the on-disk file holds one
     # row per cell regardless of notes.
-    return (r["model"], r.get("notes", ""), r["task"], r["probe_type"], r["split"], r["metric_name"])
+    return (r["model"], r.get("notes", ""), r["task"], r["probe_type"], r["split"],
+            r["metric_name"], r.get("code_version", UNKNOWN_CODE_VERSION))
 
 def collect(probe_csvs: list[str], ft_jsonls: list[str], out_csv: str,
             notes: str = "", runtime_map: dict | None = None) -> int:
@@ -162,7 +170,8 @@ def collect(probe_csvs: list[str], ft_jsonls: list[str], out_csv: str,
     # later, i.e. the most recent collect). This is what "overwrite stale" means.
     final: dict[tuple, dict] = {}
     for r in merged.values():
-        k = (r["model"], r["task"], r["probe_type"], r["split"], r["metric_name"])
+        k = (r["model"], r["task"], r["probe_type"], r["split"], r["metric_name"],
+             r.get("code_version", UNKNOWN_CODE_VERSION))
         cur = final.get(k)
         if cur is None or str(r.get("date", "")) >= str(cur.get("date", "")):
             final[k] = r

@@ -391,3 +391,35 @@ def test_disabled_cosine_zeroshot_points_at_the_mlm_scorer(monkeypatch):
     metrics, _, strategy = pbs.evaluate_task(cfg, model_obj=None, is_sbert=False, device="cpu")
     assert strategy == "task_exception"
     assert "proteingym_mlm_zeroshot.py" in metrics["Error"]
+
+
+def test_result_rows_record_the_code_version():
+    """Two rows for the same model/task/probe can be different MEASUREMENTS if the
+    code changed between them (e.g. the residue CV fallback moving from
+    residue-level KFold to protein-level GroupKFold). Date alone does not say
+    that; a code stamp does."""
+    from benchmark_utils import code_version
+    from protein_benchmark_suite import ResultTracker
+
+    version = code_version()
+    assert version and version != "None"
+
+    tracker = ResultTracker("m")
+    tracker.add("Solubility (DeepSol)", {"AUC": 0.7}, samples=None)
+    assert tracker.results[0]["CodeVersion"] == version
+
+
+def test_old_result_files_without_the_stamp_still_load():
+    """Backfill, don't break: every CSV written before the stamp existed."""
+    import pandas as pd
+
+    from benchmark_utils import prepare_result_df
+
+    legacy = pd.DataFrame([
+        {"Model": "m", "Task": "Solubility (DeepSol)", "Samples": "Full", "Date": "2026-08-01",
+         "Probe": "linear", "EvalMode": "standard", "EvalSplit": "test",
+         "EvalStrategy": "test_split", "AUC": 0.71}
+    ])
+    out = prepare_result_df(legacy)
+    assert "CodeVersion" in out.columns
+    assert out["CodeVersion"].iloc[0] == "unknown"
