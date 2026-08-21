@@ -383,11 +383,34 @@ def strided_masked_pll_table(refs, tokenizer, seqs, aa2id, model_window, device,
     return out
 
 
+INDEL_SCORE_MODES = ("strided", "single_pass", "masked_pll", "embedding_span", "embedding_red")
+
+
+def _make_residue_embedder(model, tokenizer, device, batch_size, max_length):
+    """Adapt a loaded model to the ``seqs -> [(T, d), ...]`` contract the embedding arms need.
+
+    Reuses ``token_classification_probe.iter_residue_embeddings`` (length-sorted
+    batching, on-device masking, special/pad tokens excluded). A ``*ForMaskedLM``
+    wrapper returns logits from ``outputs[0]``, so hand it the base encoder.
+    """
+    from token_classification_probe import iter_residue_embeddings
+
+    encoder = getattr(model, "base_model", model)
+
+    def embed(seqs):
+        return list(iter_residue_embeddings(
+            encoder=encoder, tokenizer=tokenizer, sequences=list(seqs),
+            device=device, batch_size=batch_size, max_length=max_length))
+
+    return embed
+
+
 def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
                max_assays=None, max_variants_per_assay=None,
                model_window=1022, indel_long_policy="skip",
                skip_huge_assays=None, indel_score_mode="strided",
-               indel_pll_passes=32, assay_shard=0, assay_num_shards=1):
+               indel_pll_passes=32, assay_shard=0, assay_num_shards=1,
+               residue_embedder=None):
     cfg = TASKS[task_key]
     is_indel = task_key in INDEL_ZS
     from datasets import load_dataset
@@ -501,7 +524,25 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
                     s = seq
                 tbl = masked_marginal_logprob_table(refs, tokenizer, s, device, max_length, batch_size)
                 return pll_from_table(s, tbl, aa2id)
-            if indel_score_mode in ("single_pass", "strided"):
+            if indel_score_mode.startswith("embedding_"):
+                # ONE forward per sequence instead of `indel_pll_passes` (32) --
+                # indels cannot amortize a masked forward across variants the way
+                # substitutions can, so this is the whole benchmark at ~1/k the cost.
+                from variant_embedding_scores import score_indel_variants
+
+                variants = [muts[int(i)] for i in idx]
+                vals = score_indel_variants(
+                    wt, variants, residue_embedder,
+                    arm="red" if indel_score_mode == "embedding_red" else "span",
+                    model_window=model_window if indel_long_policy != "truncate" else None)
+                for j, i in enumerate(idx):
+                    sc = vals[j]
+                    if sc is None:
+                        n_skipped += 1
+                        continue
+                    scores.append(sc); ys.append(labels[int(i)])
+                    ys_bin.append(bin_labels[int(i)] if bin_labels is not None else None)
+            elif indel_score_mode in ("single_pass", "strided"):
                 # Batched per-sequence scorer. seqs[0]=WT, then the variants.
                 seqs = [wt] + [muts[int(i)] for i in idx]
                 if indel_score_mode == "single_pass":
@@ -783,14 +824,18 @@ def main(argv=None):
     ap.add_argument("--indel_long_policy", choices=["skip", "truncate"], default="skip",
                     help="indels longer than the window: skip (default) or truncate "
                          "to the first model_window residues (approximation)")
-    ap.add_argument("--indel_score_mode", choices=["single_pass", "masked_pll", "strided"],
+    ap.add_argument("--indel_score_mode", choices=list(INDEL_SCORE_MODES),
                     default="strided",
                     help="indel scorer. strided (default): leakage-free few-pass masked-PLL, "
                          "mask every k-th position over --indel_pll_passes forwards. Validated "
                          "2026-06-18 vs exact masked_pll: k=32 matches within 0.02 Spearman at "
                          "~50x speed (~7h vs ~weeks on CAPSD). masked_pll: L masked forwards/"
                          "variant, exact (correct, very slow). single_pass: 1 unmasked forward "
-                         "-- FAST but naive leakage breaks ranking (Spearman 0.50->0.31); avoid.")
+                         "-- FAST but naive leakage breaks ranking (Spearman 0.50->0.31); avoid. "
+                         "embedding_span / embedding_red: ONE forward per sequence (~1/k the "
+                         "cost of strided) reading the mutant's residue embeddings -- pooled "
+                         "over the derived edit span, or residue-diversity delta. Cheap; "
+                         "accuracy on proteins not yet benchmarked.")
     ap.add_argument("--indel_pll_passes", type=int, default=32,
                     help="strided mode: forward passes per sequence (k). Each pass masks "
                          "every k-th residue; larger k -> closer to exact masked_pll "
@@ -947,6 +992,10 @@ def main(argv=None):
             indel_pll_passes=args.indel_pll_passes,
             assay_shard=args.assay_shard,
             assay_num_shards=args.assay_num_shards,
+            residue_embedder=(
+                _make_residue_embedder(model, tokenizer, device, args.batch_size, max_length)
+                if args.indel_score_mode.startswith("embedding_") else None
+            ),
         )
         if not result["recs"] and not result["pool_ys"]:
             print(f"{task_key}: no scorable assays (skipped={result['n_skipped']})")
