@@ -66,6 +66,14 @@ clone. Build them first with the matching script in `scripts/`:
 `prep_conservation.py`, `prep_disprot.py`, `prep_flip2.py`. Two of the four
 (`conservation_flip`, `disprot`) are in the default preset.
 
+The FLIP downloads (`data.bioembeddings.com`) are slow and time out on
+restricted networks. If a machine already has a built copy, copy the directory
+instead — it is a plain `datasets.save_to_disk` dump, portable as-is:
+
+```bash
+cp -r /path/to/other/ProtBench/data/conservation_flip data/
+```
+
 ## Verified provenance
 
 Checked against upstream on 2026-05-21. **Read the caveats** — two different
