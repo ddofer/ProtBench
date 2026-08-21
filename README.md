@@ -126,6 +126,7 @@ readable summary:
 python scripts/run_bench.py -m Synthyra/ESMplusplus_small              # --preset fast (17 tasks)
 python scripts/run_bench.py -m /path/to/checkpoint --preset no-fast    # everything
 python scripts/run_bench.py -m MODEL --tasks solubility ss3            # explicit tasks
+python scripts/run_bench.py -m MODEL --proteingym                      # probes + ProteinGym zero-shot
 python scripts/run_bench.py -m MODEL --finetune lora                   # probes + LoRA fine-tuning
 ```
 
@@ -135,18 +136,29 @@ Outputs, all under `--output_dir` (default `results/benchmarks/`):
 | --- | --- |
 | `bench_<model>.csv` | the usual per-task result rows |
 | `SUMMARY_<model>.md` | one markdown row per task: main metric, value, probe, eval strategy, fit seconds |
+| `mlm_zeroshot_<model>.jsonl` | ProteinGym zero-shot records, with `--proteingym` |
 | `results/bench_results_all.csv` | long-format table across every model (via `collect_bench_results.py`) |
 
-**Resumable.** A task counts as done only when the CSV already holds a row for
-it with the same probe *and* the same eval split, so an interrupted sweep
-continues where it stopped and a failed task is retried next run. `--force`
+**Resumable.** A task counts as done when the CSV holds a *successful* row for
+it with the same probe, eval split and sample count — so an interrupted sweep
+continues where it stopped, a failed task is retried next run, and a capped
+`--very-fast` scout row never makes a full sweep look complete. `--force`
 re-runs everything.
 
-**Probe per task.** `linear` everywhere except where sklearn scales badly in
-the number of outputs: multilabel (OvR fits one model per label) and 1000+
-class tasks (`remote_homology`, `cath_eat`) get `torch_linear`. The `Probe`
-column records which one ran, so rows stay comparable across models — as long
-as the models are compared with the same rule, which this script guarantees.
+**Probe per task.** The rule lives in the suite (`-p auto`, which this script
+passes), so the plain CLI gets it too: `linear` everywhere except where sklearn
+scales badly — multilabel (OvR fits one model per label), 1000+ class tasks
+(`remote_homology`, `cath_eat`) and residue tasks (full-data `ss3` is ~2.8M rows;
+615 s single-core in lbfgs against 8 s on the torch head) get `torch_linear`.
+The `Probe` column records which one ran, so rows stay comparable across models.
+
+**ProteinGym** (`--proteingym`) runs the masked-marginal scorer in
+`proteingym_mlm_zeroshot.py` — substitutions by default, `--proteingym_indels`
+for the rest. One masked forward per *mutated position* serves every variant at
+that position, so all 2.47M DMS substitutions cost ~86k forwards. The suite's
+own cosine zero-shot tasks are default-off (`PLM_BENCH_PGYM_COSINE=1` restores
+them): one forward per mutant for a much weaker score. See
+[docs/ADVANCED.md](docs/ADVANCED.md).
 
 **Fine-tuning** is opt-in (`--finetune lora|last_n|full`) and runs
 `finetune_sequence.py` with early stopping on the sequence-level tasks only;
