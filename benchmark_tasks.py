@@ -771,3 +771,9 @@ DEFAULT_TASKS = [
     | MULTILABEL_EXCLUDED_TASKS
     | set(SS_HELDOUT_TASKS)
 ]
+
+
+# Display name -> task key. Result rows and TaskConfig carry the display name
+# ("EC Classification") while every registry lookup is keyed on the short id
+# ("ec_classification"); this is the one place that mapping is defined.
+TASK_NAME_TO_KEY = {cfg.name: key for key, cfg in TASKS.items()}

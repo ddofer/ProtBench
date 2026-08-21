@@ -177,6 +177,7 @@ from benchmark_tasks import (
     VERY_FAST_TASKS,
     RETRIEVAL_TASKS,
     PROTEINGYM_TASKS,
+    TASK_NAME_TO_KEY as _TASK_NAME_TO_KEY,
     TASKS,
     TaskConfig,
 )
@@ -226,6 +227,7 @@ DEFAULT_BENCHMARK_EVAL_SPLIT = "validation"
 SUPPORTED_EVAL_SPLITS = {"validation", "test"}
 _VALIDATION_SPLIT_ALIASES = ("validation", "valid", "val", "dev", "eval")
 PROBE_LABELS = {
+    "auto": "Auto (fastest probe per task)",
     "linear": "Linear",
     "torch_linear": "Torch Linear (AdamW, early stopping)",
     "histgb": "HistGradientBoosting",
@@ -234,6 +236,13 @@ PROBE_LABELS = {
 # Multilabel tasks (GO/EC) only have linear heads: OvR LogisticRegression or
 # one multi-output torch head. knn/histgb are silently the linear evaluator there.
 MULTILABEL_PROBES = frozenset({DEFAULT_RESULT_PROBE, "torch_linear"})
+# Tasks where sklearn's solver scales badly in the number of outputs or rows, so
+# ``-p auto`` routes them to the torch head. Measured on ESM-C 300M, full data:
+# remote_homology (1195 classes) 61s lbfgs vs 2.2s; ec_classification (572
+# labels, one liblinear fit per label) 156s vs 15s; ss3 615s and
+# conservation_flip 749s single-core at 38GB RSS (~2.8M residues). Everything
+# else is faster in sklearn.
+_AUTO_TORCH_TASKS = frozenset({"remote_homology", "cath_eat"})
 _MODEL_SIGNATURE_PATTERNS = (
     "*.json",
     "*.safetensors",
@@ -308,14 +317,33 @@ def _result_eval_mode(cfg: TaskConfig) -> str:
     return cfg.eval_mode or DEFAULT_RESULT_EVAL_MODE
 
 
+def _auto_probe_type(cfg: TaskConfig) -> str:
+    """Resolve ``-p auto`` to the probe that is fastest for this task's shape.
+
+    Single source of the routing rule: the CLI, ``scripts/run_bench.py`` and any
+    other caller all come through here, so a task cannot get a different probe
+    depending on how the benchmark was invoked.
+    """
+    task_key = _TASK_NAME_TO_KEY.get(cfg.name, cfg.name)
+    if (
+        cfg.problem_type in {"multilabel", "token_classification"}
+        or task_key in _AUTO_TORCH_TASKS
+    ):
+        return "torch_linear"
+    return DEFAULT_RESULT_PROBE
+
+
 def effective_probe_type(cfg: TaskConfig, requested_probe: str) -> str:
     """Return the probe label that reflects the evaluator actually used.
 
-    Retrieval and ProteinGym zero-shot evaluations have no probe; multilabel
-    only supports the linear heads (``MULTILABEL_PROBES``). Anything else is
-    persisted as the default linear probe identity for apples-to-apples
-    comparisons.
+    ``auto`` resolves per task (see ``_auto_probe_type``) and is never persisted
+    as-is -- the CSV records what actually ran. Retrieval and ProteinGym
+    zero-shot evaluations have no probe; multilabel only supports the linear
+    heads (``MULTILABEL_PROBES``). Anything else is persisted as the default
+    linear probe identity for apples-to-apples comparisons.
     """
+    if requested_probe == "auto":
+        requested_probe = _auto_probe_type(cfg)
     if cfg.problem_type == "retrieval":
         return DEFAULT_RESULT_PROBE
     if cfg.problem_type == "multilabel":
