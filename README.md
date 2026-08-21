@@ -478,6 +478,21 @@ is an optional ProtTucker-style projection-head reproduction on frozen CATH
 embeddings; its selfcheck validates the hard-negative mining and loss semantics,
 but real training/evaluation still needs the model embeddings and GPU runtime.
 
+## Big files on a small root filesystem
+
+`embed_cache/` grows to tens of GB per model (residue tasks dominate: ss3 is
+~2.8M residues x hidden). On a machine with a small root filesystem, point it at
+bulk storage — either per run or once, with a symlink:
+
+```bash
+python protein_benchmark_suite.py -m MODEL --embed_cache_dir /bulk/protbench_cache
+ln -s /bulk/protbench_cache embed_cache    # or make the default path a symlink
+```
+
+The locally-built datasets under `data/` are portable the same way: they are
+plain `datasets.save_to_disk` dumps, so a directory copied or symlinked from
+another machine works as-is (see [docs/DATASETS.md](docs/DATASETS.md)).
+
 ## Install
 
 ```bash
