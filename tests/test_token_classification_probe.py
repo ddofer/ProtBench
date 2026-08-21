@@ -417,3 +417,116 @@ def test_amplify_residue_embeddings_use_additive_mask():
     assert X.shape == (10, 8), f"expected (10, 8), got {X.shape}"
     assert y.shape == (10,)
     assert np.isfinite(X).all()
+
+
+# ---------------------------------------------------------------------------
+# torch_linear plumbing, shared metrics, protein-level CV, sorted extraction
+# ---------------------------------------------------------------------------
+
+
+def _ss3_cfg():
+    return TaskConfig(
+        name="SS3 (test)",
+        dataset="local://synthetic",
+        input_map={"seq": "sequence"},
+        label_col="labels",
+        problem_type="token_classification",
+        main_metric="Accuracy",
+    )
+
+
+def _run_residue_eval(tmp_path, probe_type, test=True, **kw):
+    enc = _TinyEncoder(hidden=16, seed=11)
+    tok = _TinyTokenizer()
+    train = _toy_ss3_dataset(seed=3, n=64, length=18)
+    test_set = _toy_ss3_dataset(seed=4, n=32, length=18) if test else None
+    return evaluate_token_classification(
+        cfg=_ss3_cfg(),
+        encoder=enc,
+        tokenizer=tok,
+        train_sequences=[s.sequence for s in train],
+        train_labels=[s.labels for s in train],
+        test_sequences=[s.sequence for s in test_set] if test else None,
+        test_labels=[s.labels for s in test_set] if test else None,
+        device="cpu",
+        batch_size=8,
+        max_length=64,
+        cache=EmbeddingCache(tmp_path),
+        model_hash="unit-test",
+        probe_type=probe_type,
+        **kw,
+    )
+
+
+def test_torch_linear_probe_reaches_residue_path(tmp_path):
+    metrics = _run_residue_eval(tmp_path, "torch_linear")
+    assert metrics["Accuracy"] > 0.4
+    assert "ProbeFitSec" in metrics
+
+
+def test_residue_metrics_share_sequence_level_block(tmp_path, monkeypatch):
+    import protein_benchmark_suite as pbs
+
+    monkeypatch.setattr(pbs, "BOOTSTRAP_N", 30)
+    metrics = _run_residue_eval(tmp_path, "linear")
+    assert "BalancedAccuracy" in metrics
+    assert "Accuracy_CI_low" in metrics and "Accuracy_CI_high" in metrics
+
+
+def test_extract_returns_protein_groups():
+    enc, tok = _TinyEncoder(hidden=8), _TinyTokenizer()
+    samples = _toy_ss3_dataset(seed=5, n=4, length=6)
+    X, y, groups = extract_residue_embeddings(
+        encoder=enc,
+        tokenizer=tok,
+        sequences=[s.sequence for s in samples],
+        labels=[s.labels for s in samples],
+        device="cpu",
+        batch_size=2,
+        max_length=32,
+        return_groups=True,
+    )
+    assert groups.shape == (24,)
+    np.testing.assert_array_equal(groups, np.repeat(np.arange(4), 6))
+
+
+def test_cv_fallback_runs_without_test_split(tmp_path):
+    metrics = _run_residue_eval(tmp_path, "linear", test=False)
+    assert 0.0 <= metrics["Accuracy"] <= 1.0
+    # protein groups were cached alongside X/y so the protein-level CV has them
+    data = np.load(next(Path(tmp_path).glob("*train.npz")))
+    assert "g" in data.files and data["g"].shape == data["y"].shape
+
+
+def test_iter_residue_embeddings_preserves_input_order():
+    from token_classification_probe import iter_residue_embeddings
+
+    enc, tok = _TinyEncoder(hidden=8), _TinyTokenizer()
+    seqs = ["ACDEFGHIKL", "AC", "ACDEFG", "A", "ACDEFGHIKLMNPQ", "ACD"]
+    out = list(
+        iter_residue_embeddings(
+            encoder=enc, tokenizer=tok, sequences=seqs, device="cpu", batch_size=2, max_length=32
+        )
+    )
+    assert [o.shape[0] for o in out] == [len(s) for s in seqs]
+    single = next(iter_residue_embeddings(encoder=enc, tokenizer=tok, sequences=[seqs[4]], device="cpu"))
+    np.testing.assert_allclose(out[4], single)
+
+
+def test_label_residue_mismatch_raises_when_not_truncation():
+    class _DropEveryOther(_TinyTokenizer):
+        def __call__(self, sequences, **kw):
+            return super().__call__([s[::2] for s in sequences], **kw)
+
+    enc = _TinyEncoder(hidden=8)
+    samples = _toy_ss3_dataset(seed=6, n=4, length=10)
+    with pytest.raises(ValueError, match="residue"):
+        extract_residue_embeddings(
+            encoder=enc,
+            tokenizer=_DropEveryOther(),
+            sequences=[s.sequence for s in samples],
+            labels=[s.labels for s in samples],
+            device="cpu",
+            batch_size=2,
+            max_length=32,
+        )

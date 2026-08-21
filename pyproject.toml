@@ -12,6 +12,7 @@ dependencies = [
     "scikit-learn",
     "scipy",
     "sentence-transformers",
+    "skorch>=1.4.0",
     "torch",
     "transformers",
 ]

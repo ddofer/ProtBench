@@ -15,6 +15,7 @@ stale. Ask the code: --list_tasks. Full usage is in README.md.
 """
 
 import argparse
+import functools
 import gc
 import hashlib
 import json
@@ -25,6 +26,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import traceback
 import warnings
 from collections import Counter
@@ -156,6 +158,7 @@ from sklearn.neighbors import (
     KNeighborsRegressor,
     NearestNeighbors,
 )
+from sklearn.compose import TransformedTargetRegressor
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import (
     LabelEncoder,
@@ -224,9 +227,13 @@ SUPPORTED_EVAL_SPLITS = {"validation", "test"}
 _VALIDATION_SPLIT_ALIASES = ("validation", "valid", "val", "dev", "eval")
 PROBE_LABELS = {
     "linear": "Linear",
+    "torch_linear": "Torch Linear (AdamW, early stopping)",
     "histgb": "HistGradientBoosting",
     "knn": "K-Nearest Neighbors",
 }
+# Multilabel tasks (GO/EC) only have linear heads: OvR LogisticRegression or
+# one multi-output torch head. knn/histgb are silently the linear evaluator there.
+MULTILABEL_PROBES = frozenset({DEFAULT_RESULT_PROBE, "torch_linear"})
 _MODEL_SIGNATURE_PATTERNS = (
     "*.json",
     "*.safetensors",
@@ -304,12 +311,15 @@ def _result_eval_mode(cfg: TaskConfig) -> str:
 def effective_probe_type(cfg: TaskConfig, requested_probe: str) -> str:
     """Return the probe label that reflects the evaluator actually used.
 
-    Retrieval, multilabel, and ProteinGym zero-shot evaluations do not route
-    through non-linear probes and should persist the default linear probe
-    identity for apples-to-apples comparisons.
+    Retrieval and ProteinGym zero-shot evaluations have no probe; multilabel
+    only supports the linear heads (``MULTILABEL_PROBES``). Anything else is
+    persisted as the default linear probe identity for apples-to-apples
+    comparisons.
     """
-    if cfg.problem_type in {"retrieval", "multilabel"}:
+    if cfg.problem_type == "retrieval":
         return DEFAULT_RESULT_PROBE
+    if cfg.problem_type == "multilabel":
+        return requested_probe if requested_probe in MULTILABEL_PROBES else DEFAULT_RESULT_PROBE
     if cfg.eval_mode == "proteingym_zeroshot":
         return DEFAULT_RESULT_PROBE
     return requested_probe
@@ -2408,9 +2418,19 @@ def evaluate_multiclass(X_train, y_train, X_test, y_test) -> Dict[str, float]:
 
 
 def evaluate_multilabel(
-    X_train, y_train, X_test, y_test, mlb: Optional[MultiLabelBinarizer] = None
+    X_train,
+    y_train,
+    X_test,
+    y_test,
+    mlb: Optional[MultiLabelBinarizer] = None,
+    probe_type: str = DEFAULT_RESULT_PROBE,
 ) -> Dict[str, Any]:
-    """Evaluate multilabel classification task."""
+    """Evaluate multilabel classification task.
+
+    ``linear`` = one liblinear LogisticRegression per label (OvR); ``torch_linear``
+    = one multi-output sigmoid head (one fit for all labels -- the OvR loop is
+    what makes GO/EC slow). Other probes fall back to ``linear``.
+    """
     if mlb is None:
         mlb = MultiLabelBinarizer()
     y_train_bin = mlb.fit_transform(y_train)
@@ -2429,14 +2449,19 @@ def evaluate_multilabel(
     if len(X_train_f) == 0 or len(X_test_f) == 0:
         return {"Error": "No valid samples after label filtering"}
 
-    clf = OneVsRestClassifier(
-        make_pipeline(
-            StandardScaler(),
-            LogisticRegression(solver="liblinear", random_state=BENCHMARK_SEED),
-        ),
-        n_jobs=DEFAULT_OVR_N_JOBS,
-    )
+    if probe_type == "torch_linear":
+        clf = make_probe_model(probe_type, "multilabel")
+    else:
+        clf = OneVsRestClassifier(
+            make_pipeline(
+                StandardScaler(),
+                LogisticRegression(solver="liblinear", random_state=BENCHMARK_SEED),
+            ),
+            n_jobs=DEFAULT_OVR_N_JOBS,
+        )
+    fit_start = time.perf_counter()
     clf.fit(X_train_f, y_train_f)
+    fit_seconds = time.perf_counter() - fit_start
 
     preds = clf.predict(X_test_f)
 
@@ -2452,6 +2477,7 @@ def evaluate_multilabel(
 
     metrics = _metrics(y_test_f, preds)
     metrics.update(_boot_ci(_metrics, y_test_f, preds, BOOTSTRAP_N, BENCHMARK_SEED))
+    metrics["ProbeFitSec"] = fit_seconds
     return metrics
 
 
@@ -2475,7 +2501,7 @@ def make_probe_model(
     """Construct a probe model for a supported task type.
 
     Args:
-        probe_type: Type of probe ("linear", "histgb", "knn").
+        probe_type: Type of probe ("linear", "torch_linear", "histgb", "knn").
         problem_type: Type of problem ("regression", "binary", "multiclass").
         knn_k: Number of neighbors for KNN probes (default: 3).
         knn_weights: Weight function for KNN ("uniform" or "distance", default: "uniform").
@@ -2492,6 +2518,27 @@ def make_probe_model(
                 LogisticRegression(
                     solver="lbfgs", max_iter=100, random_state=BENCHMARK_SEED
                 ),
+            )
+
+    if probe_type == "torch_linear":
+        from torch_linear_head import TorchLinearHead
+
+        if problem_type == "regression":
+            # Standardise y too: MSE from a zero-init head on raw-scale targets
+            # (Topt in C, ddG in kcal) would need many more steps.
+            return TransformedTargetRegressor(
+                regressor=make_pipeline(
+                    StandardScaler(), TorchLinearHead(task="regression", seed=BENCHMARK_SEED)
+                ),
+                transformer=StandardScaler(),
+            )
+        if problem_type in {"binary", "multiclass"}:
+            return make_pipeline(
+                StandardScaler(), TorchLinearHead(task="classification", seed=BENCHMARK_SEED)
+            )
+        if problem_type == "multilabel":
+            return make_pipeline(
+                StandardScaler(), TorchLinearHead(task="multilabel", seed=BENCHMARK_SEED)
             )
 
     if problem_type == "regression":
@@ -2552,6 +2599,26 @@ def _make_probe_model_for_training_size(
     )
 
 
+def classification_metrics(problem_type: str, y_true, y_pred) -> dict[str, float]:
+    """Point metrics for binary / multiclass predictions.
+
+    Single definition shared by the sequence-level probe evaluators and the
+    residue-level probe (``token_classification_probe``), and the block that
+    ``_boot_ci`` resamples -- so every path reports the same columns.
+    """
+    metrics = {
+        "Accuracy": accuracy_score(y_true, y_pred),
+        "F1_Macro": f1_score(y_true, y_pred, average="macro", zero_division=0),
+        "BalancedAccuracy": balanced_accuracy_score(y_true, y_pred),
+        "MCC": matthews_corrcoef(y_true, y_pred),
+    }
+    if problem_type == "binary":
+        metrics["F1"] = f1_score(y_true, y_pred, zero_division=0)
+    else:
+        metrics["F1_Weighted"] = f1_score(y_true, y_pred, average="weighted", zero_division=0)
+    return metrics
+
+
 def evaluate_classification_probe(
     probe_type: str,
     problem_type: str,
@@ -2587,26 +2654,24 @@ def evaluate_classification_probe(
         knn_k=knn_k,
         knn_weights=knn_weights,
     )
+    fit_start = time.perf_counter()
     classifier.fit(X_train, y_train)
+    fit_seconds = time.perf_counter() - fit_start
     predictions = classifier.predict(X_test)
 
-    if problem_type == "multiclass":
-
-        def _multiclass_metrics(yt, yp):
-            return {
-                "Accuracy": accuracy_score(yt, yp),
-                "F1_Weighted": f1_score(yt, yp, average="weighted", zero_division=0),
-                "F1_Macro": f1_score(yt, yp, average="macro", zero_division=0),
-                "BalancedAccuracy": balanced_accuracy_score(yt, yp),
-                "MCC": matthews_corrcoef(yt, yp),
-            }
-
-        metrics = _multiclass_metrics(y_test, predictions)
-        metrics.update(
-            _boot_ci(
-                _multiclass_metrics, y_test, predictions, BOOTSTRAP_N, BENCHMARK_SEED
-            )
+    metrics = classification_metrics(problem_type, y_test, predictions)
+    metrics.update(
+        _boot_ci(
+            functools.partial(classification_metrics, problem_type),
+            y_test,
+            predictions,
+            BOOTSTRAP_N,
+            BENCHMARK_SEED,
         )
+    )
+    metrics["ProbeFitSec"] = fit_seconds
+
+    if problem_type == "multiclass":
         if hasattr(classifier, "predict_proba"):
             try:
                 metrics["AUC"] = roc_auc_score(
@@ -2618,19 +2683,6 @@ def evaluate_classification_probe(
                 logger.warning("  Could not compute AUC for multiclass: %s", exc)
         return metrics
 
-    def _binary_metrics(yt, yp):
-        return {
-            "Accuracy": accuracy_score(yt, yp),
-            "F1": f1_score(yt, yp, zero_division=0),
-            "F1_Macro": f1_score(yt, yp, average="macro", zero_division=0),
-            "BalancedAccuracy": balanced_accuracy_score(yt, yp),
-            "MCC": matthews_corrcoef(yt, yp),
-        }
-
-    metrics = _binary_metrics(y_test, predictions)
-    metrics.update(
-        _boot_ci(_binary_metrics, y_test, predictions, BOOTSTRAP_N, BENCHMARK_SEED)
-    )
     if hasattr(classifier, "predict_proba"):
         probabilities = classifier.predict_proba(X_test)
         if probabilities.shape[1] == 2:
@@ -2663,7 +2715,9 @@ def evaluate_regression_probe(
         knn_k=knn_k,
         knn_weights=knn_weights,
     )
+    fit_start = time.perf_counter()
     regressor.fit(X_train, y_train)
+    fit_seconds = time.perf_counter() - fit_start
     predictions = regressor.predict(X_test)
     y_test_arr = np.asarray(y_test)
 
@@ -2688,6 +2742,7 @@ def evaluate_regression_probe(
         "MSE": mse,
         "MAE": float(mean_absolute_error(y_test_arr, predictions)),
         "R2": float(r2_score(y_test_arr, predictions)),
+        "ProbeFitSec": fit_seconds,
     }
 
     def _resampled(yt, yp):
@@ -2808,6 +2863,7 @@ def evaluate_multilabel_cv(
     mlb: Optional[MultiLabelBinarizer] = None,
     n_splits: int = 4,
     seed: Optional[int] = None,
+    probe_type: str = DEFAULT_RESULT_PROBE,
 ) -> Dict[str, Any]:
     """Evaluate multilabel classification via deterministic cross-validation."""
     seed = BENCHMARK_SEED if seed is None else seed
@@ -2823,6 +2879,7 @@ def evaluate_multilabel_cv(
             X[test_idx],
             y[test_idx],
             mlb,
+            probe_type=probe_type,
         )
         if "Error" not in fold_result:
             fold_metrics.append(fold_result)
@@ -3121,6 +3178,7 @@ def evaluate_task(
             cache=cache,
             model_hash=model_hash,
             task_key=cfg.name,
+            probe_type=probe_type,
         )
         return metrics, resolved_eval_split, eval_strategy
 
@@ -3377,7 +3435,7 @@ def evaluate_task(
             dtype=object if cfg.problem_type == "multilabel" else None,
         )
 
-        if cfg.problem_type == "multilabel" and probe_type != DEFAULT_RESULT_PROBE:
+        if cfg.problem_type == "multilabel" and probe_type not in MULTILABEL_PROBES:
             logger.info(
                 "  Multilabel tasks use the built-in linear evaluator; ignoring probe_type=%s",
                 probe_type,
@@ -3402,7 +3460,7 @@ def evaluate_task(
                 knn_weights=knn_weights,
             )
         elif cfg.problem_type == "multilabel":
-            metrics = evaluate_multilabel_cv(X_train, y_train, mlb)
+            metrics = evaluate_multilabel_cv(X_train, y_train, mlb, probe_type=probe_type)
         else:
             metrics = evaluate_regression_probe_cv(
                 probe_type,
@@ -3476,7 +3534,7 @@ def evaluate_task(
         X_test = X_test / norms_test
         logger.info("  Applied L2 normalization to embeddings")
 
-    if cfg.problem_type == "multilabel" and probe_type != DEFAULT_RESULT_PROBE:
+    if cfg.problem_type == "multilabel" and probe_type not in MULTILABEL_PROBES:
         logger.info(
             "  Multilabel tasks use the built-in linear evaluator; ignoring probe_type=%s",
             probe_type,
@@ -3506,7 +3564,7 @@ def evaluate_task(
             knn_weights=knn_weights,
         )
     elif cfg.problem_type == "multilabel":
-        results = evaluate_multilabel(X_train, y_train, X_test, y_test, mlb)
+        results = evaluate_multilabel(X_train, y_train, X_test, y_test, mlb, probe_type=probe_type)
     else:  # regression
         results = evaluate_regression_probe(
             probe_type,
@@ -3760,8 +3818,9 @@ def parse_args():
         "-p",
         choices=tuple(PROBE_LABELS),
         default=DEFAULT_RESULT_PROBE,
-        help="Probe model type. binary/multiclass/regression tasks use the selected probe; "
-        "retrieval, multilabel, and ProteinGym zero-shot keep their built-in evaluators.",
+        help="Probe model type. binary/multiclass/regression/token tasks use the selected probe; "
+        "multilabel supports linear and torch_linear; retrieval and ProteinGym zero-shot keep "
+        "their built-in evaluators.",
     )
     parser.add_argument(
         "--amp_dtype",

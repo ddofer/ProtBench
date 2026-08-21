@@ -33,13 +33,49 @@ embed once and can then fit as many probes as you like.
 sequences ──▶ model (frozen) ──▶ one vector per protein ──▶ probe ──▶ metrics
 ```
 
-Three probes are available via `-p`:
+Four probes are available via `-p`:
 
 | Probe | What it is | Use it when |
 | --- | --- | --- |
-| `linear` | Logistic/ridge regression on standardised embeddings | Default. Measures linearly accessible information. |
+| `linear` | Logistic/ridge regression (sklearn lbfgs, CPU) on standardised embeddings | Default. Measures linearly accessible information. |
+| `torch_linear` | The same linear head, but `nn.Linear` trained by AdamW ([skorch](https://skorch.readthedocs.io)), 5 % inner val split, early stopping (patience 3, last weights kept) | Same question as `linear`, different solver. Faster on big inputs: residue-level tasks (10^5-10^6 rows) and multilabel GO/EC (one multi-output head instead of one sklearn fit per label). Results carry `Probe=torch_linear`, so the two stay separable in the CSV. |
 | `knn` | k-nearest neighbours, raw Euclidean | Retrieval and homology-transfer tasks. `--knn_k 1` is 1-NN annotation transfer. |
 | `histgb` | Gradient-boosted trees | Non-linear structure. Slow on high dimensions. |
+
+Every row also records `ProbeFitSec` — wall-clock seconds of the head fit
+alone (embedding time excluded), so probes can be compared on speed as well as
+score. `torch_linear` and `linear` share every other stage (same embeddings,
+same `StandardScaler`, same metrics); `make_probe_model` in
+`protein_benchmark_suite.py` is the single registry both come from, and the
+head itself is `torch_linear_head.py` (~100 lines, sklearn API).
+
+### `linear` vs `torch_linear` — measured (ESM2-8M, `--very-fast`, test split, one B300, shared node)
+
+| Task | metric | `linear` | `torch_linear` | fit s `linear` | fit s `torch_linear` |
+| --- | --- | --- | --- | --- | --- |
+| remote_homology (1195 classes) | Acc | 0.562 | 0.552 | 60.5 | 2.1 |
+| solubility | Acc | 0.621 | 0.619 | 6.2 | 12.6 |
+| metal_ion_binding | Acc | 0.683 | 0.670 | 0.1 | 0.4 |
+| fluorescence | Spearman | 0.572 | 0.527 | 0.1 | 2.6 |
+| stability | Spearman | 0.690 | 0.694 | 0.5 | 8.6 |
+| beta_lactamase_peer (4-fold CV) | Spearman | 0.638 | 0.550 | 0.0 | 0.6 |
+| ss3 (residue, ~400k rows) | Acc | 0.746 | 0.733 | 13.4 | 48.3 |
+| ec_classification (multilabel, 572 labels) | F1_Micro | 0.655 | 0.622 | 156.3 | 21.0 |
+
+Reading: scores are within ~0.01-0.02 on most tasks, worse on two small
+regression sets (fluorescence, beta-lactamase: ridge's closed form beats an
+early-stopped AdamW head there). Speed: `torch_linear` wins only where the
+sklearn solver scales badly — many classes (remote_homology 29x) and multilabel
+OvR (EC 7x). For binary / low-class tasks and hidden sizes up to ~1280 the
+per-step overhead of a minibatch loop makes it *slower* than lbfgs/ridge, GPU
+or not. Defaults were picked from this run (patience 3 not 1; epoch cap 100
+with a 300-step floor) — `TorchLinearHead(...)` in `torch_linear_head.py`
+exposes `lr`, `batch_size`, `patience`, `max_epochs` if you want to retune.
+
+For comparison, the HF-Trainer frozen-backbone path (`finetune_sequence.py
+--mode probe`, solubility, 3 epochs) took 122 s wall (86 s training: the
+backbone forward is re-run every epoch) for Acc 0.678 / AUC 0.773 on the
+test split, vs embed-once + probe ≈ 20 s total. Embed once.
 
 Fine-tuning (full, last-N layers, or LoRA) lives in `finetune_sequence.py` and
 `finetune_residue.py`. It costs far more compute and is a separate question from
