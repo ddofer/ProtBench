@@ -4,10 +4,11 @@ Same embed-once pipeline as the ``linear`` probe, but the head is an
 ``nn.Linear`` fit by AdamW with early stopping on a small inner val split
 (patience 2 -- 5 for multilabel / 100+ classes -- LAST weights kept: frozen
 features, no augmentation, so the best epoch is within a step or two of the
-last). ``max_epochs`` is a cap that
-early stopping normally makes irrelevant (typical stop: 5-15 epochs); it binds
-only when the val loss is still falling, e.g. sparse multilabel (EC: 572 labels,
-0.3 % positives) where 20 epochs cost 0.2 F1. Measured on ESM2-8M (see README):
+last). The training budget is ``max_steps`` optimizer steps, not epochs -- one epoch is
+1-2 AdamW steps on a few-hundred-sample task and thousands on a residue task.
+Early stopping normally ends the fit well inside the budget; it binds only when
+the val loss is still falling, e.g. sparse multilabel (EC: 572 labels, 0.3 %
+positives). Measured on ESM2-8M (see README):
 patience 1 stopped regression heads 2-4 epochs in and lost ~0.09 Spearman vs
 patience 2-3. AdamW lr 1e-3 (10x that for multilabel / 100+ classes, whose
 sparse per-output gradients otherwise never converge within the cap).
@@ -38,8 +39,7 @@ class TorchLinearHead(BaseEstimator):
     def __init__(
         self,
         task: str = "classification",
-        max_epochs: int = 100,
-        min_steps: int = 1000,
+        max_steps: int = 1000,
         patience: int = 2,
         lr: float = 1e-3,
         weight_decay: float = 1e-4,
@@ -50,8 +50,7 @@ class TorchLinearHead(BaseEstimator):
         device: str | None = None,
     ):
         self.task = task
-        self.max_epochs = max_epochs
-        self.min_steps = min_steps
+        self.max_steps = max_steps
         self.patience = patience
         self.lr = lr
         self.weight_decay = weight_decay
@@ -78,17 +77,19 @@ class TorchLinearHead(BaseEstimator):
             net_cls, k, extra = NeuralNetRegressor, 1, {}
 
         # Small inner val split for early stopping; skipped when it would eat
-        # more than half the data (then just run max_epochs).
+        # more than half the data (then just spend the whole step budget).
         n_val = max(int(self.val_frac * n), self.min_val)
         callbacks, split = [], None
-        # Many outputs (multilabel, 100+ classes): per-output gradients are tiny
-        # and the val loss falls slowly, so the head needs 10x the lr and a few
-        # more patience epochs (EC, 572 labels, at the epoch cap: lr 1e-3 -> 0.42,
-        # 1e-2 -> 0.64 F1_micro; patience 2 -> 0.61, 5 -> 0.64). Sequence tasks
-        # with few outputs score best at 1e-3 (solubility 0.626 vs 0.592 at 1e-2).
-        many_outputs = self.task == "multilabel" or k > 100
-        lr = self.lr * 10 if many_outputs else self.lr
-        patience = self.patience + 3 if many_outputs else self.patience
+        # Many CLASSES is only knowable once y is seen, so this one rule stays
+        # here; the multilabel case is set explicitly by make_probe_model, where
+        # task shape is already known. Sparse per-output gradients need a higher
+        # lr and more patience (EC, 572 labels: lr 1e-3 -> 0.42, 1e-2 -> 0.64
+        # F1_micro; patience 2 -> 0.61, 5 -> 0.64), while few-output sequence
+        # tasks score best at 1e-3 (solubility 0.626 vs 0.592 at 1e-2).
+        lr, patience = self.lr, self.patience
+        if k > 100 and self.task == "classification":
+            lr, patience = max(lr, 1e-2), max(patience, 5)
+        self.effective_lr_, self.effective_patience_ = lr, patience
         if 2 * n_val <= n:
             # Not stratified: 1000-class tasks (remote_homology) have singleton
             # classes that StratifiedShuffleSplit refuses; a random split is fine
@@ -99,12 +100,12 @@ class TorchLinearHead(BaseEstimator):
             # task (1-2 steps/epoch) "no improvement" and stops it half-trained.
             callbacks = [EarlyStopping(patience=patience, threshold=0, load_best=False)]
 
-        # Epoch cap is really a step budget: on a few-hundred-sample task one
-        # epoch is 1-2 AdamW steps, so ``max_epochs`` alone under-trains vs
-        # lbfgs. Guarantee ``min_steps`` optimizer steps; early stopping still
-        # ends training as soon as the val loss stops improving.
+        # The budget is in optimizer STEPS, not epochs: one epoch is 1-2 AdamW
+        # steps on a few-hundred-sample task and thousands on a residue task, so
+        # an epoch cap means wildly different amounts of training. Early stopping
+        # normally ends the fit long before the budget is spent.
         steps_per_epoch = max(1, (n - n_val if split else n) // self.batch_size)
-        max_epochs = max(self.max_epochs, -(-self.min_steps // steps_per_epoch))
+        max_epochs = max(1, -(-self.max_steps // steps_per_epoch))
 
         device = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
         # Hand skorch device tensors, not numpy: its DataLoader indexes rows one
@@ -112,6 +113,11 @@ class TorchLinearHead(BaseEstimator):
         # step time (measured 5.8 vs 2.5 ms/step at H=320, batch 256).
         X, y = torch.as_tensor(X, device=device), torch.as_tensor(y, device=device)
 
+        # Deterministic weight init + shuffling, without leaving the global torch
+        # stream reseeded: seed_all() sets that once per run, and resetting it in
+        # every probe fit would make a --seed_list sweep less independent than the
+        # BenchmarkSeed column claims. Save, seed, fit, restore.
+        rng_state = torch.random.get_rng_state()
         torch.manual_seed(self.seed)
         self.net_ = net_cls(
             torch.nn.Linear,
@@ -123,13 +129,17 @@ class TorchLinearHead(BaseEstimator):
             max_epochs=max_epochs,
             batch_size=self.batch_size,
             iterator_train__shuffle=True,
+            iterator_train__generator=torch.Generator().manual_seed(self.seed),
             train_split=split,
             callbacks=callbacks,
             device=device,
             verbose=0,
             **extra,
         )
-        self.net_.fit(X, y)
+        try:
+            self.net_.fit(X, y)
+        finally:
+            torch.random.set_rng_state(rng_state)
         self.n_epochs_ = len(self.net_.history)
         return self
 

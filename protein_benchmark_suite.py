@@ -2565,8 +2565,14 @@ def make_probe_model(
                 StandardScaler(), TorchLinearHead(task="classification", seed=BENCHMARK_SEED)
             )
         if problem_type == "multilabel":
+            # Sparse per-label gradients (EC: 572 labels, 0.3 % positives) need a
+            # higher lr and more patience than a few-output sequence task; set
+            # here, where the task shape is known, rather than hidden in the head.
             return make_pipeline(
-                StandardScaler(), TorchLinearHead(task="multilabel", seed=BENCHMARK_SEED)
+                StandardScaler(),
+                TorchLinearHead(
+                    task="multilabel", lr=1e-2, patience=5, seed=BENCHMARK_SEED
+                ),
             )
 
     if problem_type == "regression":

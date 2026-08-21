@@ -67,7 +67,8 @@ def test_multilabel_recovers_planted_labels():
 def test_early_stopping_fires_and_tiny_sets_train():
     X, y = _blobs(n=2000, seed=3)
     y = np.where(np.random.RandomState(4).rand(2000) < 0.4, np.random.RandomState(5).randint(0, 3, 2000), y)
-    head = TorchLinearHead(seed=0, device="cpu", max_epochs=50, patience=1).fit(X, y)
+    # budget is in optimizer steps; 2000 samples / batch 256 ~ 7 steps per epoch
+    head = TorchLinearHead(seed=0, device="cpu", max_steps=350, patience=1).fit(X, y)
     assert head.n_epochs_ < 50
     tiny = TorchLinearHead(seed=0, device="cpu").fit(X[:20], y[:20])  # no room for a val split
     assert tiny.predict(X[:5]).shape == (5,)
@@ -87,3 +88,45 @@ def test_registered_as_probe_type():
     for problem in ("binary", "multiclass", "regression"):
         model = make_probe_model("torch_linear", problem)
         assert hasattr(model, "fit") and hasattr(model, "predict")
+
+
+def test_constructor_params_are_the_params_actually_used():
+    """sklearn contract: get_params() must report what fit() will use, or clone()
+    and any hyperparameter sweep silently do something else."""
+    from sklearn.base import clone
+
+    head = TorchLinearHead(task="multilabel", lr=5e-4, patience=7, seed=3)
+    assert head.get_params()["lr"] == 5e-4
+    assert head.get_params()["patience"] == 7
+    assert clone(head).get_params() == head.get_params()
+
+    rng = np.random.RandomState(0)
+    X = rng.randn(400, 8).astype(np.float32)
+    Y = (X[:, :3] > 0).astype(np.int64)
+    head.fit(X, Y)
+    assert head.net_.lr == 5e-4
+    assert head.effective_patience_ == 7
+
+
+def test_multilabel_defaults_come_from_the_probe_registry_not_a_hidden_override():
+    """make_probe_model is where task-shape knowledge belongs; the head should not
+    silently rewrite the caller's lr."""
+    from protein_benchmark_suite import make_probe_model
+
+    head = make_probe_model("torch_linear", "multilabel")[-1]
+    assert head.lr > 1e-3, "sparse multilabel needs the higher lr, set explicitly"
+    assert head.patience >= 5
+
+
+def test_fit_does_not_reseed_the_global_torch_rng():
+    """A --seed_list sweep seeds torch once; a probe fit must not reset that stream
+    or the runs are less independent than the BenchmarkSeed column claims."""
+    import torch
+
+    torch.manual_seed(1234)
+    before = torch.randn(3)
+    torch.manual_seed(1234)
+    X, y = _blobs(n=200, seed=1)
+    TorchLinearHead(seed=99, device="cpu").fit(X, y)
+    after = torch.randn(3)
+    assert torch.equal(before, after)
