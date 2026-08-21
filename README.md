@@ -38,7 +38,7 @@ Four probes are available via `-p`:
 | Probe | What it is | Use it when |
 | --- | --- | --- |
 | `linear` | Logistic/ridge regression (sklearn lbfgs, CPU) on standardised embeddings | Default. Measures linearly accessible information. |
-| `torch_linear` | The same linear head, but `nn.Linear` trained by AdamW ([skorch](https://skorch.readthedocs.io)), 5 % inner val split, early stopping (patience 3, last weights kept) | Same question as `linear`, different solver. Faster on big inputs: residue-level tasks (10^5-10^6 rows) and multilabel GO/EC (one multi-output head instead of one sklearn fit per label). Results carry `Probe=torch_linear`, so the two stay separable in the CSV. |
+| `torch_linear` | The same linear head, but `nn.Linear` trained by AdamW ([skorch](https://skorch.readthedocs.io)), lr 1e-3, 5 % inner val split, early stopping (patience 2, last weights kept; 10x lr and patience 5 for multilabel / 100+ classes) | Same question as `linear`, different solver. Faster on big inputs: residue-level tasks (10^5-10^6 rows) and multilabel GO/EC (one multi-output head instead of one sklearn fit per label). Results carry `Probe=torch_linear`, so the two stay separable in the CSV. |
 | `knn` | k-nearest neighbours, raw Euclidean | Retrieval and homology-transfer tasks. `--knn_k 1` is 1-NN annotation transfer. |
 | `histgb` | Gradient-boosted trees | Non-linear structure. Slow on high dimensions. |
 
@@ -53,23 +53,25 @@ head itself is `torch_linear_head.py` (~100 lines, sklearn API).
 
 | Task | metric | `linear` | `torch_linear` | fit s `linear` | fit s `torch_linear` |
 | --- | --- | --- | --- | --- | --- |
-| remote_homology (1195 classes) | Acc | 0.562 | 0.552 | 60.5 | 2.1 |
-| solubility | Acc | 0.621 | 0.619 | 6.2 | 12.6 |
-| metal_ion_binding | Acc | 0.683 | 0.670 | 0.1 | 0.4 |
-| fluorescence | Spearman | 0.572 | 0.527 | 0.1 | 2.6 |
-| stability | Spearman | 0.690 | 0.694 | 0.5 | 8.6 |
-| beta_lactamase_peer (4-fold CV) | Spearman | 0.638 | 0.550 | 0.0 | 0.6 |
-| ss3 (residue, ~400k rows) | Acc | 0.746 | 0.733 | 13.4 | 48.3 |
-| ec_classification (multilabel, 572 labels) | F1_Micro | 0.655 | 0.622 | 156.3 | 21.0 |
+| remote_homology (1195 classes) | Acc | 0.562 | 0.561 | 61.3 | 2.2 |
+| solubility | Acc | 0.621 | 0.626 | 1.2 | 7.2 |
+| metal_ion_binding | Acc | 0.683 | 0.686 | 0.1 | 1.0 |
+| fluorescence | Spearman | 0.572 | 0.550 | 0.1 | 10.4 |
+| stability | Spearman | 0.690 | 0.696 | 0.3 | 10.6 |
+| beta_lactamase_peer (4-fold CV) | Spearman | 0.638 | 0.577 | 0.0 | 2.2 |
+| ss3 (residue, ~400k rows) | Acc | 0.746 | 0.744 | 11.5 | 72.4 |
+| ec_classification (multilabel, 572 labels) | F1_Micro | 0.655 | 0.641 | 156.3 | 21.7 |
 
-Reading: scores are within ~0.01-0.02 on most tasks, worse on two small
-regression sets (fluorescence, beta-lactamase: ridge's closed form beats an
-early-stopped AdamW head there). Speed: `torch_linear` wins only where the
-sklearn solver scales badly — many classes (remote_homology 29x) and multilabel
-OvR (EC 7x). For binary / low-class tasks and hidden sizes up to ~1280 the
-per-step overhead of a minibatch loop makes it *slower* than lbfgs/ridge, GPU
-or not. Defaults were picked from this run (patience 3 not 1; epoch cap 100
-with a 300-step floor) — `TorchLinearHead(...)` in `torch_linear_head.py`
+Reading: scores match within ~0.01 on six of eight tasks, and trail on the two
+small regression sets (fluorescence -0.02, beta-lactamase -0.06: ridge's closed
+form beats an early-stopped AdamW head there). Speed: `torch_linear` wins only
+where the sklearn solver scales badly — many classes (remote_homology 28x) and
+multilabel OvR (EC 7x). For binary / low-class tasks and hidden sizes up to
+~1280 the per-step overhead of a minibatch loop makes it *slower* than
+lbfgs/ridge, GPU or not. Defaults were picked from lr x patience sweeps on
+these cached embeddings (lr 1e-3 beat 1e-2 on 4/5 sequence tasks; sparse
+multilabel needs 1e-2 and patience 5; a 1000-step floor so few-hundred-sample
+tasks are not under-trained) — `TorchLinearHead(...)` in `torch_linear_head.py`
 exposes `lr`, `batch_size`, `patience`, `max_epochs` if you want to retune.
 
 For comparison, the HF-Trainer frozen-backbone path (`finetune_sequence.py
