@@ -52,6 +52,7 @@ distinction matters.
 | `subcellular_loc` | [`proteinea/deeploc`](https://huggingface.co/datasets/proteinea/deeploc) | multiclass | AUC |
 | `solubility` | [`proteinea/solubility`](https://huggingface.co/datasets/proteinea/solubility) | binary | AUC |
 | `scope40_retrieval` | [`tattabio/scope40_test`](https://huggingface.co/datasets/tattabio/scope40_test) | retrieval | Recall@10 |
+| `scope40_retrieval_superfamily` / `scope40_retrieval_fold` | same, sccs id truncated to `a.5.6` / `a.5` | retrieval | Recall@10 |
 
 Local `data/...` entries are **not** downloaded and are **not** in a fresh
 clone. Build them first with the matching script in `scripts/`:

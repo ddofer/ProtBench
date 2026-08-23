@@ -56,6 +56,10 @@ class TaskConfig:
     bin_col: Optional[str] = (
         None  # Official binary-label column for AUC (ProteinGym DMS_score_bin)
     )
+    label_prefix_fields: Optional[int] = (
+        None  # Keep only the first N dot-separated fields of each label
+        # (SCOPe sccs "a.5.6.1": 2 -> fold "a.5", 3 -> superfamily "a.5.6")
+    )
 
     def __post_init__(self):
         valid_types = {
@@ -476,11 +480,37 @@ TASKS: Dict[str, TaskConfig] = {
     # =========================================================================
     # Retrieval
     # =========================================================================
+    # The `family` column carries the full SCOPe sccs id ("a.5.6.1"), so this
+    # legacy key is FAMILY-level retrieval (kept unchanged so historical rows
+    # stay comparable). The two keys below truncate the same labels to the
+    # superfamily ("a.5.6") and fold ("a.5") levels.
     "scope40_retrieval": TaskConfig(
         name="SCOPe-40 Structural Retrieval",
         dataset="tattabio/scope40_test",
         input_map={"seq": "sequence"},
         label_col="family",
+        problem_type="retrieval",
+        main_metric="Recall@10",
+        train_split="train",
+        test_split="train",
+    ),
+    "scope40_retrieval_superfamily": TaskConfig(
+        name="SCOPe-40 Structural Retrieval (superfamily)",
+        dataset="tattabio/scope40_test",
+        input_map={"seq": "sequence"},
+        label_col="family",
+        label_prefix_fields=3,
+        problem_type="retrieval",
+        main_metric="Recall@10",
+        train_split="train",
+        test_split="train",
+    ),
+    "scope40_retrieval_fold": TaskConfig(
+        name="SCOPe-40 Structural Retrieval (fold)",
+        dataset="tattabio/scope40_test",
+        input_map={"seq": "sequence"},
+        label_col="family",
+        label_prefix_fields=2,
         problem_type="retrieval",
         main_metric="Recall@10",
         train_split="train",
