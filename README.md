@@ -189,8 +189,8 @@ The presets are not nested, which surprises people:
 | Preset | Tasks | Notes |
 | --- | --- | --- |
 | `--very-fast` | 8 | Curated scout subset. |
-| `--fast` *(default)* | 18 | Includes `scope40_retrieval`. |
-| `--no-fast` | 37 | The broad set — but **not** a superset of `--fast`. Drops `scope40_retrieval`. |
+| `--fast` *(default)* | 20 | Includes `scope40_retrieval` (family), `scope40_retrieval_superfamily`, `scope40_retrieval_fold`. |
+| `--no-fast` | 32 | The broad set — but **not** a superset of `--fast`. Drops `scope40_retrieval`. |
 | `--proteingym` | +8 | Large and slow, so opt-in. |
 
 `cafa5`, `go_mf`, `go_bp` and `go_cc` are in **no** preset — they have thousands
@@ -355,7 +355,7 @@ metrics, and which appear depends on the task type:
 | multiclass | Accuracy, F1_Weighted, F1_Macro, BalancedAccuracy, MCC, AUC |
 | multilabel | Accuracy, F1_Macro, F1_Micro |
 | regression | Spearman, Pearson, MSE, MAE, R2 |
-| retrieval | Recall@1, Recall@10, Recall@30 |
+| retrieval | Recall@1, Recall@10, Recall@30, MAP, plus `eligible_*` over queries with >=1 same-label gallery item (`n_eligible_queries`) |
 | token_classification | Accuracy, MCC, F1 (per residue, not per protein) |
 | contact_prediction | P@L, P@L/2, P@L/5 × short / medium / long range |
 

@@ -61,6 +61,7 @@ distinction matters.
 | `tcr_pmhc_affinity` | [`GleghornLab/tcr_pmhc_affinity`](https://huggingface.co/datasets/GleghornLab/tcr_pmhc_affinity) | binary | AUC |
 | `ss8` | [`GleghornLab/SS8`](https://huggingface.co/datasets/GleghornLab/SS8) | token_classification | F1_Macro |
 | `ss3_casp12`, `ss3_casp13`, `ss3_casp14`, `ss3_cb513`, `ss3_ts115`, `ss8_casp12`, `ss8_casp13`, `ss8_casp14`, `ss8_cb513`, `ss8_ts115` | [`proteinea/secondary_structure_prediction`](https://huggingface.co/datasets/proteinea/secondary_structure_prediction) | token_classification | F1_Macro |
+| `scope40_retrieval_superfamily` / `scope40_retrieval_fold` | same, sccs id truncated to `a.5.6` / `a.5` | retrieval | Recall@10 |
 
 Local `data/...` entries are **not** downloaded and are **not** in a fresh
 clone. Build them first with the matching script in `scripts/`:

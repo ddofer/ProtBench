@@ -134,7 +134,7 @@ DEFAULT_KNN_N_JOBS = 1
 # Use a bounded value: n_jobs=-1 spawns cpu_count() workers which causes IPC
 # overhead to dominate for the ~12k-sample tasks here.
 DEFAULT_OVR_N_JOBS = int(os.environ.get("PROTEIN_BENCH_OVR_JOBS", "8"))
-# Legacy alias kept for NearestNeighbors retrieval call (n_jobs=1 is safe there).
+# Legacy alias (n_jobs=1 is safe there).
 DEFAULT_SKLEARN_N_JOBS = DEFAULT_KNN_N_JOBS
 
 # NOTE: datasets is imported locally in task evaluation functions to avoid
@@ -162,7 +162,6 @@ from sklearn.multiclass import OneVsRestClassifier
 from sklearn.neighbors import (
     KNeighborsClassifier,
     KNeighborsRegressor,
-    NearestNeighbors,
 )
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.pipeline import make_pipeline
@@ -1219,6 +1218,17 @@ def extract_labels(data, label_col: str, problem_type: str) -> Tuple[List, str]:
     return [parse(lbl) for lbl in raw_labels], actual_col
 
 
+def truncate_label_fields(labels: List, n_fields: Optional[int]) -> List:
+    """Keep the first `n_fields` dot-separated fields of each label.
+
+    SCOPe sccs ids are hierarchical ("a.5.6.1" = class.fold.superfamily.family),
+    so n_fields=2 -> "a.5" (fold), 3 -> "a.5.6" (superfamily), None -> unchanged.
+    """
+    if not n_fields:
+        return labels
+    return [".".join(str(lbl).split(".")[:n_fields]) for lbl in labels]
+
+
 def _apply_label_map(labels: List, label_map: Dict[str, Any]) -> List:
     if not label_map:
         return labels
@@ -1700,6 +1710,7 @@ def prepare_data(
         )
         labels, _ = extract_labels(data, cfg.label_col, "multiclass")
         labels = _apply_label_map(labels, cfg.label_map)
+        labels = truncate_label_fields(labels, cfg.label_prefix_fields)
         logger.info(f"  Loaded {len(seqs)} retrieval queries/gallery sequences")
         return seqs, labels, seqs, labels, None, split_metadata
 
@@ -3122,18 +3133,13 @@ def evaluate_retrieval(
     labels: np.ndarray,
     k_list: Tuple[int, ...] = (1, 10, 30),
 ) -> Dict[str, float]:
-    """Evaluate structural retrieval with family-level Recall@K.
+    """Evaluate all-vs-all retrieval (cosine, self excluded) at the label level given.
 
-    Args:
-        embeddings: Array of query/gallery embeddings with shape (n_samples, dim).
-        labels: Family labels aligned to `embeddings`.
-        k_list: Recall cutoffs to evaluate.
-
-    Returns:
-        Dictionary mapping Recall@K metric names to scores in [0, 1].
-
-    Raises:
-        ValueError: If embeddings and labels have mismatched lengths.
+    Returns Recall@K over all queries (legacy definition: singleton-label queries
+    count as misses), plus MAP over the full ranking and the same metrics over
+    the *eligible* queries only (>=1 non-self gallery item with the same label),
+    as in mmseqs_baseline.py / bootstrap_ci.py. Labels decide the hierarchy
+    level: pass fold / superfamily / family ids to get that level.
     """
     if len(embeddings) != len(labels):
         raise ValueError("Embeddings and labels must have the same number of rows")
@@ -3141,30 +3147,47 @@ def evaluate_retrieval(
     if len(embeddings) < 2:
         return {f"Recall@{k}": 0.0 for k in k_list}
 
-    max_k = max(k_list)
-    neighbor_count = min(len(embeddings), max_k + 1)
-    nn = NearestNeighbors(
-        n_neighbors=neighbor_count,
-        metric="cosine",
-        n_jobs=DEFAULT_SKLEARN_N_JOBS,
-    )
-    nn.fit(embeddings)
-    _, indices = nn.kneighbors(embeddings)
-
     label_array = np.asarray(labels)
+    ranking = cosine_ranking(np.asarray(embeddings, dtype=np.float32))
+    return retrieval_metrics_from_ranking(ranking, label_array, k_list)
+
+
+def cosine_ranking(embeddings: np.ndarray) -> np.ndarray:
+    """Gallery indices sorted by descending cosine similarity, self removed: (n, n-1)."""
+    normed = embeddings / np.clip(np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12, None)
+    sims = normed @ normed.T
+    return ranking_from_similarity(sims)
+
+
+def ranking_from_similarity(sims: np.ndarray) -> np.ndarray:
+    """Descending argsort of an (n, n) all-vs-all similarity matrix with self removed."""
+    sims = np.array(sims, dtype=np.float64, copy=True)
+    np.fill_diagonal(sims, -np.inf)
+    order = np.argsort(-sims, axis=1, kind="stable")
+    return order[:, :-1]
+
+
+def retrieval_metrics_from_ranking(
+    ranking: np.ndarray,
+    label_array: np.ndarray,
+    k_list: Tuple[int, ...] = (1, 10, 30),
+) -> Dict[str, float]:
+    """Recall@K / MAP (all and eligible-only) from a self-excluded ranking."""
+    from bootstrap_ci import per_query_metrics
+
+    per_query = per_query_metrics(ranking, label_array)
+    eligible = per_query["eligible"]
+    rel = label_array[ranking] == label_array[:, None]
     results: Dict[str, float] = {}
-
-    queries = np.arange(len(embeddings))[:, None]
-    valid_mask = indices != queries
-    neighbor_labels = label_array[indices]
-
     for k in k_list:
-        matches = [
-            (nl[vm][:k] == ql).any()
-            for nl, vm, ql in zip(neighbor_labels, valid_mask, label_array)
-        ]
-        results[f"Recall@{k}"] = float(np.mean(matches))
-
+        results[f"Recall@{k}"] = float(rel[:, :k].any(axis=1).mean())
+    results["MAP"] = float(per_query["ap"].mean())
+    if eligible.any():
+        for k in k_list:
+            results[f"eligible_Recall@{k}"] = float(rel[eligible, :k].any(axis=1).mean())
+        results["eligible_MAP"] = float(per_query["ap"][eligible].mean())
+    results["n_queries"] = int(len(label_array))
+    results["n_eligible_queries"] = int(eligible.sum())
     return results
 
 
