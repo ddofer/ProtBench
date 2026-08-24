@@ -1765,6 +1765,26 @@ def embed_sequences(
         has_embed_dataset = hasattr(model, "embed_dataset") and callable(
             model.embed_dataset
         )
+        if has_embed_dataset:
+            # Only the legacy ESM++ signature (sequences=, max_len=, pooling_types=,
+            # save_path=) is understood below. Current FastPLM builds ship
+            # embed_dataset(inputs, *, pooling=, max_length=, output=, ...) which
+            # raises "missing 1 required positional argument: 'inputs'" under the old
+            # keywords; the per-task catch then records an Error row and the sweep
+            # exits 0 looking successful. Detect the signature and fall through to
+            # the generic batched path instead (ported from ProtSent).
+            import inspect as _inspect
+
+            try:
+                _params = _inspect.signature(model.embed_dataset).parameters
+                has_embed_dataset = "sequences" in _params
+            except (TypeError, ValueError):
+                has_embed_dataset = False
+            if not has_embed_dataset:
+                logger.info(
+                    "embed_dataset() has a non-legacy signature; using the generic "
+                    "batched embedding path"
+                )
 
         if is_proteva_model:
             # Proteva fa2-varlen path: tokenize each sequence, pack a chunk of
