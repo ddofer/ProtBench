@@ -178,6 +178,7 @@ from benchmark_utils import (
     DEFAULT_RESULT_PROBE,
 )
 from model_utils import (
+    patch_unknown_residue_tokens,
     _assert_no_wrapper_prefixes,
     apply_esmplusplus_compat_patch,
     detect_model_type,
@@ -584,6 +585,10 @@ def load_model(
             tokenizer = AutoTokenizer.from_pretrained(
                 model_name, trust_remote_code=True
             )
+        # FastPLM's _convert_token_to_id raises KeyError on OOV tokens ('J' in
+        # sequences, '|' in Peptide-HLA, '#' in FLIP thermostability) — map them
+        # to 'X' like stock EsmTokenizer effectively does (ported from ProtSent).
+        patch_unknown_residue_tokens(tokenizer)
         logger.info("-> Loaded as HF AutoModelForMaskedLM (FastPLM ESM2)")
         return (tokenizer, model), False, device
 
