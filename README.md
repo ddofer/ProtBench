@@ -189,7 +189,7 @@ The presets are not nested, which surprises people:
 | Preset | Tasks | Notes |
 | --- | --- | --- |
 | `--very-fast` | 8 | Curated scout subset. |
-| `--fast` *(default)* | 20 | Includes `scope40_retrieval` (family), `scope40_retrieval_superfamily`, `scope40_retrieval_fold`. |
+| `--fast` *(default)* | 17 | Includes `scope40_retrieval` (family); `--no-fast` adds `scope40_retrieval_superfamily` and `_fold`. |
 | `--no-fast` | 32 | The broad set — but **not** a superset of `--fast`. Drops `scope40_retrieval`. |
 | `--proteingym` | +8 | Large and slow, so opt-in. |
 
