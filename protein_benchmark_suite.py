@@ -2341,10 +2341,17 @@ def embed_sequences(
             # Fall through to shared reassembly logic below (pair concat / dedup restore)
 
         else:
-            embs = []
+            # Longest-first batching. Padding is to the batch maximum, so feeding the model in
+            # dataset order makes a batch of one 1000-residue sequence and 63 short ones pad all 64
+            # to 1000. Grouping similar lengths removes that waste; results are unchanged because
+            # padded positions are masked out of the mean pooling below. Same approach the residue
+            # path already takes (token_classification_probe.iter_residue_embeddings).
+            order = sorted(range(len(flat_seqs)), key=lambda i: len(flat_seqs[i]), reverse=True)
+            out: List[Optional[np.ndarray]] = [None] * len(flat_seqs)
 
-            for i in range(0, len(flat_seqs), batch_size):
-                batch = flat_seqs[i : i + batch_size]
+            for start in range(0, len(order), batch_size):
+                idx = order[start : start + batch_size]
+                batch = [flat_seqs[i] for i in idx]
                 inputs = tokenizer(
                     batch,
                     return_tensors="pt",
@@ -2432,9 +2439,11 @@ def embed_sequences(
                 sum_mask = torch.clamp(mask.sum(dim=1), min=1e-9)
                 batch_embs = (sum_embeddings / sum_mask).detach().float().cpu().numpy()
 
-                embs.append(batch_embs)
+                for j, i in enumerate(idx):
+                    out[i] = batch_embs[j]
 
-            embs = np.concatenate(embs, axis=0)
+            # Scatter back to input order: emb_dict below is built by zipping with flat_seqs.
+            embs = np.stack(out)
 
     embs = _sanitize_nan(embs)
 
