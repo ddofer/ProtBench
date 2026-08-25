@@ -3555,39 +3555,6 @@ def evaluate_task(
             eval_strategy,
         )
 
-    if cfg.problem_type == "retrieval":
-        if probe_type != DEFAULT_RESULT_PROBE:
-            logger.info(
-                "  Retrieval uses the built-in evaluator; ignoring probe_type=%s",
-                probe_type,
-            )
-        logger.info("  Generating retrieval embeddings...")
-        retrieval_embs = embed_sequences(
-            model_obj,
-            is_sbert,
-            train_seqs,
-            device,
-            batch_size=batch_size,
-            max_length=max_length,
-            amp_dtype=amp_dtype,
-            embed_save_path=embed_save_path,
-            l2_normalize_embeddings=l2_normalize_embeddings,
-            probe_embed_mode=probe_embed_mode,
-        )
-        return (
-            evaluate_retrieval(retrieval_embs, np.asarray(train_labels)),
-            resolved_eval_split,
-            eval_strategy,
-        )
-
-    mlb = extra_data if isinstance(extra_data, MultiLabelBinarizer) else None
-
-    # Content-addressed disk cache so the TRAIN embeddings extracted for the
-    # validation probe are reused by the test probe (a separate process) instead
-    # of re-extracted — the sequence path never persisted them (only the residue
-    # + embed_dataset paths did), so heavy tasks paid their train extraction
-    # twice. Safe: keyed on the exact seqs + embed config; ANY mismatch or cache
-    # error re-extracts (perf-only, never changes results). See seq_embed_cache.
     from seq_embed_cache import cached_embed_sequences
 
     _seq_cache_root = (
@@ -3612,6 +3579,36 @@ def evaluate_task(
             probe_embed_mode=probe_embed_mode,
         )
 
+    if cfg.problem_type == "retrieval":
+        if probe_type != DEFAULT_RESULT_PROBE:
+            logger.info(
+                "  Retrieval uses the built-in evaluator; ignoring probe_type=%s",
+                probe_type,
+            )
+        logger.info("  Generating retrieval embeddings...")
+        # scope40_retrieval, _superfamily and _fold are three tasks over ONE corpus (all
+        # tattabio/scope40_test, split "train"), differing only in the label they rank against. A
+        # model benchmarked exactly once -- a new checkpoint, an experiment arm -- therefore embeds
+        # the same 2,207 sequences three times unless this is cached. The reuse is within a single
+        # run, so it pays off even for a model that never runs again.
+        retrieval_embs = cached_embed_sequences(
+            lambda: _embed(train_seqs), train_seqs,
+            cache_root=_seq_cache_root, cfg_key=_cfg_key,
+        )
+        return (
+            evaluate_retrieval(retrieval_embs, np.asarray(train_labels)),
+            resolved_eval_split,
+            eval_strategy,
+        )
+
+    mlb = extra_data if isinstance(extra_data, MultiLabelBinarizer) else None
+
+    # Content-addressed disk cache so the TRAIN embeddings extracted for the
+    # validation probe are reused by the test probe (a separate process) instead
+    # of re-extracted — the sequence path never persisted them (only the residue
+    # + embed_dataset paths did), so heavy tasks paid their train extraction
+    # twice. Safe: keyed on the exact seqs + embed config; ANY mismatch or cache
+    # error re-extracts (perf-only, never changes results). See seq_embed_cache.
     if use_cv_fallback:
         logger.info("  Generating embeddings (4-fold CV fallback)...")
         X_train = cached_embed_sequences(
