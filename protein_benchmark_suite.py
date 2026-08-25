@@ -2341,11 +2341,8 @@ def embed_sequences(
             # Fall through to shared reassembly logic below (pair concat / dedup restore)
 
         else:
-            # Longest-first batching. Padding is to the batch maximum, so feeding the model in
-            # dataset order makes a batch of one 1000-residue sequence and 63 short ones pad all 64
-            # to 1000. Grouping similar lengths removes that waste; results are unchanged because
-            # padded positions are masked out of the mean pooling below. Same approach the residue
-            # path already takes (token_classification_probe.iter_residue_embeddings).
+            # Longest-first: padding is to the batch maximum, so dataset order pads a whole batch
+            # to its longest member. Results unchanged -- padded positions are masked out below.
             order = sorted(range(len(flat_seqs)), key=lambda i: len(flat_seqs[i]), reverse=True)
             out: List[Optional[np.ndarray]] = [None] * len(flat_seqs)
 
@@ -3586,11 +3583,8 @@ def evaluate_task(
                 probe_type,
             )
         logger.info("  Generating retrieval embeddings...")
-        # scope40_retrieval, _superfamily and _fold are three tasks over ONE corpus (all
-        # tattabio/scope40_test, split "train"), differing only in the label they rank against. A
-        # model benchmarked exactly once -- a new checkpoint, an experiment arm -- therefore embeds
-        # the same 2,207 sequences three times unless this is cached. The reuse is within a single
-        # run, so it pays off even for a model that never runs again.
+        # The three retrieval tasks share one corpus (tattabio/scope40_test), differing only in
+        # the label. Reuse is within a run, so this pays even for a model that runs exactly once.
         retrieval_embs = cached_embed_sequences(
             lambda: _embed(train_seqs), train_seqs,
             cache_root=_seq_cache_root, cfg_key=_cfg_key,
