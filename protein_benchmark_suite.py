@@ -4125,13 +4125,9 @@ def parse_args():
         action="store_true",
         default=False,
         help=(
-            "Triage subset for 'better or worse, and where': "
-            f"{', '.join(SCREEN_TASKS)}. Picked by measured discriminative spread per "
-            "unit of embedding cost, one or two per domain, every task with a test set "
-            "large enough that a delta means something (~130k sequences vs ~1M for the "
-            "full suite). Runs FULL data -- unlike --very-fast it does not cap samples, "
-            "because a capped screen is a noisier screen. Takes precedence over "
-            "--very-fast and --fast; ignored if --tasks is given."
+            "Triage subset: "
+            f"{', '.join(SCREEN_TASKS)}. Runs full data (no sample cap -- a capped "
+            "screen is a noisier screen). Beats --very-fast/--fast; ignored with --tasks."
         ),
     )
     parser.add_argument(
