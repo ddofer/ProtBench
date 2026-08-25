@@ -179,8 +179,12 @@ def embed_arm(model_name: str, seqs_lookup, seqs_query, batch_size: int, max_len
     cache_root = str(
         Path("embed_cache") / _model_cache_namespace(model_name) / "seq_cache"
     )
-    # Must match the suite's _cfg_key exactly or the Phase 1 lookup cache misses.
-    cfg_key = f"trunk|l2=0|ml={max_length}|dt=fp32"
+    # Must match the suite's _cfg_key exactly or the Phase 1 lookup cache misses. The suite
+    # interpolates its amp_dtype variable directly, and --amp_dtype fp32 (the default) leaves that
+    # variable as None rather than a torch dtype -- so the token it writes is "dt=None", not
+    # "dt=None". Writing fp32 here missed the cache on every run and silently re-embedded all
+    # 69,605 CATH lookup sequences.
+    cfg_key = f"trunk|l2=0|ml={max_length}|dt=None"
 
     obj, is_sbert, device = load_model(model_name, device="cuda")
 

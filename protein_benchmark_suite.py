@@ -3582,12 +3582,27 @@ def evaluate_task(
 
     mlb = extra_data if isinstance(extra_data, MultiLabelBinarizer) else None
 
-    if use_cv_fallback:
-        logger.info("  Generating embeddings (4-fold CV fallback)...")
-        X_train = embed_sequences(
+    # Content-addressed disk cache so the TRAIN embeddings extracted for the
+    # validation probe are reused by the test probe (a separate process) instead
+    # of re-extracted — the sequence path never persisted them (only the residue
+    # + embed_dataset paths did), so heavy tasks paid their train extraction
+    # twice. Safe: keyed on the exact seqs + embed config; ANY mismatch or cache
+    # error re-extracts (perf-only, never changes results). See seq_embed_cache.
+    from seq_embed_cache import cached_embed_sequences
+
+    _seq_cache_root = (
+        str(Path(embed_save_path).parent / "seq_cache") if embed_save_path else None
+    )
+    _cfg_key = (
+        f"{probe_embed_mode}|l2={int(bool(l2_normalize_embeddings))}"
+        f"|ml={max_length}|dt={amp_dtype}"
+    )
+
+    def _embed(_seqs):
+        return embed_sequences(
             model_obj,
             is_sbert,
-            train_seqs,
+            _seqs,
             device,
             batch_size=batch_size,
             max_length=max_length,
@@ -3595,6 +3610,13 @@ def evaluate_task(
             embed_save_path=embed_save_path,
             l2_normalize_embeddings=l2_normalize_embeddings,
             probe_embed_mode=probe_embed_mode,
+        )
+
+    if use_cv_fallback:
+        logger.info("  Generating embeddings (4-fold CV fallback)...")
+        X_train = cached_embed_sequences(
+            lambda: _embed(train_seqs), train_seqs,
+            cache_root=_seq_cache_root, cfg_key=_cfg_key,
         )
         y_train = np.array(
             train_labels,
@@ -3640,36 +3662,6 @@ def evaluate_task(
         )
 
     logger.info("  Generating embeddings...")
-    # Content-addressed disk cache so the TRAIN embeddings extracted for the
-    # validation probe are reused by the test probe (a separate process) instead
-    # of re-extracted — the sequence path never persisted them (only the residue
-    # + embed_dataset paths did), so heavy tasks paid their train extraction
-    # twice. Safe: keyed on the exact seqs + embed config; ANY mismatch or cache
-    # error re-extracts (perf-only, never changes results). See seq_embed_cache.
-    from seq_embed_cache import cached_embed_sequences
-
-    _seq_cache_root = (
-        str(Path(embed_save_path).parent / "seq_cache") if embed_save_path else None
-    )
-    _cfg_key = (
-        f"{probe_embed_mode}|l2={int(bool(l2_normalize_embeddings))}"
-        f"|ml={max_length}|dt={amp_dtype}"
-    )
-
-    def _embed(_seqs):
-        return embed_sequences(
-            model_obj,
-            is_sbert,
-            _seqs,
-            device,
-            batch_size=batch_size,
-            max_length=max_length,
-            amp_dtype=amp_dtype,
-            embed_save_path=embed_save_path,
-            l2_normalize_embeddings=l2_normalize_embeddings,
-            probe_embed_mode=probe_embed_mode,
-        )
-
     X_train = cached_embed_sequences(
         lambda: _embed(train_seqs), train_seqs,
         cache_root=_seq_cache_root, cfg_key=_cfg_key,
