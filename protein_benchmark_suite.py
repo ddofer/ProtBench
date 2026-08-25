@@ -179,6 +179,7 @@ from benchmark_tasks import (
     FAST_MAX_SAMPLES,
     FAST_TOKEN_CLASS_MAX_SAMPLES,
     FAST_TASKS,
+    SCREEN_TASKS,
     VERY_FAST_TASKS,
     RETRIEVAL_TASKS,
     PROTEINGYM_TASKS,
@@ -4017,7 +4018,8 @@ def print_task_table() -> None:
             f"{groups[key]:<11} {cfg.name}"
         )
     print(
-        f"\n{len(TASKS)} tasks. Presets: --very-fast ({len(VERY_FAST_TASKS)} scout "
+        f"\n{len(TASKS)} tasks. Presets: --screen ({len(SCREEN_TASKS)} triage), "
+        f"--very-fast ({len(VERY_FAST_TASKS)} scout "
         f"tasks), --fast ({len(FAST_TASKS) + len(RETRIEVAL_TASKS)}), "
         f"default ({len(DEFAULT_TASKS)}, excludes ProteinGym), "
         f"--proteingym adds the {len(PROTEINGYM_TASKS)} ProteinGym tasks."
@@ -4116,6 +4118,21 @@ def parse_args():
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Run a fast subset of tasks (default: True)",
+    )
+    parser.add_argument(
+        "--screen",
+        dest="screen",
+        action="store_true",
+        default=False,
+        help=(
+            "Triage subset for 'better or worse, and where': "
+            f"{', '.join(SCREEN_TASKS)}. Picked by measured discriminative spread per "
+            "unit of embedding cost, one or two per domain, every task with a test set "
+            "large enough that a delta means something (~130k sequences vs ~1M for the "
+            "full suite). Runs FULL data -- unlike --very-fast it does not cap samples, "
+            "because a capped screen is a noisier screen. Takes precedence over "
+            "--very-fast and --fast; ignored if --tasks is given."
+        ),
     )
     parser.add_argument(
         "--very-fast",
@@ -4373,6 +4390,7 @@ def main():
         "device": args.device,
         "fast": args.fast,
         "very_fast": args.very_fast,
+        "screen": args.screen,
         "cache_embeddings": args.cache_embeddings,
         "embed_cache_dir": args.embed_cache_dir,
         "proteingym": args.proteingym,
@@ -4474,6 +4492,8 @@ def main():
         if len(task_keys) != len(config["tasks"]):
             missing = set(config["tasks"]) - set(task_keys)
             raise ValueError(f"Unknown tasks provided: {sorted(missing)}")
+    elif config.get("screen"):
+        task_keys = list(SCREEN_TASKS)
     elif config.get("very_fast"):
         task_keys = list(VERY_FAST_TASKS)
     elif config.get("fast"):

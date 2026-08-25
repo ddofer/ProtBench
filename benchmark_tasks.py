@@ -141,6 +141,33 @@ VERY_FAST_TASKS = [
     "conservation_flip",
 ]
 
+# Triage set: "is this checkpoint better or worse, and in which domain?" Ranked by
+# measured discriminative spread across five same-family checkpoints (v3, v4-36k,
+# Base-10k, ArmA-10k, ArmB-10k) divided by sequences to embed, then one or two per
+# domain. ~130k sequences against ~1M for the full suite.
+#
+# Deliberately EXCLUDED despite topping the raw-spread ranking: flip2_rhomax (0.6464
+# spread, n=184), contact_probe (0.0672, n=40), ppi_affinity (0.2280, n=200). They rank
+# first BECAUSE a small test set turns noise into spread, so a screen built on them
+# raises false alarms -- the one failure mode a screen cannot have.
+#
+# Also excluded, for the opposite reason: signalp_binary moves 0.0018 across models that
+# differ by 0.1363 on ec_classification. It cannot discriminate, so it is pure cost.
+#
+# Pair with the ProteinGym zero-shot pass (proteingym_mlm_zeroshot.py, ~11 min for DMS
+# substitutions + clinical substitutions together) for the no-probe axis this list has
+# no way to cover.
+SCREEN_TASKS = [
+    "scope40_retrieval",       # structure   spread .0494  n=2,207   all-vs-all, no probe fit
+    "remote_homology",         # fold        spread .0490  n=14,000
+    "ec_classification",       # function    spread .1363  n=20,000  2nd most discriminative
+    "rhla_enzyme_mutations",   # fitness     spread .1116  n=1,500   best ROI with a usable n
+    "aav_flip",                # fitness     spread .0786  n=30,000  established FLIP
+    "disprot",                 # disorder    spread .0290  n=1,500   cheap disorder view
+    "stability",               # biophysics  spread .0571  n=60,000  the tracked regression
+    "conservation_flip",       # biophysics  spread .0202  n=11,000  per-residue, ~111s probe
+]
+
 FAST_MAX_SAMPLES = 100_000
 # For token_classification tasks in fast mode, cap at sequence count to keep
 # residue-level logistic regression tractable on CPU (~400k residues at 2000 seqs).
