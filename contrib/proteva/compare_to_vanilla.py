@@ -23,7 +23,15 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from benchmark_tasks import (  # noqa: E402  -- canonical metric direction
+    LOWER_IS_BETTER_METRICS,
+    metric_greater_is_better,
+    signed_delta,
+)
 
 DEFAULT_CSV = "results/bench_results_all.csv"
 
@@ -66,10 +74,16 @@ def build_comparison(rows, *, baseline_substr="AMPLIFY", split="test"):
             m: (v - baseline if baseline is not None else None)
             for m, v in models.items()
         }
+        # `deltas` stays raw (candidate - baseline) for callers that render values.
+        # `signed_deltas` re-signs so POSITIVE ALWAYS MEANS BETTER -- collect_bench_results
+        # emits an MSE row for every regression task, and comparing those raw reports an
+        # improvement as a loss. Aggregate over signed_deltas, never over deltas.
+        signed_deltas = {m: signed_delta(d, metric) for m, d in deltas.items()}
         out.append({
             "probe_type": probe, "task": task, "metric": metric,
             "baseline": baseline, "baseline_model": baseline_model,
-            "models": models, "deltas": deltas,
+            "models": models, "deltas": deltas, "signed_deltas": signed_deltas,
+            "greater_is_better": metric_greater_is_better(metric),
         })
     return out
 

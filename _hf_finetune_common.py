@@ -344,11 +344,10 @@ def add_common_finetune_args(parser: argparse.ArgumentParser) -> None:
 # / Recall@k / AP) is higher-is-better. NOTE: e.g. ``meltome`` is a regression
 # task whose main_metric is MSE — hardcoding greater_is_better=True would make
 # early stopping keep the WORST epoch, so the direction must follow the metric.
-_LOWER_IS_BETTER_METRICS = {"mse", "mae", "rmse", "loss", "perplexity"}
-
-
-def metric_greater_is_better(metric_name: str | None) -> bool:
-    return (metric_name or "").lower() not in _LOWER_IS_BETTER_METRICS
+from benchmark_tasks import (  # noqa: E402  -- canonical metric direction
+    LOWER_IS_BETTER_METRICS as _LOWER_IS_BETTER_METRICS,
+    metric_greater_is_better,
+)
 
 
 def resolve_early_stopping(

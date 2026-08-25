@@ -22,13 +22,16 @@ import argparse
 import csv
 from pathlib import Path
 
-from compare_to_vanilla import build_comparison, _short, DEFAULT_CSV
+from compare_to_vanilla import (  # noqa: E402
+    build_comparison, _short, DEFAULT_CSV, LOWER_IS_BETTER_METRICS,
+)
 
 RESULTS_DIR = Path(DEFAULT_CSV).parent
 # Trajectory order we want columns to appear in (substring match, first wins).
 TRAJECTORY = ["AMPLIFY", "step0", "warminit", "epoch1", "epoch3", "final"]
-# "Higher is better" for every metric we emit EXCEPT MSE.
-LOWER_IS_BETTER = {"MSE"}
+# Metric direction comes from benchmark_tasks (canonical); the local {"MSE"} set used
+# here silently mis-signed MAE/RMSE rows.
+LOWER_IS_BETTER = LOWER_IS_BETTER_METRICS
 
 
 def _ordered_models(records):
@@ -49,7 +52,7 @@ def _ordered_models(records):
 def _arrow(delta, metric):
     if delta is None:
         return ""
-    better = (delta < 0) if metric in LOWER_IS_BETTER else (delta > 0)
+    better = (delta < 0) if metric.lower() in LOWER_IS_BETTER else (delta > 0)
     if abs(delta) < 1e-4:
         return "·"
     return "↑" if better else "↓"
@@ -86,7 +89,7 @@ def _insights(records, models):
             d = rec["deltas"].get(m)
             if d is None:
                 continue
-            signed = -d if rec["metric"] in LOWER_IS_BETTER else d
+            signed = -d if rec["metric"].lower() in LOWER_IS_BETTER else d
             lifts.append((signed, rec["task"], rec["metric"]))
         if not lifts:
             continue
@@ -103,7 +106,7 @@ def _insights(records, models):
             d = rec["deltas"].get(m)
             if d is None:
                 continue
-            signed = -d if rec["metric"] in LOWER_IS_BETTER else d
+            signed = -d if rec["metric"].lower() in LOWER_IS_BETTER else d
             best.append((signed, rec["task"], rec["metric"], _short(m)))
     best.sort(reverse=True)
     if best:

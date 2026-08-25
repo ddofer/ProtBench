@@ -283,11 +283,20 @@ def _model_signature_paths(model_path: Path) -> list[Path]:
 
 
 def _model_cache_namespace(model_name: str) -> str:
-    """Build a cache namespace that changes when a local checkpoint changes."""
+    """Build a cache namespace that changes when a local checkpoint changes.
+
+    The pooling mode is part of the namespace because it changes the stored VECTORS.
+    Without it every PLM_BENCH_POOL mode for one model shared a single
+    embed_cache/<model>_<digest>/embeddings.pth: modes run in sequence silently reused
+    the first mode's vectors, and modes run CONCURRENTLY (one arm per GPU) read and
+    overwrote each other mid-sweep.
+    """
     model_path = Path(model_name)
     safe_name = safe_model_name(model_name)
+    pool = _pool_mode()
+    suffix = "" if pool == "mean" else f"__pool_{pool}"
     if not model_path.exists():
-        return safe_name
+        return safe_name + suffix
 
     signature_parts = [str(model_path.resolve())]
     for path in _model_signature_paths(model_path):
@@ -301,7 +310,7 @@ def _model_cache_namespace(model_name: str) -> str:
         signature_parts.append(f"{relative_path}:{stat.st_size}:{stat.st_mtime_ns}")
 
     digest = hashlib.sha256("|".join(signature_parts).encode("utf-8")).hexdigest()
-    return f"{safe_name}_{digest[:12]}"
+    return f"{safe_name}_{digest[:12]}" + suffix
 
 
 def _clear_model_cache_dirs(embed_cache_dir: str, model_name: str) -> int:
@@ -2071,18 +2080,97 @@ def _pack_token_id_rows(rows: List[np.ndarray]) -> Dict[str, Any]:
     }
 
 
+# Pooling variants for the frozen-embedding probes. Set PLM_BENCH_POOL.
+#
+#   mean        (default) mean over EVERY token in the segment, including <cls>/<eos>.
+#               What every recorded benchmark number to date used.
+#   mean_nospec mean over residues only, dropping the <cls>/<eos> brackets.
+#   cls         the <cls> vector alone.
+#   cls_mean    concat(<cls>, residue-mean) -> 2H dims.
+#
+# Motivation, measured 2026-08-21 on a Proteva checkpoint: <cls> carries a MASSIVE
+# ACTIVATION in the late blocks -- max/median token norm 1.2x through block 13, 8.1x at
+# block 27, 2.1x at block 29, always position 0 (the attention-sink pattern of
+# arXiv:2402.17762). Separately, Proteva's per-protein aux heads were trained on a pool
+# that INCLUDED <cls>, so a trained model's <cls> may carry taxonomy / pLDDT / function
+# signal that a vanilla model's does not. Unlike picking a better LAYER -- which lifts
+# vanilla identically and therefore cannot move a delta -- this readout can be
+# asymmetric between the two models, which is what makes it worth measuring.
+_POOL_MODES = ("mean", "mean_nospec", "cls", "cls_mean")
+
+
+def _pool_mode() -> str:
+    mode = os.environ.get("PLM_BENCH_POOL", "mean").strip() or "mean"
+    if mode not in _POOL_MODES:
+        raise ValueError(f"PLM_BENCH_POOL={mode!r} not in {_POOL_MODES}")
+    return mode
+
+
+def _dense_pool(hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Pool ``(B, T, H)`` dense hidden states to ``(B, H)`` under ``PLM_BENCH_POOL``.
+
+    Dense counterpart of :func:`_segment_mean_pool`. Both must implement the same modes:
+    tasks take one path or the other depending on whether the model runs packed, and a
+    mode implemented in only one of them silently falls back to plain mean pooling.
+
+    ``mask`` is ``(B, T)`` and true on real (non-pad) tokens. The first real token is
+    ``<cls>`` and the last is ``<eos>``.
+    """
+    mode = _pool_mode()
+    m = mask.bool()
+    lengths = m.sum(dim=1)  # (B,)
+    idx = torch.arange(m.size(1), device=m.device).unsqueeze(0)  # (1, T)
+    first = torch.zeros_like(lengths).unsqueeze(1)  # <cls> is always index 0
+    last = (lengths - 1).unsqueeze(1)
+
+    def _masked_mean(sel: torch.Tensor) -> torch.Tensor:
+        w = sel.unsqueeze(-1).to(hidden.dtype)
+        return (hidden * w).sum(dim=1) / w.sum(dim=1).clamp(min=1e-9)
+
+    if mode == "mean":
+        return _masked_mean(m)
+    # Residues only: drop the first and last real token, unless the row is so short that
+    # nothing would remain (then keep it whole rather than dividing by ~0).
+    body = m & (idx != first) & (idx != last)
+    body = torch.where((lengths > 2).unsqueeze(1), body, m)
+    if mode == "mean_nospec":
+        return _masked_mean(body)
+    cls = hidden[:, 0, :]
+    if mode == "cls":
+        return cls
+    return torch.cat([cls, _masked_mean(body)], dim=-1)  # cls_mean
+
+
 def _segment_mean_pool(hidden: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
-    """Mean-pool packed hidden states back to one vector per segment.
+    """Pool packed hidden states back to one vector per segment.
 
     Inverse of :func:`_pack_token_id_rows`: given ``(1, total_tokens, H)``
-    hidden states and the ``cu_seqlens`` boundaries, average each segment's
-    token vectors to ``(num_segments, H)``. Output is always float32 (the
-    model forwards in bf16; the linear probe wants float).
+    hidden states and the ``cu_seqlens`` boundaries, reduce each segment's
+    token vectors to one row. Output is always float32 (the model forwards in
+    bf16; the linear probe wants float).
+
+    The reduction is selected by ``PLM_BENCH_POOL`` (see ``_POOL_MODES``); the default
+    ``mean`` is bit-identical to the historical behaviour.
     """
+    mode = _pool_mode()
     h = hidden.squeeze(0).float()  # (total_tokens, H)
     bounds = cu_seqlens.detach().cpu().to(torch.int64).tolist()
-    pooled = [h[bounds[i] : bounds[i + 1]].mean(dim=0) for i in range(len(bounds) - 1)]
-    return torch.stack(pooled, dim=0)
+    rows = []
+    for i in range(len(bounds) - 1):
+        lo, hi = bounds[i], bounds[i + 1]
+        seg = h[lo:hi]
+        # A segment is <cls> ... <eos>; length <= 2 has no residues, so fall back to
+        # the whole segment rather than averaging an empty slice.
+        body = seg[1:-1] if seg.shape[0] > 2 else seg
+        if mode == "mean":
+            rows.append(seg.mean(dim=0))
+        elif mode == "mean_nospec":
+            rows.append(body.mean(dim=0))
+        elif mode == "cls":
+            rows.append(seg[0])
+        else:  # cls_mean
+            rows.append(torch.cat([seg[0], body.mean(dim=0)], dim=-1))
+    return torch.stack(rows, dim=0)
 
 
 def embed_sequences(
@@ -2433,11 +2521,12 @@ def embed_sequences(
                         with torch.inference_mode():
                             hidden = model.layer_norm_2(hidden)
 
-                # Mean pooling with attention mask (always use boolean mask, not additive)
-                mask = pooling_mask.unsqueeze(-1).expand(hidden.size()).float()
-                sum_embeddings = torch.sum(hidden * mask, dim=1)
-                sum_mask = torch.clamp(mask.sum(dim=1), min=1e-9)
-                batch_embs = (sum_embeddings / sum_mask).detach().float().cpu().numpy()
+                # Pooling with attention mask (always boolean, not additive).
+                # SAME PLM_BENCH_POOL modes as the packed path in _segment_mean_pool --
+                # this is the DENSE path, and it is the one most tasks actually take.
+                # Patching only one of the two is how the first attempt at this produced
+                # four identical result sets.
+                batch_embs = _dense_pool(hidden, pooling_mask).detach().float().cpu().numpy()
 
                 for j, i in enumerate(idx):
                     out[i] = batch_embs[j]

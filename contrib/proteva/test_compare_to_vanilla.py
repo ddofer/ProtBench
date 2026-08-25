@@ -78,3 +78,27 @@ def test_sorted_by_probe_then_task():
     out = build_comparison(rows, baseline_substr="AMPLIFY", split="test")
     keys = [(r["probe_type"], r["task"]) for r in out]
     assert keys == sorted(keys)
+
+
+def test_signed_delta_flips_lower_is_better_metrics():
+    """An MSE drop is an IMPROVEMENT; raw subtraction reports it as a loss.
+
+    collect_bench_results emits an MSE row for every regression task, so an
+    aggregate over raw `deltas` counted every one of those backwards.
+    """
+    rows = [
+        _row("vanilla", "meltome", "linear", "test", "MSE", "30.0"),
+        _row("trained", "meltome", "linear", "test", "MSE", "29.0"),
+        _row("vanilla", "solubility", "linear", "test", "AUC", "0.70"),
+        _row("trained", "solubility", "linear", "test", "AUC", "0.75"),
+    ]
+    recs = {r["task"]: r for r in build_comparison(rows, baseline_substr="vanilla")}
+
+    mse = recs["meltome"]
+    assert mse["deltas"]["trained"] == -1.0          # raw: looks like a regression
+    assert mse["signed_deltas"]["trained"] == 1.0    # signed: correctly an improvement
+    assert mse["greater_is_better"] is False
+
+    auc = recs["solubility"]
+    assert auc["deltas"]["trained"] == auc["signed_deltas"]["trained"]  # unchanged
+    assert auc["greater_is_better"] is True

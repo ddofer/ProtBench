@@ -19,6 +19,25 @@ Usage:
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
+# Metric direction. THE canonical definition -- `_hf_finetune_common` (early stopping),
+# `contrib/proteva/report.py` and `contrib/proteva/compare_to_vanilla.py` all import this
+# rather than keeping their own copy. They previously carried three divergent sets
+# ({mse,mae,rmse,loss,perplexity} / {MSE} / nothing at all), so the same MSE row was
+# "better" in one report, "worse" in another, and unsigned in the third.
+LOWER_IS_BETTER_METRICS = frozenset({"mse", "mae", "rmse", "loss", "perplexity"})
+
+
+def metric_greater_is_better(metric_name: str | None) -> bool:
+    """True when a LARGER value of ``metric_name`` is the better result."""
+    return (metric_name or "").lower() not in LOWER_IS_BETTER_METRICS
+
+
+def signed_delta(delta: float | None, metric_name: str | None) -> float | None:
+    """Re-sign a raw ``candidate - baseline`` delta so POSITIVE always means better."""
+    if delta is None:
+        return None
+    return delta if metric_greater_is_better(metric_name) else -delta
+
 
 @dataclass
 class TaskConfig:
