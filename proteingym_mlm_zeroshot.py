@@ -536,7 +536,13 @@ def _eval_task(task_key, refs, tokenizer, device, batch_size, max_length,
                     arm="red" if indel_score_mode == "embedding_red" else "span",
                     model_window=model_window if indel_long_policy != "truncate" else None)
                 for j, i in enumerate(idx):
-                    sc = vals[j]
+                    # NEGATED to match the PLL branches. score_indel_variants is
+                    # documented "higher = more disrupted"; every other branch here
+                    # appends (mutant - WT) log-likelihood, i.e. "higher = more fit".
+                    # Appending it raw inverted the ranking: measured 2026-08-26 on
+                    # A4_HUMAN_Seuma_2022_indels, embedding_red scored Spearman -0.367
+                    # / AUC 0.000 where strided k=16 scored +0.587 / 0.877.
+                    sc = None if vals[j] is None else -vals[j]
                     if sc is None:
                         n_skipped += 1
                         continue
