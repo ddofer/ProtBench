@@ -1024,7 +1024,7 @@ def main(argv=None):
             assay_shard=args.assay_shard,
             assay_num_shards=args.assay_num_shards,
             residue_embedder=(
-                _make_residue_embedder(model, tokenizer, device, args.batch_size, max_length)
+                _make_residue_embedder(model, tokenizer, device, args.batch_size, args.max_length)
                 if args.indel_score_mode.startswith("embedding_") else None
             ),
         )
