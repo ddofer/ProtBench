@@ -1,6 +1,13 @@
 # Local Arrow/HuggingFace datasets built by ../scripts/prep_*.py. Not committed:
 # rebuild them with those scripts. See docs/DATASETS.md.
-conservation_flip/
-flip2_amylase/
-flip2_rhomax/
-disprot/
+# NO trailing slash: "conservation_flip/" matches a directory but NOT a symlink, so a
+# local absolute-path symlink at that name slipped past this file and was committed in
+# ddb2040 as
+#     data/conservation_flip -> /storage/users/ddofer/software/ProtBench/data/conservation_flip
+# On the machine that path names, checking it out is a symlink pointing at itself, and
+# because this .gitignore marks the name expendable git silently REPLACED the built
+# dataset with the loop instead of refusing. Match both forms.
+conservation_flip
+flip2_amylase
+flip2_rhomax
+disprot
