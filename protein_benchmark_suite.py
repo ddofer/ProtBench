@@ -283,6 +283,23 @@ def _model_signature_paths(model_path: Path) -> list[Path]:
     return sorted(candidates)[:32]
 
 
+def _hub_snapshot_revision(model_name: str) -> str | None:
+    """Commit sha of the locally-resolved snapshot for a hub model id, else None.
+
+    Reads the HF cache only, so it works offline and adds no network call. Returns
+    None for anything not resolvable, which keeps the caller on its old behaviour.
+    """
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        hit = try_to_load_from_cache(model_name, "config.json")
+        if isinstance(hit, str) and "/snapshots/" in hit:
+            return hit.split("/snapshots/", 1)[1].split("/", 1)[0]
+    except Exception:
+        pass
+    return None
+
+
 def _model_cache_namespace(model_name: str) -> str:
     """Build a cache namespace that changes when a local checkpoint changes.
 
@@ -297,7 +314,11 @@ def _model_cache_namespace(model_name: str) -> str:
     pool = _pool_mode()
     suffix = "" if pool == "mean" else f"__pool_{pool}"
     if not model_path.exists():
-        return safe_name + suffix
+        # Hub id: key on the resolved snapshot commit. Keyed on the bare name, the
+        # cache did NOT invalidate when upstream republished, so a benchmark could
+        # silently score the previous release's vectors under the new weights' name.
+        revision = _hub_snapshot_revision(model_name)
+        return f"{safe_name}_{revision[:12]}{suffix}" if revision else safe_name + suffix
 
     signature_parts = [str(model_path.resolve())]
     for path in _model_signature_paths(model_path):
@@ -4179,8 +4200,8 @@ def parse_args():
         default=False,
         help="Cache embeddings to disk under --embed_cache_dir/<model_name>/embeddings.pth "
         "(default: off). Opt in for static models you will re-benchmark. Note the cache "
-        "key for a hub model id is just the name, so it does NOT invalidate when the "
-        "upstream weights change; local paths are keyed on file size and mtime.",
+        "key for a hub model id is the resolved snapshot commit, so a newer upstream "
+        "release gets a fresh cache; local paths are keyed on file size and mtime.",
     )
     parser.add_argument(
         "--batch_size",
