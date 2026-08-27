@@ -100,6 +100,15 @@ class TaskConfig:
 # Many (not all) of the available benchmark tasks;
 FAST_TASKS = [
     "remote_homology",
+    # cath_eat added 2026-08-27. It was in DEFAULT_TASKS only, and every campaign run
+    # built its --tasks list from FAST u RETRIEVAL u SCREEN -- so the one fold benchmark
+    # whose train/test contamination is fully controlled never ran, while the two that
+    # are contaminated (remote_homology 90% of queries, scope40_retrieval 92% with 73%
+    # of the near-duplicate corpus rows unsuppressed) both did.
+    # It is also the strongest fold test on its own merits: ProtTucker's midnight-zone
+    # transfer (Heinzinger 2022, NARGAB lqac043), 219 queries non-redundant to the 69k
+    # lookup set at HVAL <= 0, so no query has a lookup relative findable by alignment.
+    "cath_eat",
     "solubility",
     "signalp_binary",
     "profet_np_sp_cleaved",
@@ -152,6 +161,7 @@ VERY_FAST_TASKS = [
 # ProteinGym zero-shot (proteingym_mlm_zeroshot.py, ~11 min) covers the no-probe axis.
 SCREEN_TASKS = [
     "scope40_retrieval",       # structure   n=2,207   no probe fit
+    "cath_eat",                # fold        n=219 vs 69k lookup   decontaminated
     "remote_homology",         # fold        n=14,000
     "ec_classification",       # function    n=20,000  most discriminative usable task
     "rhla_enzyme_mutations",   # fitness     n=1,500
