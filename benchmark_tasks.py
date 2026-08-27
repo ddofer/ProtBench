@@ -829,8 +829,14 @@ MULTILABEL_EXCLUDED_TASKS = frozenset({"go_mf", "go_bp", "go_cc", "cafa5"})
 # without adding a new signal. Opt-in by name, e.g. `--tasks ss8_cb513`.
 SS_HELDOUT_TASKS = sorted(_ss_heldout_tasks())
 
+# Oversized for a default sweep: ~200k rows, so it dominates --no-fast wall-clock
+# while adding one more thermostability signal next to `thermostability` and
+# `meltome`. Opt-in by name: `--tasks temperature_stability`.
+OVERSIZED_EXCLUDED_TASKS = frozenset({"temperature_stability"})
+
 # Default tasks for --no-fast: all standard probe tasks, excluding ProteinGym,
-# opt-in retrieval tasks, multilabel-excluded tasks, and the held-out SS sets.
+# opt-in retrieval tasks, multilabel-excluded tasks, the held-out SS sets, and
+# the oversized ones.
 DEFAULT_TASKS = [
     k
     for k in TASKS
@@ -839,6 +845,7 @@ DEFAULT_TASKS = [
     | set(RETRIEVAL_TASKS)
     | MULTILABEL_EXCLUDED_TASKS
     | set(SS_HELDOUT_TASKS)
+    | OVERSIZED_EXCLUDED_TASKS
 ]
 
 
