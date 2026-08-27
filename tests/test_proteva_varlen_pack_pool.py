@@ -14,10 +14,17 @@ The flash-attn forward between these two steps is GPU-validated separately;
 here we only pin the padding-free reshape math.
 """
 
+import types
+
 import numpy as np
 import torch
+from transformers import BatchEncoding
 
-from protein_benchmark_suite import _pack_token_id_rows, _segment_mean_pool
+from protein_benchmark_suite import (
+    _pack_token_id_rows,
+    _segment_mean_pool,
+    embed_sequences,
+)
 
 
 def test_pack_token_id_rows_layout():
@@ -123,3 +130,69 @@ def test_pack_then_pool_roundtrip_preserves_order_and_count():
     # Row means of the token ids: 3, 8, 12.
     assert torch.allclose(pooled[:, 0], torch.tensor([3.0, 8.0, 12.0]))
     assert torch.allclose(pooled[:, 1], torch.tensor([6.0, 16.0, 24.0]))
+
+
+class _ToyTokenizer:
+    """Minimal padded tokenizer for the Proteva dense-path regression test."""
+
+    def __call__(self, sequences, **kwargs):
+        del kwargs
+        rows = [
+            [1, *(3 + ord(char) % 20 for char in sequence), 2] for sequence in sequences
+        ]
+        width = max(map(len, rows))
+        input_ids = [row + [0] * (width - len(row)) for row in rows]
+        attention_mask = [[1] * len(row) + [0] * (width - len(row)) for row in rows]
+        return BatchEncoding(
+            {
+                "input_ids": torch.tensor(input_ids, dtype=torch.long),
+                "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+            }
+        )
+
+
+class _ToyDenseProteva(torch.nn.Module):
+    """Proteva-shaped model whose hidden states are deterministic token features."""
+
+    def __init__(self):
+        super().__init__()
+        self.anchor = torch.nn.Parameter(torch.zeros(()))
+        self.config = types.SimpleNamespace(model_type="proteva")
+        self.encoder = types.SimpleNamespace(
+            config=types.SimpleNamespace(flash_attn_mode="off")
+        )
+        self.batch_sizes = []
+
+    def forward(self, input_ids, attention_mask, return_dict=True):
+        del attention_mask, return_dict
+        self.batch_sizes.append(len(input_ids))
+        values = input_ids.float()
+        hidden = torch.stack([values, values * 2], dim=-1)
+        return types.SimpleNamespace(last_hidden_state=hidden)
+
+
+def test_dense_fp32_proteva_batches_and_matches_single_sequence_forwards():
+    """Flash-off Proteva inference uses padded batches without changing embeddings."""
+
+    sequences = ["ACDEFG", "H", "KLM", "NPQRST", "VW"]
+    tokenizer = _ToyTokenizer()
+    batched_model = _ToyDenseProteva()
+    batched = embed_sequences(
+        (tokenizer, batched_model),
+        False,
+        sequences,
+        device="cpu",
+        batch_size=2,
+    )
+    single_model = _ToyDenseProteva()
+    single = embed_sequences(
+        (tokenizer, single_model),
+        False,
+        sequences,
+        device="cpu",
+        batch_size=1,
+    )
+
+    assert batched_model.batch_sizes == [2, 2, 1]
+    assert single_model.batch_sizes == [1] * len(sequences)
+    assert np.array_equal(batched, single)

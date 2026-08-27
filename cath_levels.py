@@ -36,6 +36,7 @@ Usage:
     python cath_levels.py --models base=/path/to/model ...
     python cath_levels.py --identity-table /path/to/cath_eat_query_identity.tsv
     python cath_levels.py --rescore-only --identity-table /path/to/table.tsv
+    python cath_levels.py --merge-from /path/to/model_outputs ...
     python cath_levels.py --selfcheck              # no GPU, no network
 """
 
@@ -396,6 +397,80 @@ def _rescore_predictions(out_dir: Path, identity_table: Path, n_boot: int) -> in
     return 0
 
 
+def _merge_model_outputs(
+    out_dir: Path,
+    input_dirs: list[Path],
+    identity_table: Path,
+    n_boot: int,
+    *,
+    expected_predictions: int = 219,
+) -> int:
+    """Merge independently run model directories without recomputing embeddings."""
+
+    identities = load_identity_table(identity_table)
+    results = {}
+    strata_results = {}
+    failures = {}
+    for input_dir in input_dirs:
+        levels_path = input_dir / "cath_levels.json"
+        if not levels_path.exists():
+            raise SystemExit(f"missing {levels_path}")
+        input_results = json.loads(levels_path.read_text())
+        failure_path = input_dir / "cath_failures.json"
+        if failure_path.exists():
+            input_failures = json.loads(failure_path.read_text())
+            overlap = failures.keys() & input_failures.keys()
+            if overlap:
+                raise SystemExit(f"duplicate failed model tags: {sorted(overlap)}")
+            failures.update(input_failures)
+
+        for tag, result in input_results.items():
+            if tag in results:
+                raise SystemExit(f"duplicate successful model tag: {tag}")
+            prediction_path = Path(result["per_query_predictions"])
+            if not prediction_path.is_absolute():
+                prediction_path = input_dir / prediction_path
+            records = read_prediction_jsonl(prediction_path)
+            if len(records) != expected_predictions:
+                raise SystemExit(
+                    f"{prediction_path}: expected {expected_predictions} per-query rows, "
+                    f"found {len(records)}"
+                )
+            central_prediction_path = _prediction_path(out_dir, tag)
+            write_prediction_jsonl(central_prediction_path, records)
+            result["per_query_predictions"] = str(central_prediction_path)
+            strata = score_identity_strata(
+                records,
+                identities=identities,
+                n_boot=n_boot,
+            )
+            for level in LEVELS:
+                full = strata["levels"][level]["full"]
+                expected = result["levels"][level]
+                if full["n"] != expected["n_answerable"] or not np.isclose(
+                    full["accuracy"], expected["accuracy"]
+                ):
+                    raise SystemExit(f"merged full metric mismatch for {tag}/{level}")
+            results[tag] = result
+            strata_results[tag] = strata
+
+    (out_dir / "cath_levels.json").write_text(
+        json.dumps(results, indent=2, sort_keys=True) + "\n"
+    )
+    (out_dir / "CATH_LEVELS.md").write_text(render_markdown(results))
+    (out_dir / "cath_failures.json").write_text(
+        json.dumps(failures, indent=2, sort_keys=True) + "\n"
+    )
+    _write_strata_outputs(out_dir, strata_results, identity_table)
+    logger.info(
+        "merged %d successful models and %d failures into %s",
+        len(results),
+        len(failures),
+        out_dir,
+    )
+    return int(bool(failures))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -423,6 +498,12 @@ def main() -> int:
         action="store_true",
         help="Rescore existing OUT/per_query/*.jsonl; never load a model or embeddings.",
     )
+    ap.add_argument(
+        "--merge-from",
+        nargs="+",
+        type=Path,
+        help="Merge per-model output directories and rescore their JSONL; no embedding.",
+    )
     ap.add_argument("--selfcheck", action="store_true")
     args = ap.parse_args()
 
@@ -432,6 +513,19 @@ def main() -> int:
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    if args.merge_from:
+        if args.rescore_only or args.models:
+            raise SystemExit(
+                "--merge-from cannot be combined with --rescore-only or --models"
+            )
+        if args.identity_table is None:
+            raise SystemExit("--merge-from requires --identity-table")
+        return _merge_model_outputs(
+            out_dir,
+            args.merge_from,
+            args.identity_table,
+            args.n_boot,
+        )
     if args.rescore_only:
         if args.identity_table is None:
             raise SystemExit("--rescore-only requires --identity-table")
@@ -451,6 +545,7 @@ def main() -> int:
     )
     results = {}
     strata_results = {}
+    failures = {}
 
     for tag, model_name in arms:
         logger.info("=== %s (%s)", tag, model_name)
@@ -460,6 +555,11 @@ def main() -> int:
             )
         except Exception as exc:  # noqa: BLE001  # one bad arm must not lose the others
             logger.error("%s FAILED: %s: %s", tag, type(exc).__name__, exc)
+            failures[tag] = {
+                "model": model_name,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
             continue
 
         nn = nearest_neighbour(x_query, x_lookup)
@@ -515,6 +615,9 @@ def main() -> int:
         json.dumps(results, indent=2, sort_keys=True) + "\n"
     )
     (out_dir / "CATH_LEVELS.md").write_text(render_markdown(results))
+    (out_dir / "cath_failures.json").write_text(
+        json.dumps(failures, indent=2, sort_keys=True) + "\n"
+    )
     logger.info(
         "wrote %s and %s", out_dir / "cath_levels.json", out_dir / "CATH_LEVELS.md"
     )
@@ -551,7 +654,7 @@ def main() -> int:
             flag,
         )
 
-    return 0
+    return int(bool(failures))
 
 
 if __name__ == "__main__":

@@ -2295,7 +2295,12 @@ def embed_sequences(
                     "batched embedding path"
                 )
 
-        if is_proteva_model:
+        _enc_cfg = getattr(getattr(model, "encoder", None), "config", None)
+        _proteva_flash_off = (
+            is_proteva_model
+            and getattr(_enc_cfg, "flash_attn_mode", "fa2-varlen") == "off"
+        )
+        if is_proteva_model and not _proteva_flash_off:
             # Proteva fa2-varlen path: tokenize each sequence, pack a chunk of
             # rows into a single UNPADDED (1, total_tokens) sequence with
             # cu_seqlens + per-segment position_ids, forward through the model's
@@ -2309,9 +2314,7 @@ def embed_sequences(
             # call (single segment) makes the dense full-attention exact. Detect
             # via the encoder's resolved flash_attn_mode (set to "off" on CPU in
             # load_model). GPU fa2-varlen is unchanged (packs `batch_size` rows).
-            _enc_cfg = getattr(getattr(model, "encoder", None), "config", None)
-            _flash_off = getattr(_enc_cfg, "flash_attn_mode", "fa2-varlen") == "off"
-            _pack_bs = 1 if (_flash_off or model_device.type == "cpu") else batch_size
+            _pack_bs = 1 if model_device.type == "cpu" else batch_size
             embs_list = []
             for i in range(0, len(flat_seqs), _pack_bs):
                 batch = flat_seqs[i : i + _pack_bs]
@@ -2458,6 +2461,11 @@ def embed_sequences(
             # path already takes (token_classification_probe.iter_residue_embeddings).
             order = sorted(range(len(flat_seqs)), key=lambda i: len(flat_seqs[i]), reverse=True)
             out: List[Optional[np.ndarray]] = [None] * len(flat_seqs)
+
+            if _proteva_flash_off and probe_embed_mode != "trunk":
+                raise ValueError(
+                    "Proteva auxiliary embeddings require a varlen flash-attention runtime"
+                )
 
             for start in range(0, len(order), batch_size):
                 idx = order[start : start + batch_size]

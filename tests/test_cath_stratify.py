@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import csv
+import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -170,3 +173,92 @@ def test_identity_table_validates_flags_and_split_relationships(tmp_path: Path) 
         )
     with pytest.raises(ValueError, match="inconsistent ge_90 flag"):
         load_identity_table(path, enforce_expected_counts=False)
+
+
+def test_cath_levels_returns_nonzero_and_records_failed_arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model-load failure cannot produce an empty output with exit status zero."""
+
+    import cath_levels
+
+    monkeypatch.setattr(
+        cath_levels,
+        "load_splits",
+        lambda: (
+            [],
+            [],
+            [],
+            [],
+            {level: [] for level in CATH_LEVELS},
+            {level: [] for level in CATH_LEVELS},
+        ),
+    )
+
+    def fail_embed(*args, **kwargs):
+        raise ModuleNotFoundError("fixture model adapter missing")
+
+    monkeypatch.setattr(cath_levels, "embed_arm", fail_embed)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["cath_levels.py", "--models", "broken=/missing", "--out", str(tmp_path)],
+    )
+
+    assert cath_levels.main() == 1
+    failures = json.loads((tmp_path / "cath_failures.json").read_text())
+    assert failures["broken"]["error_type"] == "ModuleNotFoundError"
+    assert json.loads((tmp_path / "cath_levels.json").read_text()) == {}
+
+
+def test_merge_combines_per_model_outputs_without_embeddings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Parallel model workers merge from JSONL and reproduce their full metrics."""
+
+    import cath_levels
+
+    records, identities, query_labels, lookup_labels, nearest = _prediction_fixture()
+    levels = score_levels(query_labels, lookup_labels, nearest, n_boot=20)
+    inputs = []
+    for tag in ("model_a", "model_b"):
+        input_dir = tmp_path / tag
+        tagged_records = copy.deepcopy(records)
+        for record in tagged_records:
+            record["model_tag"] = tag
+            record["model"] = f"/models/{tag}"
+        prediction_path = input_dir / "per_query" / f"{tag}.jsonl"
+        write_prediction_jsonl(prediction_path, tagged_records)
+        result = {
+            tag: {
+                "model": f"/models/{tag}",
+                "dim": 2,
+                "levels": levels,
+                "per_query_predictions": str(prediction_path),
+            }
+        }
+        (input_dir / "cath_levels.json").write_text(json.dumps(result))
+        (input_dir / "cath_failures.json").write_text("{}\n")
+        inputs.append(input_dir)
+
+    identity_path = tmp_path / "identity.tsv"
+    identity_path.write_text("synthetic identity provenance\n")
+    monkeypatch.setattr(cath_levels, "load_identity_table", lambda path: identities)
+    merged_dir = tmp_path / "merged"
+
+    assert (
+        cath_levels._merge_model_outputs(
+            merged_dir,
+            inputs,
+            identity_path,
+            20,
+            expected_predictions=4,
+        )
+        == 0
+    )
+    merged = json.loads((merged_dir / "cath_levels.json").read_text())
+    assert set(merged) == {"model_a", "model_b"}
+    assert (merged_dir / "per_query/model_a.jsonl").exists()
+    assert (merged_dir / "per_query/model_b.jsonl").exists()
+    strata = json.loads((merged_dir / "cath_strata.json").read_text())
+    assert set(strata["models"]) == {"model_a", "model_b"}
