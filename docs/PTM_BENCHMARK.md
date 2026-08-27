@@ -10,6 +10,8 @@ asset audits, and PPI feature protocols:
   deterministic JSONL or JSONL-gzip persistence.
 - `ptm_site_assets.py`: pinned ProteinBERT phosphosite and TransPTM NHAC loaders,
   split-overlap audits, and explicit comparability-versus-deduplication policy.
+- `ptm_frozen_probes.py`: deterministic sampled residue probes, centered-window
+  probes, and a residue-identity baseline for external PTM site benchmarks.
 - `ptm_ppi.py`: a labeled reproduction of the binder-canceling supplementary
   PPI features and the binder-aware frozen-probe features used by the primary
   protocol.

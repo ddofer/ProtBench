@@ -9,6 +9,7 @@ from ptm_site_assets import (
     NHAC_WINDOWS,
     audit_nhac,
     audit_proteinbert_phosphosite,
+    load_nhac,
     load_proteinbert_phosphosite,
 )
 
@@ -72,3 +73,6 @@ def test_nhac_audit_preserves_class_balance_and_finds_split_overlap(tmp_path: Pa
     assert report["duplicate_unique_id_rows"] == 1
     assert report["exact_split_overlap"]["train_test"]["seq_61"] == 1
     assert report["paper_split_counts_match"] is False
+    splits = load_nhac(path, window_size=11)
+    assert splits["train"][0].sequence[5] == "K"
+    assert splits["test"][0].label == 1

@@ -34,6 +34,19 @@ class PTMSiteBenchmarkRow:
         return hashlib.sha256(self.sequence.encode()).hexdigest()
 
 
+@dataclass(frozen=True)
+class NHACBenchmarkRow:
+    split: str
+    row_index: int
+    unique_id: str
+    sequence: str
+    label: int
+
+    @property
+    def sequence_sha256(self) -> str:
+        return hashlib.sha256(self.sequence.encode()).hexdigest()
+
+
 def load_proteinbert_phosphosite(
     root: Path,
     *,
@@ -174,6 +187,42 @@ def write_clean_test(rows: list[PTMSiteBenchmarkRow], path: Path) -> None:
             }
             for row in rows
         )
+
+
+def load_nhac(path: Path, *, window_size: int = 61) -> dict[str, list[NHACBenchmarkRow]]:
+    """Load a centered TransPTM NHAC window while preserving author splits."""
+
+    if window_size not in NHAC_WINDOWS:
+        raise ValueError(f"unsupported NHAC window size {window_size}")
+    required = {"unique_id", "label", "set", f"seq_{window_size}"}
+    splits: dict[str, list[NHACBenchmarkRow]] = {split: [] for split in NHAC_SPLITS}
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        missing = required - set(reader.fieldnames or ())
+        if missing:
+            raise ValueError(f"{path}: missing columns {sorted(missing)}")
+        for row_index, raw in enumerate(reader):
+            split = str(raw["set"]).strip()
+            label_text = str(raw["label"]).strip()
+            sequence = "".join(str(raw[f"seq_{window_size}"]).split()).upper()
+            if split not in NHAC_SPLITS:
+                raise ValueError(f"{path}:{row_index + 2}: invalid split {split!r}")
+            if label_text not in {"0", "1"}:
+                raise ValueError(f"{path}:{row_index + 2}: invalid label {label_text!r}")
+            if len(sequence) != window_size or sequence[window_size // 2] != "K":
+                raise ValueError(
+                    f"{path}:{row_index + 2}: seq_{window_size} is not a centered K window"
+                )
+            splits[split].append(
+                NHACBenchmarkRow(
+                    split=split,
+                    row_index=row_index,
+                    unique_id=str(raw["unique_id"]).strip(),
+                    sequence=sequence,
+                    label=int(label_text),
+                )
+            )
+    return splits
 
 
 def audit_nhac(path: Path, *, deduplicated_path: Path | None = None) -> dict[str, object]:

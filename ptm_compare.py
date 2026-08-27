@@ -105,6 +105,103 @@ def build_comparison(
     }
 
 
+def flatten_external_report(report: dict[str, object]) -> list[dict[str, object]]:
+    """Flatten phosphosite/NHAC frozen-probe reports into comparable rows."""
+
+    tag = str(report["model_tag"])
+    rows: list[dict[str, object]] = []
+    for split in (
+        "validation",
+        "author_test",
+        "repository_test",
+        "exact_dedup_test",
+    ):
+        metrics = report.get(split)
+        if not isinstance(metrics, dict):
+            continue
+        row: dict[str, object] = {
+            "model_tag": tag,
+            "task": report.get("task"),
+            "split": split,
+            "method": "frozen_probe",
+            "seed": report.get("seed"),
+        }
+        row.update(metrics)
+        rows.append(row)
+    residue_baseline = report.get("residue_only_baseline")
+    if isinstance(residue_baseline, dict):
+        for split, metrics in residue_baseline.items():
+            if not isinstance(metrics, dict):
+                continue
+            row = {
+                "model_tag": tag,
+                "task": report.get("task"),
+                "split": str(split),
+                "method": "residue_only_baseline",
+                "seed": report.get("seed"),
+            }
+            row.update(metrics)
+            rows.append(row)
+    return rows
+
+
+def build_external_comparison(
+    reports: list[dict[str, object]],
+    *,
+    baselines: dict[str, str] | None = None,
+) -> dict[str, object]:
+    if not reports:
+        raise ValueError("no external PTM reports supplied")
+    tasks = {str(report.get("task")) for report in reports}
+    protocols = {str(report.get("protocol")) for report in reports}
+    seeds = {report.get("seed") for report in reports}
+    if len(tasks) != 1 or len(protocols) != 1 or len(seeds) != 1:
+        raise ValueError("external PTM reports do not share task, protocol, and seed")
+    rows = [row for report in reports for row in flatten_external_report(report)]
+    frozen_rows = [row for row in rows if row["method"] == "frozen_probe"]
+    panels: dict[str, set[tuple[object, object]]] = {}
+    for row in frozen_rows:
+        panels.setdefault(str(row["split"]), set()).add(
+            (row.get("n_sites"), row.get("n_positive"))
+        )
+    mismatched = {split: values for split, values in panels.items() if len(values) != 1}
+    if mismatched:
+        raise ValueError(f"external PTM panels differ: {mismatched}")
+
+    index = {
+        (row["model_tag"], row["split"], row["method"]): row for row in rows
+    }
+    for row in rows:
+        baseline_tag = (baselines or {}).get(str(row["model_tag"]))
+        if not baseline_tag:
+            continue
+        baseline = index.get((baseline_tag, row["split"], row["method"]))
+        if baseline is None:
+            continue
+        row["baseline_tag"] = baseline_tag
+        for metric in ("auprc", "auroc", "mcc", "f1"):
+            value = row.get(metric)
+            baseline_value = baseline.get(metric)
+            if isinstance(value, (int, float)) and isinstance(
+                baseline_value, (int, float)
+            ):
+                row[f"delta_{metric}"] = float(value) - float(baseline_value)
+    return {
+        "schema_version": 1,
+        "task": next(iter(tasks)),
+        "protocol": next(iter(protocols)),
+        "seed": next(iter(seeds)),
+        "panels": {
+            split: {
+                "n_sites": next(iter(values))[0],
+                "n_positive": next(iter(values))[1],
+            }
+            for split, values in sorted(panels.items())
+        },
+        "rows": rows,
+    }
+
+
 def write_comparison(comparison: dict[str, object], out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "ptm_comparison.json").write_text(
@@ -133,7 +230,11 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"invalid --baseline {value!r}; expected MODEL=BASELINE")
         baselines[model] = baseline
     reports = [json.loads(path.read_text()) for path in args.reports]
-    comparison = build_comparison(reports, baselines=baselines)
+    comparison = (
+        build_comparison(reports, baselines=baselines)
+        if "modes" in reports[0]
+        else build_external_comparison(reports, baselines=baselines)
+    )
     write_comparison(comparison, args.out)
     print(json.dumps({key: value for key, value in comparison.items() if key != "rows"}, indent=2))
     return 0
