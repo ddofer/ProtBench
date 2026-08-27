@@ -86,3 +86,32 @@ def test_panel_comparison_rejects_protocol_mismatch(tmp_path: Path) -> None:
     baseline.write_text(text)
     with pytest.raises(ValueError, match="panel protocol mismatch"):
         compare_panel(candidate, baseline, n_boot=10)
+
+
+def test_panel_comparison_can_match_complete_candidate_to_baseline_superset(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "candidate.csv"
+    baseline = tmp_path / "baseline.csv"
+    _write(candidate, "candidate", solubility=0.8, stability=0.4)
+    _write(baseline, "baseline", solubility=0.7, stability=0.5)
+    lines = candidate.read_text().splitlines()
+    candidate.write_text("\n".join(lines[:2]) + "\n")
+
+    table, summary = compare_panel(
+        candidate,
+        baseline,
+        n_boot=10,
+        allow_baseline_superset=True,
+    )
+
+    assert len(table) == 1
+    assert summary["panel_scope"] == {
+        "candidate_rows": 1,
+        "baseline_rows": 2,
+        "baseline_superset_allowed": True,
+        "interpretation": (
+            "complete candidate panel matched against the same baseline protocols; "
+            "not a claim about tasks absent from the candidate"
+        ),
+    }

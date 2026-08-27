@@ -86,6 +86,7 @@ def compare_panel(
     *,
     n_boot: int = 10_000,
     seed: int = 42,
+    allow_baseline_superset: bool = False,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
     """Return every matched task and a deterministic task-bootstrap summary."""
 
@@ -100,7 +101,11 @@ def compare_panel(
         tuple(row[column] for column in key_columns): row
         for _, row in baseline.iterrows()
     }
-    if set(candidate_map) != set(baseline_map):
+    candidate_keys = set(candidate_map)
+    baseline_keys = set(baseline_map)
+    if allow_baseline_superset and candidate_keys <= baseline_keys:
+        baseline_map = {key: baseline_map[key] for key in candidate_keys}
+    elif candidate_keys != baseline_keys:
         only_candidate = sorted(set(candidate_map) - set(baseline_map))
         only_baseline = sorted(set(baseline_map) - set(candidate_map))
         raise ValueError(
@@ -158,6 +163,15 @@ def compare_panel(
             "seed": seed,
             "interpretation": "descriptive panel stability; not a seed or per-example CI",
         },
+        "panel_scope": {
+            "candidate_rows": len(candidate_keys),
+            "baseline_rows": len(baseline_keys),
+            "baseline_superset_allowed": allow_baseline_superset,
+            "interpretation": (
+                "complete candidate panel matched against the same baseline protocols; "
+                "not a claim about tasks absent from the candidate"
+            ),
+        },
     }
     return table, summary
 
@@ -212,9 +226,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--n-boot", type=int, default=10_000)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--allow-baseline-superset", action="store_true")
     args = parser.parse_args(argv)
     table, summary = compare_panel(
-        args.candidate, args.baseline, n_boot=args.n_boot, seed=args.seed
+        args.candidate,
+        args.baseline,
+        n_boot=args.n_boot,
+        seed=args.seed,
+        allow_baseline_superset=args.allow_baseline_superset,
     )
     write_comparison(table, summary, args.out)
     print(json.dumps(summary, indent=2, sort_keys=True))
