@@ -155,6 +155,13 @@ CC-BY-4.0). Rebuild with `scripts/build_cath_eat_dataset.py`.
 Accuracy at the homologous-superfamily (H) level, transferring labels from the
 69k lookup set to the 150 answerable queries.
 
+The author dataset exposes three related counts: `test300` is the broader
+300-query corpus-search set, `test219` is the published C/A/T/H evaluation set,
+and the 150-query H-answerable subset supplies the headline denominator. They
+must not be substituted for one another. `cath_levels.py --identity-table ...`
+persists all 219 per-query transfers and reports corpus-identity strata; its
+`--rescore-only` path performs that stratification without re-embedding.
+
 **Measured with ProtBench** (1-NN, Euclidean, `-p knn --knn_k 1`):
 
 | Method | Accuracy |

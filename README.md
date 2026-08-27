@@ -494,7 +494,27 @@ For a sense of scale, 3-mer frequencies score 0.0 here and ESM2-650M scores
 [docs/DATASETS.md](docs/DATASETS.md#the-cath-midnight-zone-task).
 
 For the full C/A/T/H breakdown, run `uv run python cath_levels.py --selfcheck`
-first and then pass `--models tag=model_or_path`. `train_cath_tucker_head.py`
+first and then pass `--models tag=model_or_path`. To persist per-query predictions
+and report the Proteva corpus-identity strata, also pass the pinned audit table:
+
+```bash
+uv run python cath_levels.py \
+    --models v4=/private/path/to/checkpoint \
+    --identity-table /private/path/to/cath_eat_query_identity.tsv \
+    --out /private/path/to/cath_results
+
+# Recompute exact/non-exact and >=90%/<90% tables without loading the model or embeddings.
+uv run python cath_levels.py --rescore-only \
+    --identity-table /private/path/to/cath_eat_query_identity.tsv \
+    --out /private/path/to/cath_results
+```
+
+This writes one 219-row JSONL per model plus full and stratified JSON/Markdown.
+The H-level denominators are full 150, exact/non-exact 102/48, and >=90%/<90%
+145/5; the five-query result is explicitly diagnostic. Existing checkpoints are
+corpus-contaminated, so stratification does not make the absolute score clean.
+
+`train_cath_tucker_head.py`
 is an optional ProtTucker-style projection-head reproduction on frozen CATH
 embeddings; its selfcheck validates the hard-negative mining and loss semantics,
 but real training/evaluation still needs the model embeddings and GPU runtime.

@@ -32,8 +32,10 @@ code, whose `compute_err` defaults to 10,000 and returns a bare standard error
 that the tables then multiply by hand.
 
 Usage:
-    python cath_levels.py                          # the six default arms
+    python cath_levels.py                          # the two default ESM-2 arms
     python cath_levels.py --models base=/path/to/model ...
+    python cath_levels.py --identity-table /path/to/cath_eat_query_identity.tsv
+    python cath_levels.py --rescore-only --identity-table /path/to/table.tsv
     python cath_levels.py --selfcheck              # no GPU, no network
 """
 
@@ -43,24 +45,44 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
 import numpy as np
 
+from cath_stratify import (
+    CATH_LEVELS,
+    answerable_mask,
+    bootstrap_ci,
+    build_prediction_records,
+    file_sha256,
+    load_identity_table,
+    read_prediction_jsonl,
+    render_strata_markdown,
+    score_identity_strata,
+    write_prediction_jsonl,
+)
+
 logger = logging.getLogger("cath_levels")
 
 DATASET = "GrimSqueaker/cath43-eat"
+DATASET_REVISION = "26c3a3e28d559488f13dc0a85641b7c37329cf65"
 LOOKUP_SPLIT = "lookup"
 QUERY_SPLIT = "test219"
-LEVELS = ("cath_c", "cath_a", "cath_t", "cath_h")
+LEVELS = CATH_LEVELS
 
 # From the paper's masking rule, reproduced independently from Rostlab/EAT's raw
 # FASTAs. A mismatch means the dataset or the masking changed, not that a model
 # did badly -- so it is a hard failure.
 EXPECTED_ANSWERABLE = {"cath_c": 219, "cath_a": 219, "cath_t": 210, "cath_h": 150}
 # Same queries under the stricter "label must be in the lookup set" reading.
-EXPECTED_ANSWERABLE_STRICT = {"cath_c": 219, "cath_a": 219, "cath_t": 208, "cath_h": 150}
+EXPECTED_ANSWERABLE_STRICT = {
+    "cath_c": 219,
+    "cath_a": 219,
+    "cath_t": 208,
+    "cath_h": 150,
+}
 
 # Heinzinger et al. 2022, Table 1, accuracy on test219 -> lookup69k.
 PAPER = {
@@ -83,7 +105,9 @@ DEFAULT_ARMS = [
 ]
 
 
-def nearest_neighbour(query: np.ndarray, lookup: np.ndarray, chunk: int = 64) -> np.ndarray:
+def nearest_neighbour(
+    query: np.ndarray, lookup: np.ndarray, chunk: int = 64
+) -> np.ndarray:
     """Index into `lookup` of the Euclidean-nearest row for each row of `query`.
 
     ||q - l||^2 = ||q||^2 - 2 q.l + ||l||^2; the ||q||^2 term is constant within
@@ -101,16 +125,6 @@ def nearest_neighbour(query: np.ndarray, lookup: np.ndarray, chunk: int = 64) ->
     return out
 
 
-def bootstrap_ci(correct: np.ndarray, n_boot: int = 1000, seed: int = 42) -> float:
-    """95% CI half-width: 1.96 x the bootstrap standard error of the mean."""
-    correct = np.asarray(correct, dtype=np.float64)
-    if len(correct) == 0:
-        return float("nan")
-    rng = np.random.default_rng(seed)
-    idx = rng.integers(0, len(correct), size=(n_boot, len(correct)))
-    return float(1.96 * correct[idx].mean(axis=1).std(ddof=1))
-
-
 def score_levels(
     query_labels: dict[str, list[str]],
     lookup_labels: dict[str, list[str]],
@@ -118,8 +132,6 @@ def score_levels(
     n_boot: int = 1000,
 ) -> dict:
     """Per-level accuracy over answerable queries, with a bootstrap CI."""
-    from collections import Counter
-
     out = {}
     for level in LEVELS:
         truth = np.asarray(query_labels[level])
@@ -130,8 +142,7 @@ def score_levels(
         # level when it is the ONLY protein carrying that label across
         # lookup UNION test -- i.e. the label's count there is 1, the query
         # itself. Reproduces their denominators exactly: 219 / 219 / 210 / 150.
-        counts = Counter(pool.tolist()) + Counter(truth.tolist())
-        answerable = np.array([counts[t] > 1 for t in truth])
+        answerable = answerable_mask(truth.tolist(), pool.tolist())
 
         # Stricter reading: the label must actually be IN the lookup set, since
         # a label shared only with another query still cannot be transferred.
@@ -147,7 +158,7 @@ def score_levels(
             "ci95": bootstrap_ci(correct, n_boot=n_boot),
             "n_answerable": int(answerable.sum()),
             "n_answerable_strict": n_strict,
-            "n_total": int(len(truth)),
+            "n_total": len(truth),
         }
     return out
 
@@ -155,14 +166,23 @@ def score_levels(
 def load_splits():
     from datasets import load_dataset
 
-    ds = load_dataset(DATASET)
+    ds = load_dataset(DATASET, revision=DATASET_REVISION)
     lookup, query = ds[LOOKUP_SPLIT], ds[QUERY_SPLIT]
     lookup_labels = {lv: list(lookup[lv]) for lv in LEVELS}
     query_labels = {lv: list(query[lv]) for lv in LEVELS}
-    return list(lookup["sequence"]), list(query["sequence"]), lookup_labels, query_labels
+    return (
+        list(lookup["id"]),
+        list(query["id"]),
+        list(lookup["sequence"]),
+        list(query["sequence"]),
+        lookup_labels,
+        query_labels,
+    )
 
 
-def embed_arm(model_name: str, seqs_lookup, seqs_query, batch_size: int, max_length: int):
+def embed_arm(
+    model_name: str, seqs_lookup, seqs_query, batch_size: int, max_length: int
+):
     """Embed both splits, reusing the suite's on-disk cache when it hits.
 
     The cache key is a hash of the exact sequence list plus an embed-config
@@ -188,9 +208,9 @@ def embed_arm(model_name: str, seqs_lookup, seqs_query, batch_size: int, max_len
 
     obj, is_sbert, device = load_model(model_name, device="cuda")
 
-    def _embed(seqs):
+    def _embed(seqs, _model=obj):
         return embed_sequences(
-            obj, is_sbert, seqs, device, batch_size=batch_size, max_length=max_length
+            _model, is_sbert, seqs, device, batch_size=batch_size, max_length=max_length
         )
 
     x_lookup = cached_embed_sequences(
@@ -202,10 +222,10 @@ def embed_arm(model_name: str, seqs_lookup, seqs_query, batch_size: int, max_len
     del obj
     try:
         import torch
-
+    except ImportError:
+        logger.debug("torch unavailable while clearing the embedding cache")
+    else:
         torch.cuda.empty_cache()
-    except Exception:
-        pass
     return np.asarray(x_lookup), np.asarray(x_query)
 
 
@@ -231,7 +251,9 @@ def render_markdown(results: dict) -> str:
 
     n = next(iter(results.values()))["levels"] if results else None
     if n:
-        counts = " / ".join(f"{lv[-1].upper()} {n[lv]['n_answerable']}" for lv in LEVELS)
+        counts = " / ".join(
+            f"{lv[-1].upper()} {n[lv]['n_answerable']}" for lv in LEVELS
+        )
         lines += ["", f"Answerable queries per level: {counts} (of 219).", ""]
 
     lines += [
@@ -253,9 +275,7 @@ def selfcheck() -> int:
     """Synthetic data whose 1-NN answer is known by construction."""
     # Four lookup points on the axes; queries placed nearest a chosen one.
     lookup = np.eye(4, dtype=np.float32) * 10.0
-    query = np.array(
-        [[9.0, 0, 0, 0], [0, 9.0, 0, 0], [0, 0, 0, 9.0]], dtype=np.float32
-    )
+    query = np.array([[9.0, 0, 0, 0], [0, 9.0, 0, 0], [0, 0, 0, 9.0]], dtype=np.float32)
     nn = nearest_neighbour(query, lookup, chunk=2)
     assert nn.tolist() == [0, 1, 3], nn.tolist()
 
@@ -317,6 +337,65 @@ def selfcheck() -> int:
     return 0
 
 
+def _prediction_path(out_dir: Path, tag: str) -> Path:
+    """Return a filesystem-safe, deterministic prediction path for ``tag``."""
+
+    safe_tag = re.sub(r"[^A-Za-z0-9_.-]+", "_", tag).strip("._")
+    if not safe_tag:
+        raise ValueError(f"model tag has no filesystem-safe characters: {tag!r}")
+    return out_dir / "per_query" / f"{safe_tag}.jsonl"
+
+
+def _write_strata_outputs(
+    out_dir: Path,
+    results: dict,
+    identity_table: Path,
+) -> None:
+    """Persist stratified JSON and Markdown with identity-table provenance."""
+
+    payload = {
+        "schema_version": 1,
+        "dataset": {"id": DATASET, "revision": DATASET_REVISION, "split": QUERY_SPLIT},
+        "identity_table": str(identity_table),
+        "identity_table_sha256": file_sha256(identity_table),
+        "interpretation": (
+            "Existing checkpoints are CATH-corpus-contaminated; strata are diagnostic only."
+        ),
+        "models": results,
+    }
+    (out_dir / "cath_strata.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    )
+    (out_dir / "CATH_STRATA.md").write_text(render_strata_markdown(results))
+
+
+def _rescore_predictions(out_dir: Path, identity_table: Path, n_boot: int) -> int:
+    """Rescore persisted predictions without loading a model or embeddings."""
+
+    identities = load_identity_table(identity_table)
+    prediction_paths = sorted((out_dir / "per_query").glob("*.jsonl"))
+    if not prediction_paths:
+        raise SystemExit(f"no prediction JSONL files under {out_dir / 'per_query'}")
+    results = {}
+    for path in prediction_paths:
+        records = read_prediction_jsonl(path)
+        if len(records) != 219:
+            raise SystemExit(
+                f"{path}: expected 219 per-query rows, found {len(records)}"
+            )
+        score = score_identity_strata(records, identities=identities, n_boot=n_boot)
+        tag = score["model_tag"]
+        if tag in results:
+            raise SystemExit(f"duplicate model tag in persisted predictions: {tag}")
+        results[tag] = score
+        logger.info("rescored %s from %s", tag, path)
+    _write_strata_outputs(out_dir, results, identity_table)
+    logger.info(
+        "wrote %s and %s", out_dir / "cath_strata.json", out_dir / "CATH_STRATA.md"
+    )
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -330,6 +409,20 @@ def main() -> int:
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--max_length", type=int, default=1024)
     ap.add_argument("--n_boot", type=int, default=1000)
+    ap.add_argument(
+        "--identity-table",
+        "--identity_table",
+        type=Path,
+        default=Path(os.environ["CATH_IDENTITY_TABLE"])
+        if os.environ.get("CATH_IDENTITY_TABLE")
+        else None,
+        help="Proteva cath_eat_query_identity.tsv. Enables exact/90% stratification.",
+    )
+    ap.add_argument(
+        "--rescore-only",
+        action="store_true",
+        help="Rescore existing OUT/per_query/*.jsonl; never load a model or embeddings.",
+    )
     ap.add_argument("--selfcheck", action="store_true")
     args = ap.parse_args()
 
@@ -337,16 +430,27 @@ def main() -> int:
     if args.selfcheck:
         return selfcheck()
 
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if args.rescore_only:
+        if args.identity_table is None:
+            raise SystemExit("--rescore-only requires --identity-table")
+        return _rescore_predictions(out_dir, args.identity_table, args.n_boot)
+
     arms = DEFAULT_ARMS
     if args.models:
         arms = [tuple(m.split("=", 1)) for m in args.models]
 
-    seqs_lookup, seqs_query, lookup_labels, query_labels = load_splits()
+    lookup_ids, query_ids, seqs_lookup, seqs_query, lookup_labels, query_labels = (
+        load_splits()
+    )
     logger.info("lookup %d, queries %d", len(seqs_lookup), len(seqs_query))
 
-    out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    identities = (
+        load_identity_table(args.identity_table) if args.identity_table else None
+    )
     results = {}
+    strata_results = {}
 
     for tag, model_name in arms:
         logger.info("=== %s (%s)", tag, model_name)
@@ -354,7 +458,7 @@ def main() -> int:
             x_lookup, x_query = embed_arm(
                 model_name, seqs_lookup, seqs_query, args.batch_size, args.max_length
             )
-        except Exception as exc:  # one bad arm must not lose the others
+        except Exception as exc:  # noqa: BLE001  # one bad arm must not lose the others
             logger.error("%s FAILED: %s: %s", tag, type(exc).__name__, exc)
             continue
 
@@ -368,16 +472,57 @@ def main() -> int:
                 "the masking or the dataset changed -- refusing to report."
             )
 
-        results[tag] = {"model": model_name, "dim": int(x_lookup.shape[1]), "levels": levels}
+        records = build_prediction_records(
+            model_tag=tag,
+            model_name=model_name,
+            query_ids=query_ids,
+            query_sequences=seqs_query,
+            query_labels=query_labels,
+            lookup_ids=lookup_ids,
+            lookup_labels=lookup_labels,
+            nearest_indices=nn,
+            identities=identities,
+        )
+        prediction_path = _prediction_path(out_dir, tag)
+        write_prediction_jsonl(prediction_path, records)
+
+        results[tag] = {
+            "model": model_name,
+            "dim": int(x_lookup.shape[1]),
+            "levels": levels,
+            "per_query_predictions": str(prediction_path),
+        }
+        if identities is not None:
+            strata = score_identity_strata(
+                records, identities=identities, n_boot=args.n_boot
+            )
+            for level in LEVELS:
+                full = strata["levels"][level]["full"]
+                if full["n"] != levels[level]["n_answerable"] or not np.isclose(
+                    full["accuracy"], levels[level]["accuracy"]
+                ):
+                    raise RuntimeError(
+                        f"per-query full metric failed to reproduce {tag}/{level}"
+                    )
+            strata_results[tag] = strata
         logger.info(
             "%s  C %.1f  A %.1f  T %.1f  H %.1f",
             tag,
             *[100 * levels[lv]["accuracy"] for lv in LEVELS],
         )
 
-    (out_dir / "cath_levels.json").write_text(json.dumps(results, indent=2))
+    (out_dir / "cath_levels.json").write_text(
+        json.dumps(results, indent=2, sort_keys=True) + "\n"
+    )
     (out_dir / "CATH_LEVELS.md").write_text(render_markdown(results))
-    logger.info("wrote %s and %s", out_dir / "cath_levels.json", out_dir / "CATH_LEVELS.md")
+    logger.info(
+        "wrote %s and %s", out_dir / "cath_levels.json", out_dir / "CATH_LEVELS.md"
+    )
+    if strata_results and args.identity_table is not None:
+        _write_strata_outputs(out_dir, strata_results, args.identity_table)
+        logger.info(
+            "wrote %s and %s", out_dir / "cath_strata.json", out_dir / "CATH_STRATA.md"
+        )
 
     # Cross-check against the suite's own cath_eat run: two independent code
     # paths must agree on H, or one of them is wrong.
@@ -398,7 +543,13 @@ def main() -> int:
         # precision -- a 1e-6 tolerance flags 0.40667 vs 0.4066666... as a
         # mismatch when the two paths in fact agree exactly.
         flag = "OK" if round(suite_h, 5) == round(ours_h, 5) else "MISMATCH"
-        logger.info("%s  H cross-check: suite %.4f vs levels %.4f  %s", tag, suite_h, ours_h, flag)
+        logger.info(
+            "%s  H cross-check: suite %.4f vs levels %.4f  %s",
+            tag,
+            suite_h,
+            ours_h,
+            flag,
+        )
 
     return 0
 
