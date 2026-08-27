@@ -253,6 +253,10 @@ def _base_record(
 
 def _detect_schema(fieldnames: Sequence[str]) -> str | None:
     fields = set(fieldnames)
+    # Never recursively ingest this module's own canonical output when callers
+    # choose an output path below one of the scanned result roots.
+    if {"source_schema", "protocol_key", "metric_key"} <= fields:
+        return None
     if {"Model", "Task"} <= fields:
         return "wide"
     if {"model", "task", "metric_name", "metric_value"} <= fields:

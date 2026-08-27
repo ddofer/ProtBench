@@ -147,7 +147,10 @@ def test_inventory_assigns_nested_file_to_most_specific_source_and_keeps_conflic
     assert summary["metric_rows"] == 2
     assert summary["conflicting_metric_keys"] == 1
 
-    out = tmp_path / "inventory.csv"
+    out = root / "canonical_inventory.csv"
     write_inventory(rows, summary, out)
     assert out.exists()
     assert out.with_suffix(".summary.json").exists()
+    repeated_rows, repeated_summary = build_inventory(sources)
+    assert len(repeated_rows) == 2
+    assert repeated_summary["metric_rows"] == 2
