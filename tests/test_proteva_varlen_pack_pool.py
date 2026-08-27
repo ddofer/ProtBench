@@ -163,8 +163,8 @@ class _ToyDenseProteva(torch.nn.Module):
         )
         self.batch_sizes = []
 
-    def forward(self, input_ids, attention_mask, return_dict=True):
-        del attention_mask, return_dict
+    def forward(self, input_ids, attention_mask, return_dict=True, **kwargs):
+        del attention_mask, kwargs, return_dict
         self.batch_sizes.append(len(input_ids))
         values = input_ids.float()
         hidden = torch.stack([values, values * 2], dim=-1)
@@ -196,3 +196,21 @@ def test_dense_fp32_proteva_batches_and_matches_single_sequence_forwards():
     assert batched_model.batch_sizes == [2, 2, 1]
     assert single_model.batch_sizes == [1] * len(sequences)
     assert np.array_equal(batched, single)
+
+
+def test_legacy_flash_off_mode_reproduces_singleton_packed_execution():
+    """Historical SCOPe rows can explicitly select their original protocol."""
+
+    sequences = ["ACDEFG", "H", "KLM"]
+    model = _ToyDenseProteva()
+    embeddings = embed_sequences(
+        (_ToyTokenizer(), model),
+        False,
+        sequences,
+        device="cpu",
+        batch_size=3,
+        proteva_flash_off_mode="legacy_single_packed",
+    )
+
+    assert embeddings.shape == (3, 2)
+    assert model.batch_sizes == [1, 1, 1]

@@ -2206,6 +2206,7 @@ def embed_sequences(
     embed_save_path: Optional[str] = None,
     l2_normalize_embeddings: bool = False,
     probe_embed_mode: str = "trunk",
+    proteva_flash_off_mode: str = "dense",
 ) -> np.ndarray:
     """Generate embeddings for sequences (single or pairs).
 
@@ -2295,12 +2296,20 @@ def embed_sequences(
                     "batched embedding path"
                 )
 
+        if proteva_flash_off_mode not in {"dense", "legacy_single_packed"}:
+            raise ValueError(
+                "proteva_flash_off_mode must be dense or legacy_single_packed"
+            )
         _enc_cfg = getattr(getattr(model, "encoder", None), "config", None)
         _proteva_flash_off = (
             is_proteva_model
             and getattr(_enc_cfg, "flash_attn_mode", "fa2-varlen") == "off"
         )
-        if is_proteva_model and not _proteva_flash_off:
+        _use_proteva_packed = is_proteva_model and (
+            not _proteva_flash_off
+            or proteva_flash_off_mode == "legacy_single_packed"
+        )
+        if _use_proteva_packed:
             # Proteva fa2-varlen path: tokenize each sequence, pack a chunk of
             # rows into a single UNPADDED (1, total_tokens) sequence with
             # cu_seqlens + per-segment position_ids, forward through the model's
@@ -2314,7 +2323,11 @@ def embed_sequences(
             # call (single segment) makes the dense full-attention exact. Detect
             # via the encoder's resolved flash_attn_mode (set to "off" on CPU in
             # load_model). GPU fa2-varlen is unchanged (packs `batch_size` rows).
-            _pack_bs = 1 if model_device.type == "cpu" else batch_size
+            _pack_bs = (
+                1
+                if (_proteva_flash_off or model_device.type == "cpu")
+                else batch_size
+            )
             embs_list = []
             for i in range(0, len(flat_seqs), _pack_bs):
                 batch = flat_seqs[i : i + _pack_bs]
