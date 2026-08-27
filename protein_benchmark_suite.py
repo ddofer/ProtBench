@@ -3895,6 +3895,13 @@ class ResultTracker:
             # task, probe and split and still be different measurements if the
             # code moved between them; Date cannot say that.
             "CodeVersion": code_version(),
+            # Pooling changes the stored VECTORS, so it changes the number -- but it
+            # lived only in PLM_BENCH_POOL and in the embed-cache namespace, never in
+            # the row. Measured 2026-08-27 on vanilla ESM-C: Solubility AUC reads
+            # 0.75334 under mean pooling and 0.80690 under cls, and nothing in the
+            # emitted CSV distinguished them, so a cross-run comparison silently mixed
+            # two protocols. A reader cannot interpret a metric without it.
+            "Pooling": _pool_mode(),
         }
         if benchmark_seed is not None:
             row["BenchmarkSeed"] = benchmark_seed
@@ -3916,6 +3923,7 @@ class ResultTracker:
             "EvalSplit",
             "EvalStrategy",
             "EmbeddingNorm",
+            "Pooling",
         ]
         present_priority_cols = [col for col in priority_cols if col in df.columns]
         other_cols = [
@@ -3942,6 +3950,10 @@ class ResultTracker:
             "EmbeddingNorm": "none",
             "BenchmarkSeed": "",
             "Samples": "Full",
+            # Rows written before Pooling existed were all produced under the default,
+            # so backfilling "mean" is a statement of fact, not a guess. It also keeps
+            # them from colliding with a future cls-pooled row in the dedup key.
+            "Pooling": "mean",
         }
         for col, val in defaults.items():
             if col not in new_df.columns:
@@ -3980,6 +3992,12 @@ class ResultTracker:
                     # A re-run under different code is a different measurement,
                     # so it appends rather than overwriting the older row.
                     "CodeVersion",
+                    # Same reasoning: a different pooling mode is a different
+                    # measurement. Without this, a cls-pooled run on the same day
+                    # silently OVERWRITES the mean-pooled row for that task -- the
+                    # column alone would record the protocol while destroying the
+                    # value it was added to distinguish.
+                    "Pooling",
                 ]
                 dedup_cols = [c for c in dedup_cols if c in merged.columns]
                 merged = merged.drop_duplicates(subset=dedup_cols, keep="last")
