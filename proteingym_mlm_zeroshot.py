@@ -943,10 +943,24 @@ def main(argv=None):
     model_obj, is_sbert, device = load_model(args.model_name, device=args.device,
                                              torch_dtype=_dt)
     if is_sbert:
-        raise SystemExit(
-            f"Model {args.model_name!r} loaded as SentenceTransformer — "
-            "no MLM head available. Load a *ForMaskedLM checkpoint."
-        )
+        # load_model returns a SentenceTransformer for any repo that carries ST config, which
+        # includes the stock facebook/esm2_* checkpoints. Those DO ship an MLM head; it is the ST
+        # wrapper that drops it. Re-load the same weights through AutoModelForMaskedLM rather than
+        # refusing a checkpoint that has exactly the head this script needs. A repo with no MLM head
+        # still fails, now at the load with the underlying error.
+        from transformers import AutoModelForMaskedLM, AutoTokenizer
+
+        print(f"{args.model_name} loaded as SentenceTransformer; re-loading via AutoModelForMaskedLM to reach its MLM head", flush=True)
+        try:
+            tok = AutoTokenizer.from_pretrained(args.model_name)
+            mdl = AutoModelForMaskedLM.from_pretrained(
+                args.model_name, **({"torch_dtype": _dt} if _dt is not None else {}))
+        except Exception as exc:
+            raise SystemExit(
+                f"Model {args.model_name!r} loaded as SentenceTransformer and has no reachable "
+                f"MLM head ({type(exc).__name__}: {exc}). Load a *ForMaskedLM checkpoint."
+            ) from exc
+        model_obj = (tok, mdl.to(device))
     tokenizer, model = model_obj
     model.eval()
     if args.bf16:
