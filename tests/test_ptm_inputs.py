@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from ptm_inputs import audit_ptm_labels, canonical_ptm_family, iter_ptm_sites
+from ptm_inputs import (
+    audit_ptm_labels,
+    canonical_ptm_family,
+    iter_ptm_sites,
+    write_audit,
+)
 
 
 def _write_fixture(path: Path) -> None:
@@ -54,18 +59,36 @@ def test_single_gzip_layer_with_double_suffix_and_zero_based_positions(
     assert [row.residue for row in rows] == ["S", "K", "Y"]
 
 
-def test_ptm_mapping_audit_separates_native_broad_and_unsupported(tmp_path: Path) -> None:
+def test_ptm_mapping_audit_separates_native_broad_and_unsupported(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "ptm_labels.csv.gz.gz"
     _write_fixture(path)
     fine_vocab = {"Phosphoserine": ("[PTM_PHOSPHO_S]", "S")}
     report = audit_ptm_labels(path, fine_vocab=fine_vocab)
     assert report["rows"] == 3
     assert report["unique_accessions"] == 3
+    assert report["unique_sequences"] == 3
+    assert report["unique_sequence_residues"] == 9
+    assert report["mean_unique_sequence_length"] == 3.0
+    assert report["records_per_unique_sequence"] == 1.0
+    assert report["label_diversity"]["shannon_effective_types"] == pytest.approx(3.0)
+    assert report["label_diversity"]["top_2_row_fraction"] == pytest.approx(2 / 3)
     assert report["native_supported_rows"] == 1
     assert report["broad_supported_rows"] == 2
     assert report["any_supported_rows"] == 2
     assert report["source_token_mismatches"] == 0
     assert "not a held-out benchmark" in str(report["source"])
+
+    out = tmp_path / "audit"
+    write_audit(report, out)
+    assert (out / "ptm_label_audit.json").is_file()
+    assert (
+        (out / "ptm_label_mapping.csv")
+        .read_text()
+        .splitlines()[0]
+        .startswith("source_label,rows,unique_sequences")
+    )
 
 
 @pytest.mark.parametrize(

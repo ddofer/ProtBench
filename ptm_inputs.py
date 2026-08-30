@@ -12,6 +12,7 @@ import csv
 import gzip
 import hashlib
 import json
+import math
 import re
 import runpy
 from collections import Counter
@@ -141,7 +142,11 @@ def load_fine_vocab(path: Path) -> dict[str, tuple[str, str]]:
         raise TypeError(f"{path} does not define FINE_PTM")
     out = {}
     for label, mapping in raw.items():
-        if not isinstance(label, str) or not isinstance(mapping, tuple) or len(mapping) != 2:
+        if (
+            not isinstance(label, str)
+            or not isinstance(mapping, tuple)
+            or len(mapping) != 2
+        ):
             raise ValueError(f"{path}: malformed FINE_PTM entry {label!r}: {mapping!r}")
         token, residue = mapping
         out[label] = (str(token), str(residue))
@@ -158,8 +163,10 @@ def audit_ptm_labels(
     fine_vocab = fine_vocab or {}
     labels: Counter[str] = Counter()
     label_residues: dict[str, Counter[str]] = {}
+    label_sequences: dict[str, set[str]] = {}
     accessions: set[str] = set()
     sequence_hashes: set[str] = set()
+    sequence_lengths: dict[str, int] = {}
     accession_sequences: dict[str, str] = {}
     duplicate_sites = 0
     seen_sites: set[tuple[str, int, str]] = set()
@@ -176,6 +183,8 @@ def audit_ptm_labels(
         accessions.add(site.accession)
         seq_hash = hashlib.sha256(site.sequence.encode()).hexdigest()
         sequence_hashes.add(seq_hash)
+        sequence_lengths.setdefault(seq_hash, len(site.sequence))
+        label_sequences.setdefault(site.label, set()).add(seq_hash)
         prior_hash = accession_sequences.setdefault(site.accession, seq_hash)
         accession_sequence_conflicts += int(prior_hash != seq_hash)
         key = (site.accession, site.position, site.label)
@@ -210,6 +219,7 @@ def audit_ptm_labels(
             {
                 "source_label": label,
                 "rows": count,
+                "unique_sequences": len(label_sequences[label]),
                 "residues": dict(sorted(residues.items())),
                 "dominant_residue": dominant_residue,
                 "dominant_residue_fraction": dominant_count / count,
@@ -223,8 +233,16 @@ def audit_ptm_labels(
         )
 
     rows = sum(labels.values())
+    unique_sequences = len(sequence_hashes)
+    label_probabilities = [count / rows for count in labels.values()] if rows else []
+    shannon = -sum(p * math.log(p) for p in label_probabilities)
+    sorted_counts = sorted(labels.values(), reverse=True)
+
+    def top_fraction(k: int) -> float:
+        return sum(sorted_counts[:k]) / rows if rows else 0.0
+
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "source": {
             "path": str(path),
             "sha256": file_sha256(path),
@@ -233,8 +251,29 @@ def audit_ptm_labels(
         },
         "rows": rows,
         "unique_accessions": len(accessions),
-        "unique_sequences": len(sequence_hashes),
+        "unique_sequences": unique_sequences,
+        "unique_sequence_residues": sum(sequence_lengths.values()),
+        "mean_unique_sequence_length": (
+            sum(sequence_lengths.values()) / unique_sequences
+            if unique_sequences
+            else 0.0
+        ),
+        "records_per_unique_sequence": rows / unique_sequences
+        if unique_sequences
+        else 0.0,
         "source_label_types": len(labels),
+        "label_diversity": {
+            "shannon_nats": shannon,
+            "shannon_effective_types": math.exp(shannon),
+            "simpson_effective_types": (
+                1.0 / sum(p * p for p in label_probabilities)
+                if label_probabilities
+                else 0.0
+            ),
+            "top_2_row_fraction": top_fraction(2),
+            "top_3_row_fraction": top_fraction(3),
+            "top_5_row_fraction": top_fraction(5),
+        },
         "native_supported_rows": native_rows,
         "native_supported_row_fraction": native_rows / rows if rows else 0.0,
         "native_supported_types": sum(
@@ -247,9 +286,7 @@ def audit_ptm_labels(
         ),
         "any_supported_rows": any_supported_rows,
         "any_supported_row_fraction": any_supported_rows / rows if rows else 0.0,
-        "any_supported_types": sum(
-            bool(item["any_supported"]) for item in label_table
-        ),
+        "any_supported_types": sum(bool(item["any_supported"]) for item in label_table),
         "duplicate_site_rows": duplicate_sites,
         "source_token_mismatches": token_mismatches,
         "accession_sequence_conflicts": accession_sequence_conflicts,
@@ -273,6 +310,7 @@ def write_audit(report: dict[str, object], out_dir: Path) -> None:
         fieldnames = (
             "source_label",
             "rows",
+            "unique_sequences",
             "residues",
             "dominant_residue",
             "dominant_residue_fraction",
