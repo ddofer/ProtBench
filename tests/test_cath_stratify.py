@@ -20,6 +20,7 @@ from cath_stratify import (
     load_identity_table,
     read_prediction_jsonl,
     score_identity_strata,
+    score_paired_identity_strata,
     sequence_sha256,
     write_prediction_jsonl,
 )
@@ -106,6 +107,42 @@ def test_prediction_jsonl_is_deterministic_and_self_contained(tmp_path: Path) ->
     embedded = score_identity_strata(loaded, n_boot=100)
     external = score_identity_strata(loaded, identities=identities, n_boot=100)
     assert embedded == external
+
+
+def test_paired_comparison_uses_query_level_differences() -> None:
+    """The comparison reports discordant queries and a paired interval."""
+
+    baseline, identities, _, _, _ = _prediction_fixture()
+    candidate = copy.deepcopy(baseline)
+    for record in candidate:
+        record["model_tag"] = "candidate"
+    candidate[1]["correct"]["cath_h"] = True
+    candidate[2]["correct"]["cath_h"] = False
+
+    result = score_paired_identity_strata(
+        baseline, candidate, identities=identities, n_boot=200
+    )
+    full = result["levels"]["cath_h"]["full"]
+    assert full["accuracy_delta"] == 0.0
+    assert full["candidate_only_correct"] == 1
+    assert full["baseline_only_correct"] == 1
+    assert full["ci95_low"] < 0 < full["ci95_high"]
+    assert result == score_paired_identity_strata(
+        baseline, candidate, identities=identities, n_boot=200
+    )
+
+
+def test_paired_comparison_rejects_mismatched_queries_and_truth() -> None:
+    baseline, identities, _, _, _ = _prediction_fixture()
+    candidate = copy.deepcopy(baseline)
+    candidate.pop()
+    with pytest.raises(ValueError, match="same query hashes"):
+        score_paired_identity_strata(baseline, candidate, identities=identities)
+
+    candidate = copy.deepcopy(baseline)
+    candidate[0]["truth"]["cath_h"] = "different"
+    with pytest.raises(ValueError, match="metadata mismatch"):
+        score_paired_identity_strata(baseline, candidate, identities=identities)
 
 
 def test_h_membership_must_match_answerable_mask() -> None:

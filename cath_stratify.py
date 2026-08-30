@@ -205,6 +205,24 @@ def bootstrap_ci(correct: np.ndarray, n_boot: int = 1000, seed: int = 42) -> flo
     return float(1.96 * values[indices].mean(axis=1).std(ddof=1))
 
 
+def paired_bootstrap_interval(
+    differences: np.ndarray,
+    *,
+    n_boot: int = 1000,
+    seed: int = 42,
+) -> tuple[float, float]:
+    """Return a percentile interval for a paired mean difference."""
+
+    values = np.asarray(differences, dtype=np.float64)
+    if len(values) == 0:
+        return float("nan"), float("nan")
+    rng = np.random.default_rng(seed)
+    indices = rng.integers(0, len(values), size=(n_boot, len(values)))
+    samples = values[indices].mean(axis=1)
+    low, high = np.quantile(samples, (0.025, 0.975))
+    return float(low), float(high)
+
+
 def build_prediction_records(
     *,
     model_tag: str,
@@ -409,6 +427,102 @@ def score_identity_strata(
         "model_tag": str(records[0]["model_tag"]),
         "model": str(records[0]["model"]),
         "n_predictions": len(records),
+        "levels": levels,
+    }
+
+
+def score_paired_identity_strata(
+    baseline_records: Sequence[Mapping[str, Any]],
+    candidate_records: Sequence[Mapping[str, Any]],
+    *,
+    identities: Mapping[str, CathIdentity] | None = None,
+    n_boot: int = 1000,
+) -> dict[str, Any]:
+    """Compare two models on the same queries with a paired bootstrap.
+
+    Pairing matters because both models answer the same CATH queries. Treating
+    their accuracies as independent throws away that information and produces
+    the wrong uncertainty estimate for the model-to-model difference.
+    """
+
+    if not baseline_records or not candidate_records:
+        raise ValueError("cannot compare an empty prediction set")
+    baseline_by_hash = {
+        str(record["query_hash"]): record for record in baseline_records
+    }
+    candidate_by_hash = {
+        str(record["query_hash"]): record for record in candidate_records
+    }
+    if len(baseline_by_hash) != len(baseline_records):
+        raise ValueError("baseline predictions contain duplicate query hashes")
+    if len(candidate_by_hash) != len(candidate_records):
+        raise ValueError("candidate predictions contain duplicate query hashes")
+    if baseline_by_hash.keys() != candidate_by_hash.keys():
+        raise ValueError("paired predictions do not contain the same query hashes")
+
+    ordered_hashes = sorted(baseline_by_hash)
+    baseline = [baseline_by_hash[query_hash] for query_hash in ordered_hashes]
+    candidate = [candidate_by_hash[query_hash] for query_hash in ordered_hashes]
+    for left, right in zip(baseline, candidate):
+        query_hash = str(left["query_hash"])
+        for field in ("domain_id", "sequence_sha256", "truth", "answerable"):
+            if left[field] != right[field]:
+                raise ValueError(
+                    f"paired prediction metadata mismatch for {query_hash}/{field}"
+                )
+
+    resolved = [_identity_for_record(record, identities) for record in baseline]
+    candidate_resolved = [
+        _identity_for_record(record, identities) for record in candidate
+    ]
+    if resolved != candidate_resolved:
+        raise ValueError("paired predictions contain different identity metadata")
+    selectors = {
+        "full": np.ones(len(baseline), dtype=bool),
+        "exact": np.asarray([exact for _, exact, _ in resolved]),
+        "non_exact": np.asarray([not exact for _, exact, _ in resolved]),
+        "ge_90": np.asarray([ge_90 for _, _, ge_90 in resolved]),
+        "lt_90": np.asarray([not ge_90 for _, _, ge_90 in resolved]),
+    }
+
+    levels: dict[str, Any] = {}
+    for level in CATH_LEVELS:
+        answerable = np.asarray(
+            [bool(record["answerable"][level]) for record in baseline]
+        )
+        baseline_correct = np.asarray(
+            [bool(record["correct"][level]) for record in baseline]
+        )
+        candidate_correct = np.asarray(
+            [bool(record["correct"][level]) for record in candidate]
+        )
+        level_scores: dict[str, Any] = {}
+        for stratum, selector in selectors.items():
+            selected = answerable & selector
+            left = baseline_correct[selected]
+            right = candidate_correct[selected]
+            differences = right.astype(np.float64) - left.astype(np.float64)
+            n = int(selected.sum())
+            if n:
+                low, high = paired_bootstrap_interval(differences, n_boot=n_boot)
+            else:
+                low, high = None, None
+            level_scores[stratum] = {
+                "accuracy_delta": float(differences.mean()) if n else None,
+                "ci95_low": low,
+                "ci95_high": high,
+                "n": n,
+                "candidate_only_correct": int((right & ~left).sum()),
+                "baseline_only_correct": int((left & ~right).sum()),
+                "diagnostic": n < 20,
+            }
+        levels[level] = level_scores
+
+    return {
+        "schema_version": 1,
+        "baseline_tag": str(baseline[0]["model_tag"]),
+        "candidate_tag": str(candidate[0]["model_tag"]),
+        "n_predictions": len(baseline),
         "levels": levels,
     }
 
