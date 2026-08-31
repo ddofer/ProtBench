@@ -34,10 +34,10 @@ def paired_site_auprc_bootstrap(
 ) -> dict[str, object]:
     """Paired protein-cluster bootstrap CI for a residue-level AUPRC delta.
 
-    Predictions are aligned by ``(row_id, position)`` and whole proteins are
+    Predictions are aligned by ``(row_id, position)`` and whole groups are
     resampled, so residues from one protein never masquerade as independent
-    observations. The score ordering is cached once per model; each replicate
-    only changes protein multiplicities.
+    observations. ``group_key`` maps a row_id to its resampling group; pass a
+    matching ``resampling_unit`` so the report says what was resampled.
     """
     if n_boot <= 0:
         raise ValueError("n_boot must be positive")
