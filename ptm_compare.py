@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +29,8 @@ def paired_site_auprc_bootstrap(
     *,
     n_boot: int = 1000,
     seed: int = 1337,
+    group_key: Callable[[str], str] | None = None,
+    resampling_unit: str = "row_id",
 ) -> dict[str, object]:
     """Paired protein-cluster bootstrap CI for a residue-level AUPRC delta.
 
@@ -68,10 +70,16 @@ def paired_site_auprc_bootstrap(
     if not np.isin(labels, [0, 1]).all():
         raise ValueError("PTM site labels must be binary")
 
+    resolved_group_key = group_key or (lambda row_id: row_id)
+    grouped_row_ids = [resolved_group_key(key[0]) for key in keys]
+    if any(not group_id for group_id in grouped_row_ids):
+        raise ValueError("bootstrap group keys must be non-empty")
     group_ids = {
-        row_id: index for index, row_id in enumerate(sorted({key[0] for key in keys}))
+        group_id: index for index, group_id in enumerate(sorted(set(grouped_row_ids)))
     }
-    group_codes = np.asarray([group_ids[key[0]] for key in keys], dtype=np.int32)
+    group_codes = np.asarray(
+        [group_ids[group_id] for group_id in grouped_row_ids], dtype=np.int32
+    )
     candidate_scores = np.asarray(
         [candidate_index[key].score for key in keys], dtype=np.float64
     )
@@ -106,7 +114,7 @@ def paired_site_auprc_bootstrap(
     low, high = np.percentile(deltas, [2.5, 97.5])
     return {
         "metric": "auprc",
-        "resampling_unit": "row_id",
+        "resampling_unit": resampling_unit,
         "n_sites": len(keys),
         "n_positive": int(labels.sum()),
         "n_groups": n_groups,

@@ -140,6 +140,25 @@ def test_paired_site_bootstrap_ranks_a_better_candidate_above_zero() -> None:
     assert report["bootstrap_fraction_delta_gt_zero"] == pytest.approx(1.0)
 
 
+def test_paired_site_bootstrap_can_resample_dbptm_record_groups() -> None:
+    baseline = [
+        _site("dbptm:demo:1:P1_HUMAN:0", 10, 1, 0.7),
+        _site("dbptm:demo:0:P1_HUMAN:1", 10, 0, 0.4),
+        _site("dbptm:demo:1:P2_HUMAN:2", 10, 1, 0.6),
+        _site("dbptm:demo:0:P3_HUMAN:3", 10, 0, 0.3),
+    ]
+    report = paired_site_auprc_bootstrap(
+        baseline,
+        baseline,
+        n_boot=20,
+        group_key=lambda row_id: row_id.split(":")[3],
+        resampling_unit="dbptm_record_id",
+    )
+
+    assert report["n_groups"] == 3
+    assert report["resampling_unit"] == "dbptm_record_id"
+
+
 def test_paired_site_bootstrap_rejects_a_panel_with_no_positive_labels() -> None:
     records = [
         _site("protein-a", 0, 0, 0.9),
