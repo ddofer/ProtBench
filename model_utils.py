@@ -65,8 +65,44 @@ except Exception:
 
 
 def detect_model_type(model_name: str) -> ModelType:
-    """Detect model family from name/path. Checks HF name and local config.json."""
+    """Detect model family, treating a local ``config.json`` as authoritative."""
     name_lower = model_name.lower()
+
+    # A local checkpoint's config describes what its files ARE; its directory
+    # name describes only where somebody put them. Check config first so names
+    # such as ``amplifyc_PTM_*`` (a Proteva wrapper warm-started from AMPLIFY-C)
+    # do not get routed through the incompatible stock-AMPLIFY loader.
+    config_path = Path(model_name) / "config.json"
+    if config_path.exists():
+        try:
+            with config_path.open() as handle:
+                cfg = json.load(handle)
+            model_type = str(cfg.get("model_type", "")).lower()
+            if model_type == "amplify":
+                return "amplify"
+            if model_type == "proteva":
+                return "proteva"
+            archs = cfg.get("architectures", [])
+            auto_map = cfg.get("auto_map", {})
+            all_vals = [*archs, *auto_map.values()]
+            if any("ESMplusplus" in str(value) for value in all_vals):
+                return "esmplusplus"
+            if any(
+                "FastESM" in str(value) or "FastEsmModel" in str(value)
+                for value in all_vals
+            ):
+                return "fastplm_esm2"
+            if any("DPLM2" in str(value) or "Dplm2" in str(value) for value in all_vals):
+                return "dplm2"
+            if any("E1" in str(value) or "ProfluentE1" in str(value) for value in all_vals):
+                return "profluent_e1"
+            if any("Proteva" in str(value) for value in all_vals):
+                return "proteva"
+            return "standard"
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            # A malformed/unreadable config cannot be authoritative; retain the
+            # historical name-based fallback so remote/cache-adjacent paths work.
+            pass
 
     if "amplify" in name_lower:
         return "amplify"
@@ -90,36 +126,6 @@ def detect_model_type(model_name: str) -> ModelType:
     # Proteva (this project's HF-native encoder; loaded fa2-varlen + BF16)
     if "proteva" in name_lower:
         return "proteva"
-
-    # Check local config.json for non-obvious model paths
-    config_path = Path(model_name) / "config.json"
-    if config_path.exists():
-        try:
-            with open(config_path) as f:
-                cfg = json.load(f)
-            if cfg.get("model_type") == "AMPLIFY":
-                return "amplify"
-            if cfg.get("model_type") == "proteva":
-                return "proteva"
-            archs = cfg.get("architectures", [])
-            auto_map = cfg.get("auto_map", {})
-            all_vals = [*archs, *auto_map.values()]
-            if any("ESMplusplus" in str(v) for v in all_vals):
-                return "esmplusplus"
-            # FastPLM ESM2: custom architectures from Synthyra ESM2 repos
-            if any("FastESM" in str(v) or "FastEsmModel" in str(v) for v in all_vals):
-                return "fastplm_esm2"
-            # DPLM2: check for DPLM2 architectures
-            if any("DPLM2" in str(v) or "Dplm2" in str(v) for v in all_vals):
-                return "dplm2"
-            # Profluent-E1: check for E1 architectures
-            if any("E1" in str(v) or "ProfluentE1" in str(v) for v in all_vals):
-                return "profluent_e1"
-            # Proteva: ProtevaForPretraining architecture
-            if any("Proteva" in str(v) for v in all_vals):
-                return "proteva"
-        except Exception:
-            pass
 
     return "standard"
 

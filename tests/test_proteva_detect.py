@@ -43,6 +43,17 @@ def test_detect_proteva_by_local_config_model_type(neutral_ckpt_dir):
     assert detect_model_type(str(neutral_ckpt_dir)) == "proteva"
 
 
+def test_local_config_wins_over_amplify_substring_in_checkpoint_name(neutral_ckpt_dir):
+    checkpoint = neutral_ckpt_dir / "amplifyc_PTM_any_2ep"
+    checkpoint.mkdir()
+    cfg = {
+        "architectures": ["ProtevaForPretraining"],
+        "model_type": "proteva",
+    }
+    (checkpoint / "config.json").write_text(json.dumps(cfg))
+    assert detect_model_type(str(checkpoint)) == "proteva"
+
+
 def test_detect_proteva_by_local_config_architecture_only(neutral_ckpt_dir):
     # Even without model_type, the ProtevaForPretraining architecture marks it.
     cfg = {"architectures": ["ProtevaForPretraining"], "hidden_size": 640}
