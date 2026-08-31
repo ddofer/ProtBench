@@ -66,3 +66,10 @@ def test_non_proteva_config_still_standard(neutral_ckpt_dir):
     cfg = {"architectures": ["BertModel"], "model_type": "bert"}
     (neutral_ckpt_dir / "config.json").write_text(json.dumps(cfg))
     assert detect_model_type(str(neutral_ckpt_dir)) == "standard"
+
+
+def test_malformed_local_config_falls_back_to_checkpoint_name(neutral_ckpt_dir):
+    checkpoint = neutral_ckpt_dir / "amplify-control"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text("[]")
+    assert detect_model_type(str(checkpoint)) == "amplify"

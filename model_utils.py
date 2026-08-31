@@ -99,7 +99,7 @@ def detect_model_type(model_name: str) -> ModelType:
             if any("Proteva" in str(value) for value in all_vals):
                 return "proteva"
             return "standard"
-        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        except (AttributeError, OSError, TypeError, ValueError):
             # A malformed/unreadable config cannot be authoritative; retain the
             # historical name-based fallback so remote/cache-adjacent paths work.
             pass
