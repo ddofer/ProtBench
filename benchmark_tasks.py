@@ -6,8 +6,6 @@ multilabel, regression, retrieval, residue-level (token classification) and
 ProteinGym evaluations.
 
 Run `python protein_benchmark_suite.py --list_tasks` for the current inventory.
-Task counts are deliberately not written here -- the last one sat at "35" while
-the registry held 43.
 
 Usage:
     from benchmark_tasks import TASKS, TaskConfig
@@ -19,11 +17,8 @@ Usage:
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
-# Metric direction. THE canonical definition -- `_hf_finetune_common` (early stopping),
-# `contrib/proteva/report.py` and `contrib/proteva/compare_to_vanilla.py` all import this
-# rather than keeping their own copy. They previously carried three divergent sets
-# ({mse,mae,rmse,loss,perplexity} / {MSE} / nothing at all), so the same MSE row was
-# "better" in one report, "worse" in another, and unsigned in the third.
+# Metric direction, canonical definition: `_hf_finetune_common` and the
+# contrib/proteva reporters import this rather than keeping their own copy.
 LOWER_IS_BETTER_METRICS = frozenset({"mse", "mae", "rmse", "loss", "perplexity"})
 
 
@@ -100,14 +95,8 @@ class TaskConfig:
 # Many (not all) of the available benchmark tasks;
 FAST_TASKS = [
     "remote_homology",
-    # cath_eat added 2026-08-27. It was in DEFAULT_TASKS only, and every campaign run
-    # built its --tasks list from FAST u RETRIEVAL u SCREEN -- so the one fold benchmark
-    # whose train/test contamination is fully controlled never ran, while the two that
-    # are contaminated (remote_homology 90% of queries, scope40_retrieval 92% with 73%
-    # of the near-duplicate corpus rows unsuppressed) both did.
-    # It is also the strongest fold test on its own merits: ProtTucker's midnight-zone
-    # transfer (Heinzinger 2022, NARGAB lqac043), 219 queries non-redundant to the 69k
-    # lookup set at HVAL <= 0, so no query has a lookup relative findable by alignment.
+    # cath_eat: the one fold benchmark whose train/test contamination is controlled
+    # (remote_homology and scope40_retrieval are both contaminated).
     "cath_eat",
     "solubility",
     "signalp_binary",
@@ -116,29 +105,20 @@ FAST_TASKS = [
     "peptide_hla",
     "metal_ion_binding",
     "subcellular_loc",
-    # "binary_subcellular_localization",
     "ec_classification",
     "variant_effect",
     "fluorescence",
     "stability",
-    # "thermostability",
     "enzyme_catalytic_efficiency",
-    # "antibiotic_resistance",
     "ppi_bernett",
     # go_mf excluded: large multilabel task, too slow for the default sweep
-    # chezod_disorder DISABLED 2026-06-19 -> replaced by disprot (residue-level)
     "ss3",
     "conservation_flip",
     "disprot",
 ]
 
-# Curated very-fast / low-variance subset (2026-06-03) for high-ROI scout
-# comparisons: a fold-recognition task (representation quality) + two fast
-# stable binary tasks + three stable regression/fitness tasks + two residue-
-# level structural/evolutionary tasks. Deliberately omits the slower or
-# higher-variance FAST_TASKS (ec_classification, ppi_bernett, chezod_disorder,
-# enzyme_catalytic_efficiency, variant_effect, peptide_hla, profet) and the
-# retrieval task. Selected via --very-fast. Every entry MUST be a key in TASKS.
+# Curated low-variance subset for scout comparisons (--very-fast); omits the
+# slower/higher-variance FAST_TASKS. Every entry MUST be a key in TASKS.
 VERY_FAST_TASKS = [
     "remote_homology",
     "solubility",
@@ -150,15 +130,9 @@ VERY_FAST_TASKS = [
     "conservation_flip",
 ]
 
-# Triage set: "better or worse, and in which domain?" Ranked by measured spread across
-# five same-family checkpoints per sequence embedded, then one or two per domain.
-# ~130k sequences vs ~1M for the full suite.
-#
-# flip2_rhomax / contact_probe / ppi_affinity top the raw spread ranking and are OUT:
-# n=184/40/200, so their spread is noise and a screen on them cries wolf. signalp_binary
-# is out for the opposite reason -- it moves 0.0018 where ec_classification moves 0.1363.
-#
-# ProteinGym zero-shot (proteingym_mlm_zeroshot.py, ~11 min) covers the no-probe axis.
+# Triage set: "better or worse, and in which domain?" One or two tasks per domain,
+# ranked by measured spread. flip2_rhomax / contact_probe / ppi_affinity are OUT --
+# n=184/40/200, so their spread is noise and a screen on them cries wolf.
 SCREEN_TASKS = [
     "scope40_retrieval",       # structure   n=2,207   no probe fit
     "cath_eat",                # fold        n=219 vs 69k lookup   decontaminated
@@ -172,8 +146,7 @@ SCREEN_TASKS = [
 ]
 
 FAST_MAX_SAMPLES = 100_000
-# For token_classification tasks in fast mode, cap at sequence count to keep
-# residue-level logistic regression tractable on CPU (~400k residues at 2000 seqs).
+# Cap is a sequence count, to keep residue-level probes tractable on CPU.
 FAST_TOKEN_CLASS_MAX_SAMPLES = 2_000
 
 _CLINICAL_LABEL_MAP = {"Pathogenic": 1, "Benign": 0, "0": 0, "1": 1}
@@ -221,7 +194,6 @@ def _proteingym_tasks(eval_mode: str) -> Dict[str, TaskConfig]:
         label_map,
     ) in _PROTEINGYM_VARIANTS.items():
         key = f"proteingym_{variant}_{eval_mode}"
-        # Preserve original display names: "DMS Substitutions", "Zero-Shot", etc.
         name_parts = " ".join(
             w.upper() if w == "dms" else w.capitalize() for w in variant.split("_")
         )
@@ -231,9 +203,8 @@ def _proteingym_tasks(eval_mode: str) -> Dict[str, TaskConfig]:
             if is_zeroshot
             else {"seq": "mutated_sequence"}
         )
-        # DMS assays ship an official per-assay binary label (DMS_score_bin) — the
-        # ground truth the ProteinGym leaderboard AUC/MCC are computed against.
-        # Clinical sets use their annotation label directly (no bin col).
+        # DMS_score_bin is the official per-assay binary label the leaderboard
+        # AUC/MCC use; clinical sets score their annotation label directly.
         bin_col = "DMS_score_bin" if variant.startswith("dms_") else None
         tasks[key] = TaskConfig(
             name=f"ProteinGym {name_parts} ({mode_label})",
@@ -251,9 +222,8 @@ def _proteingym_tasks(eval_mode: str) -> Dict[str, TaskConfig]:
     return tasks
 
 
-# Standard held-out secondary-structure evaluation sets (ProtTrans / NetSurfP-2.0
-# distribution). Every one trains on the same `training_hhblits.csv` and differs
-# only in the test CSV, so they are generated rather than written out ten times.
+# Standard held-out SS evaluation sets (ProtTrans / NetSurfP-2.0 distribution);
+# all share `training_hhblits.csv` and differ only in the test CSV.
 _SS_HELDOUT_SETS = {
     "casp12": "CASP12.csv",
     "casp13": "CASP13.csv",
@@ -285,9 +255,7 @@ def _ss_heldout_tasks() -> Dict[str, TaskConfig]:
 
 
 TASKS: Dict[str, TaskConfig] = {
-    # =========================================================================
     # Binary Classification
-    # =========================================================================
     "ppi_bernett": TaskConfig(
         name="PPI (Bernett Gold Standard)",
         dataset="Synthyra/bernett_gold_ppi",
@@ -363,19 +331,15 @@ TASKS: Dict[str, TaskConfig] = {
         validation_split="validation",
         test_split="test",
     ),
-    # =========================================================================
     # Multi-class Classification
-    # =========================================================================
     "remote_homology": TaskConfig(
         name="Remote Homology (Fold)",
         dataset="biomap-research/fold_prediction",
         input_map={"seq": "seq"},
         label_col="label",
         problem_type="multiclass",
-        # 1195 imbalanced fold classes: macro-F1 is dominated by 0-F1 singleton
-        # folds -> high variance (a driver of "unstable" runs). Top-1 Accuracy is
-        # the stable, literature-standard headline; F1_Macro/F1_Weighted are
-        # still computed as secondary metrics in the probe output.
+        # 1195 imbalanced fold classes: macro-F1 is dominated by singleton folds,
+        # so Top-1 Accuracy is the stable, literature-standard headline.
         main_metric="Accuracy",
     ),
     "subcellular_loc": TaskConfig(
@@ -391,12 +355,8 @@ TASKS: Dict[str, TaskConfig] = {
         dataset="AI4Protein/EC",
         input_map={"seq": "aa_seq"},
         label_col="label",
-        # EC is MULTILABEL: a protein carries several comma-separated EC numbers
-        # (up to ~9). Declaring it multiclass made the parser keep each comma
-        # string ('130,270') as its OWN class -> hundreds of singleton powerset
-        # classes -> structurally deflated, jittery macro-F1. Multilabel routes
-        # through MultiLabelBinarizer; F1_Micro is the honest headline (macro
-        # over singleton EC combos is meaningless).
+        # EC is MULTILABEL: comma-separated EC numbers per protein. Never declare it
+        # multiclass -- each comma string ('130,270') becomes its own class.
         problem_type="multilabel",
         main_metric="F1_Micro",
         validation_split="validation",
@@ -409,11 +369,8 @@ TASKS: Dict[str, TaskConfig] = {
         problem_type="multiclass",
         main_metric="AUC",
     ),
-    # TCR / peptide-MHC binding. `seqs` packs three chains into one string as
-    # "CDR3a|CDR3b|peptide". The `|` is out of vocabulary for every protein
-    # tokenizer here, so `patch_unknown_residue_tokens` maps it to X -- the
-    # separator survives as a single unknown residue between the segments, which
-    # is the intended encoding. Imbalanced (~17% binders), so AUC not accuracy.
+    # `seqs` packs three chains as "CDR3a|CDR3b|peptide"; `|` is out of vocabulary,
+    # so `patch_unknown_residue_tokens` maps it to X (the intended encoding).
     "tcr_pmhc_affinity": TaskConfig(
         name="TCR-pMHC Binding",
         dataset="GleghornLab/tcr_pmhc_affinity",
@@ -432,9 +389,7 @@ TASKS: Dict[str, TaskConfig] = {
         main_metric="AUC",
         validation_split="valid",
     ),
-    # =========================================================================
     # Multi-label Classification
-    # =========================================================================
     "go_mf": TaskConfig(
         name="Molecular Function (GO)",
         dataset="AI4Protein/GO_MF",
@@ -443,11 +398,9 @@ TASKS: Dict[str, TaskConfig] = {
         problem_type="multilabel",
         main_metric="F1_Macro",
         validation_split="validation",
-        # top_k_labels=300,
     ),
-    # GO Biological Process / Cellular Component. Same DeepFRI-derived splits and
-    # column layout as go_mf above; excluded from the presets for the same reason
-    # (thousands of labels each would dominate a sweep). Request by name.
+    # GO BP/CC: same DeepFRI-derived splits as go_mf; excluded from the presets
+    # (thousands of labels each). Request by name.
     "go_bp": TaskConfig(
         name="Biological Process (GO)",
         dataset="AI4Protein/GO_BP",
@@ -476,9 +429,7 @@ TASKS: Dict[str, TaskConfig] = {
         main_metric="F1_Macro",
         top_k_labels=500,
     ),
-    # =========================================================================
     # Regression
-    # =========================================================================
     "variant_effect": TaskConfig(
         name="Variant Effect (GB1)",
         dataset="biomap-research/fitness_prediction",
@@ -525,8 +476,8 @@ TASKS: Dict[str, TaskConfig] = {
         train_split="train",
         test_split="test",
     ),
-    # FLIP2 subtasks: pre-filtered local Arrow datasets (data/flip2_*/);
-    # created by scripts/prep_flip2.py from LiteFold/FLIP2.
+    # FLIP2 subtasks: local Arrow datasets built by scripts/prep_flip2.py from
+    # LiteFold/FLIP2.
     "flip2_amylase": TaskConfig(
         name="Alpha-Amylase Fitness (FLIP2)",
         dataset="data/flip2_amylase",
@@ -543,9 +494,8 @@ TASKS: Dict[str, TaskConfig] = {
         problem_type="regression",
         main_metric="Spearman",
     ),
-    # Optimal growth temperature of the source organism, in degrees C (2-120).
-    # Distinct from `thermostability` and `meltome`, which measure melting
-    # temperature of the protein itself rather than the organism's optimum.
+    # Optimal growth temperature of the source ORGANISM (degrees C), not the
+    # protein's melting temperature (`thermostability`, `meltome`).
     "deepet_topt": TaskConfig(
         name="Optimal Growth Temperature (DeepET Topt)",
         dataset="AI4Protein/DeepET_Topt",
@@ -555,9 +505,8 @@ TASKS: Dict[str, TaskConfig] = {
         main_metric="Spearman",
         validation_split="validation",
     ),
-    # Protein-protein binding affinity as a continuous value. The only pairwise
-    # REGRESSION task here; `ppi_bernett` is pairwise binary. Uses the same
-    # seq1/seq2 pair path, whose two pooled embeddings are concatenated.
+    # The only pairwise REGRESSION task (`ppi_bernett` is pairwise binary); the
+    # seq1/seq2 path concatenates the two pooled embeddings.
     "ppi_affinity": TaskConfig(
         name="PPI Binding Affinity",
         dataset="Synthyra/ppi_affinity",
@@ -591,19 +540,6 @@ TASKS: Dict[str, TaskConfig] = {
         problem_type="regression",
         main_metric="Spearman",
     ),
-    # DISABLED 2026-06-19: the old CheZoD mean-Z disorder task is no longer run or
-    # evaluated. Superseded by `disprot` (curated DisProt/CAID per-residue disorder,
-    # token_classification) — a residue-level target instead of a sequence-level
-    # mean Z-score. Kept commented for provenance; removing it from TASKS drops it
-    # from DEFAULT_TASKS and makes --tasks chezod_disorder an invalid choice.
-    # "chezod_disorder": TaskConfig(
-    #     name="CheZoD Disorder (Mean Z-Score)",
-    #     dataset="data/chezod",
-    #     input_map={"seq": "sequence"},
-    #     label_col="disorder_mean",
-    #     problem_type="regression",
-    #     main_metric="Spearman",
-    # ),
     "beta_lactamase_peer": TaskConfig(
         name="beta-lactamase-PEER",
         dataset="SaProtHub/Dataset-Beta_Lactamase-PEER",
@@ -640,13 +576,9 @@ TASKS: Dict[str, TaskConfig] = {
         train_split="train",
         test_split="test",
     ),
-    # =========================================================================
     # Retrieval
-    # =========================================================================
-    # The `family` column carries the full SCOPe sccs id ("a.5.6.1"), so this
-    # legacy key is FAMILY-level retrieval (kept unchanged so historical rows
-    # stay comparable). The two keys below truncate the same labels to the
-    # superfamily ("a.5.6") and fold ("a.5") levels.
+    # `family` carries the full SCOPe sccs id ("a.5.6.1"), so this key is
+    # FAMILY-level; the two below truncate it to superfamily and fold.
     "scope40_retrieval": TaskConfig(
         name="SCOPe-40 Structural Retrieval",
         dataset="tattabio/scope40_test",
@@ -679,20 +611,9 @@ TASKS: Dict[str, TaskConfig] = {
         train_split="train",
         test_split="train",
     ),
-    # Remote-homology detection in the "midnight zone": queries are filtered so
-    # no sequence-alignment relative exists in the lookup set, so this measures
-    # whether embeddings see a fold that alignment cannot.
-    #
-    # Run it with `-p knn --knn_k 1`, which makes the probe literally the
-    # paper's method: take the label of the nearest lookup protein by Euclidean
-    # distance. A linear probe here would fit 6.5k classes over 69k rows and is
-    # not what the reference numbers describe.
-    #
-    # test_h is pre-filtered to the 150 of 219 queries whose superfamily exists
-    # in the lookup set at all; the other 69 are unanswerable by any method and
-    # the paper excludes them. Reference (Heinzinger 2022, Table 1, H-level):
-    # MMseqs2 35, HMMER 77, raw ProtT5 64, ProtTucker(ProtT5) 76.
-    # doi:10.1093/nargab/lqac043
+    # Midnight-zone homology: queries have no alignment relative in the lookup set
+    # (Heinzinger 2022, doi:10.1093/nargab/lqac043; test_h = the 150 answerable
+    # queries). Run with `-p knn --knn_k 1` -- that is the paper's method.
     "cath_eat": TaskConfig(
         name="CATH v4.3 Superfamily Transfer (midnight zone)",
         dataset="GrimSqueaker/cath43-eat",
@@ -703,29 +624,17 @@ TASKS: Dict[str, TaskConfig] = {
         train_split="lookup",
         test_split="test_h",
     ),
-    ## disable std task for now
-    # "chezod_disorder_std": TaskConfig(
-    #     name="CheZoD Disorder (Std Z-Score)",
-    #     dataset="data/chezod",
-    #     input_map={"seq": "sequence"},
-    #     label_col="disorder_std",
-    #     problem_type="regression",
-    #     main_metric="Spearman",
-    # ),
-    # =========================================================================
     # Token Classification (residue-level)
-    # =========================================================================
-    # Per-residue conservation scores 1-9 (9-class token classification).
-    # Local Arrow dataset built by scripts/prep_conservation.py from FLIP FASTA.
+    # Per-residue conservation grades 1-9; local Arrow dataset built by
+    # scripts/prep_conservation.py from FLIP FASTA.
     "conservation_flip": TaskConfig(
         name="Residue Conservation (FLIP)",
         dataset="data/conservation_flip",
         input_map={"seq": "sequence"},
         label_col="conservation_labels",
         problem_type="token_classification",
-        # Grades 1-9 are ORDINAL: nominal macro-F1 gives off-by-one the same 0
-        # credit as off-by-eight. FLIP reports Spearman (rank). Accuracy/F1_Macro
-        # stay as secondary; the residue probe computes Spearman on this task.
+        # Grades are ORDINAL, so nominal macro-F1 misscores near misses; FLIP
+        # reports Spearman.
         main_metric="Spearman",
         validation_split="validation",
         test_split="test",
@@ -740,8 +649,8 @@ TASKS: Dict[str, TaskConfig] = {
         validation_split="validation",
         test_split="test",
     ),
-    # Full 8-state DSSP. Labels use a 9-symbol alphabet (the 8 DSSP states plus
-    # `D` for unassigned termini); see `_SS8_ALPHABET` in protein_benchmark_suite.
+    # Labels use a 9-symbol alphabet (8 DSSP states plus `D` for unassigned
+    # termini); see `_SS8_ALPHABET` in protein_benchmark_suite.
     "ss8": TaskConfig(
         name="Secondary Structure 8 (DSSP8)",
         dataset="GleghornLab/SS8",
@@ -772,12 +681,8 @@ TASKS: Dict[str, TaskConfig] = {
         split_column="stage",
         validation_column_values=("valid",),
     ),
-    # Per-residue intrinsic disorder, built from DisProt curated region spans
-    # (union of regions = disordered). Distinct from the NetSurfP `disorder`
-    # task above (PDB-missing-coordinate mask) — DisProt is the manually
-    # curated CAID-style target. Local Arrow dataset built by
-    # scripts/prep_disprot.py from LiteFold/DisProt. MCC is the CAID headline
-    # metric for this imbalanced binary task.
+    # Curated DisProt region spans (scripts/prep_disprot.py from LiteFold/DisProt),
+    # not the NetSurfP `disorder` mask above; MCC is the CAID headline metric.
     "disprot": TaskConfig(
         name="Intrinsic Disorder (DisProt)",
         dataset="data/disprot",
@@ -788,14 +693,9 @@ TASKS: Dict[str, TaskConfig] = {
         validation_split="validation",
         test_split="test",
     ),
-    # =========================================================================
     # Contact prediction (pairwise residue-residue)
-    # =========================================================================
-    # TAPE ProteinNet, converted from the original LMDB to parquet. `tertiary`
-    # holds CB coordinates in Angstrom and `valid_mask` flags resolved residues;
-    # contacts are CB-CB < 8A. The coordinates build the LABELS only -- the model
-    # sees the primary sequence and nothing else, so this runs against any model
-    # in the registry, with no MSA and no structure input.
+    # TAPE ProteinNet: `tertiary` holds CB coordinates (Angstrom), contacts are
+    # CB-CB < 8A. Coordinates build the LABELS only; the model sees sequence alone.
     "contact_probe": TaskConfig(
         name="Contact Prediction (TAPE ProteinNet)",
         dataset="heya5/protein_contact_map",
@@ -806,17 +706,11 @@ TASKS: Dict[str, TaskConfig] = {
         validation_split="valid",
         test_split="test",
     ),
-    # =========================================================================
     # Secondary structure on the standard held-out sets (opt-in by name)
-    # =========================================================================
     **_ss_heldout_tasks(),
-    # =========================================================================
     # ProteinGym — Zero-Shot (cosine similarity WT vs mutant, per-assay Spearman/AUC)
-    # =========================================================================
     **_proteingym_tasks("zeroshot"),
-    # =========================================================================
     # ProteinGym — Supervised (intra-assay 80/20 linear probe, per-assay Spearman/AUC)
-    # =========================================================================
     **_proteingym_tasks("supervised"),
 }
 
@@ -828,25 +722,18 @@ RETRIEVAL_TASKS = sorted(
     k for k, cfg in TASKS.items() if cfg.problem_type == "retrieval"
 )
 
-# Large multilabel tasks are excluded from the default sweep (thousands of
-# labels each); request them explicitly with --tasks.
-# (results are kept in TASKS for historical compatibility, but these are
-# not counted in model comparisons and not run by default).
+# Thousands of labels each: excluded from the default sweep, request with --tasks.
 MULTILABEL_EXCLUDED_TASKS = frozenset({"go_mf", "go_bp", "go_cc", "cafa5"})
 
-# Held-out secondary-structure evaluation sets. Ten near-duplicates of `ss3` /
-# `ss8` differing only in the test set, so they would bloat a default sweep
-# without adding a new signal. Opt-in by name, e.g. `--tasks ss8_cb513`.
+# Ten near-duplicates of `ss3`/`ss8` differing only in the test set; opt-in by
+# name, e.g. `--tasks ss8_cb513`.
 SS_HELDOUT_TASKS = sorted(_ss_heldout_tasks())
 
-# Oversized for a default sweep: ~200k rows, so it dominates --no-fast wall-clock
-# while adding one more thermostability signal next to `thermostability` and
-# `meltome`. Opt-in by name: `--tasks temperature_stability`.
+# ~200k rows dominating --no-fast wall-clock for a duplicate thermostability
+# signal; opt-in by name.
 OVERSIZED_EXCLUDED_TASKS = frozenset({"temperature_stability"})
 
-# Default tasks for --no-fast: all standard probe tasks, excluding ProteinGym,
-# opt-in retrieval tasks, multilabel-excluded tasks, the held-out SS sets, and
-# the oversized ones.
+# Default tasks for --no-fast: every standard probe task minus the opt-in sets.
 DEFAULT_TASKS = [
     k
     for k in TASKS
@@ -859,7 +746,6 @@ DEFAULT_TASKS = [
 ]
 
 
-# Display name -> task key. Result rows and TaskConfig carry the display name
-# ("EC Classification") while every registry lookup is keyed on the short id
-# ("ec_classification"); this is the one place that mapping is defined.
+# Display name -> task key: result rows carry the display name, every registry
+# lookup is keyed on the short id. Defined here only.
 TASK_NAME_TO_KEY = {cfg.name: key for key, cfg in TASKS.items()}

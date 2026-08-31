@@ -10,8 +10,6 @@ Cite:    Notin et al., "ProteinGym: Large-Scale Benchmarks for Protein Fitness
 License: see the ProteinGym repository (MIT at time of vendoring).
 """
 
-import numpy as np
-import pandas as pd
 import torch
 
 AA_vocab = "ACDEFGHIKLMNPQRSTVWY"

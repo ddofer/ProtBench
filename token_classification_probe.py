@@ -1,26 +1,12 @@
 """Residue-level (token-classification) linear-probe + embedding cache.
 
-Wires SS3 / Disorder benchmarks into the existing linear-probe pipeline:
-
-1. ``extract_residue_embeddings`` runs the encoder once per protein,
-   collects per-residue hidden states from ``output.last_hidden_state``
-   (or ``hidden_states[-1]`` as fallback), and stacks them into
-   ``(N_residues, hidden)`` plus aligned ``(N_residues,)`` labels —
-   padding and special-token positions are excluded via the tokenizer's
-   ``special_tokens_mask`` AND ``attention_mask``.
-2. The probe is whatever ``-p`` selected, built by the same
-   ``protein_benchmark_suite.make_probe_model`` registry as the sequence-level
-   tasks (``linear`` = StandardScaler + LogisticRegression(lbfgs),
-   ``torch_linear`` = StandardScaler + GPU nn.Linear head, ...).
-3. ``EmbeddingCache`` persists per-residue embeddings keyed by
-   ``(model_hash, task, split)`` to ``.npz`` so repeated bench runs
-   skip the forward pass.
-4. ``evaluate_token_classification`` is the public dispatch that
-   ``protein_benchmark_suite.evaluate_task`` calls in place of the
-   historic ``task_exception='token_classification'`` error path.
-
-The cache key includes the model checkpoint hash so different models
-never share cached residue embeddings.
+Wires SS3 / Disorder benchmarks into the linear-probe pipeline:
+``extract_residue_embeddings`` runs the encoder once per protein and stacks
+per-residue hidden states (padding + special tokens excluded via
+``special_tokens_mask`` AND ``attention_mask``); the probe comes from the same
+``make_probe_model`` registry as the sequence-level tasks; ``EmbeddingCache``
+persists embeddings keyed by ``(model_hash, task, split)`` so reruns skip the
+forward pass; ``evaluate_token_classification`` is the public dispatch.
 """
 
 from __future__ import annotations
@@ -36,20 +22,15 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # Embedding cache
-# ---------------------------------------------------------------------------
 
 
 CACHE_VERSION = "v2"  # v2 stores protein groups; older entries are plain misses
 
 
 def cache_key(model_hash: str, task: str, split: str) -> str:
-    """Stable cache key keyed by (model, task, split). Different model
-    hashes always produce different keys so different encoders never
-    collide on cache files. The version tag turns a format change into an
-    ordinary miss -- the cache is a derived artifact, so re-extracting is
-    cheaper than carrying a compatibility branch forever."""
+    """Stable cache key for (model, task, split); the version tag turns a format
+    change into an ordinary miss (re-extracting beats a compat branch)."""
     safe_model = hashlib.sha1(model_hash.encode("utf-8")).hexdigest()[:16]
     safe_task = "".join(c if c.isalnum() or c in "_-" else "_" for c in task)
     safe_split = "".join(c if c.isalnum() or c in "_-" else "_" for c in split)
@@ -93,10 +74,8 @@ class EmbeddingCache:
         self, key: str, X: np.ndarray, y: np.ndarray, groups: Optional[np.ndarray] = None
     ) -> None:
         path = self._path(key)
-        # Atomic-ish: write to a sibling ``<key>.tmp.npz`` then rename so
-        # concurrent readers never see a half-written file. ``np.savez``
-        # auto-appends ``.npz`` only if missing, so passing a path that
-        # already ends in ``.npz`` is a no-op for the extension.
+        # Write to ``<key>.tmp.npz`` then rename so readers never see a half-written
+        # file; ``np.savez`` only appends ``.npz`` when missing, so the name is kept.
         tmp = path.with_name(path.stem + ".tmp.npz")
         with open(tmp, "wb") as fh:
             arrays = {
@@ -109,9 +88,7 @@ class EmbeddingCache:
         tmp.replace(path)
 
 
-# ---------------------------------------------------------------------------
 # Residue embedding extraction
-# ---------------------------------------------------------------------------
 
 
 def _last_hidden_state(outputs) -> "Any":
@@ -135,21 +112,12 @@ def iter_residue_embeddings(
     batch_size: int = 8,
     max_length: int = 1024,
 ):
-    """Yield one ``(L_i, H)`` per-residue embedding array per input sequence,
-    in input order.
+    """Yield one ``(L_i, H)`` per-residue embedding array per input sequence, in input order.
 
-    Protein boundaries are preserved, which pairwise tasks (contact prediction)
-    need and ``extract_residue_embeddings`` throws away when it concatenates.
-
-    Padding and special-token positions are excluded via the union of
-    ``attention_mask`` (= 0 on PAD) AND ``special_tokens_mask`` (= 1
-    on CLS / SEP / PAD). Only positions where the mask is 1 AND the
-    special_tokens_mask is 0 are kept. ``L_i`` is therefore the truncated
-    length when a sequence exceeds ``max_length``, not the raw length.
-
-    Batches are formed longest-first so padding waste is minimal and an OOM
-    shows up on the first batch; kept positions are gathered on the device
-    and only the ``(sum L_i, H)`` block crosses to host.
+    Protein boundaries are preserved (contact prediction needs them). Positions are
+    kept only where ``attention_mask == 1`` AND ``special_tokens_mask == 0``, so
+    ``L_i`` is the truncated length when a sequence exceeds ``max_length``.
+    Batches are longest-first so an OOM shows up on the first batch.
     """
     import torch
 
@@ -158,11 +126,8 @@ def iter_residue_embeddings(
 
     encoder.eval() if hasattr(encoder, "eval") else None
 
-    # AMPLIFY needs an ADDITIVE attention mask (0.0 / -inf) + length padded to a
-    # multiple of 8, exactly like the sequence-level embed path; a bool mask
-    # raises "AMPLIFY expects an additive attention_mask". Detected by the same
-    # canonical config.model_type marker embed_sequences uses. Loop-invariant —
-    # resolved once here, not per batch.
+    # AMPLIFY needs an ADDITIVE (0/-inf) mask padded to a multiple of 8, like the
+    # sequence-level embed path; a bool mask raises. Resolved once, not per batch.
     is_amplify = str(
         getattr(getattr(encoder, "config", None), "model_type", "")
     ).lower() == "amplify"
@@ -221,7 +186,6 @@ def iter_residue_embeddings(
             stm = toks["special_tokens_mask"]
             if attn is None:
                 attn = torch.ones_like(stm)
-            # keep positions where attention == 1 AND special_tokens_mask == 0
             keep = attn.to(torch.bool) & ~stm.to(torch.bool)
             lengths = keep.sum(dim=1).tolist()
             flat = hidden[keep].float().cpu().numpy()  # (sum L_i, H), masked on device
@@ -244,22 +208,18 @@ def extract_residue_embeddings(
     batch_size: int = 8,
     max_length: int = 1024,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Run ``encoder`` once per protein, return stacked per-residue embeddings,
-    per-residue labels, and the protein index per residue (needed for
-    protein-level CV, and 8 bytes/residue against a float32 (T, d) block).
+    """Run ``encoder`` once per protein; return stacked per-residue embeddings,
+    labels, and the protein index per residue (for protein-level CV).
 
-    Per-protein truncation matches the tokenizer's ``max_length``; the
-    label list is sliced to the surviving non-special token count. A
-    residue/label count mismatch that truncation cannot explain means the
-    tokenizer did not emit one token per residue (or labels are misaligned):
-    it is logged, and raises if it affects more than half the proteins.
+    Labels are sliced to the surviving token count after truncation. A mismatch
+    truncation cannot explain (tokenizer not one-token-per-residue, or misaligned
+    labels) is logged, and raises if it affects more than half the proteins.
     """
     if len(sequences) != len(labels):
         raise ValueError(
             f"sequences ({len(sequences)}) and labels ({len(labels)}) length mismatch"
         )
     if not sequences:
-        # 0-dim embedding column count is unknown at this point.
         return (
             np.zeros((0, 0), dtype="float32"),
             np.zeros((0,), dtype="int64"),
@@ -282,8 +242,7 @@ def extract_residue_embeddings(
         if row_hidden.shape[0] == 0:
             continue
         n_keep, n_lab = row_hidden.shape[0], len(lab_list)
-        # Fewer residues than labels is expected only when the tokenizer
-        # truncated the sequence (max_length includes ~2 special tokens).
+        # Fewer residues than labels is expected only under truncation (~2 special tokens).
         if n_keep != n_lab and not (n_keep < n_lab and len(seq) > max_length - 2):
             n_misaligned += 1
         n = min(n_keep, n_lab)
@@ -307,16 +266,13 @@ def extract_residue_embeddings(
             np.zeros((0,), dtype="int64"),
             np.zeros((0,), dtype="int64"),
         )
-    # copy=False: the concat result is already float32, and a third full-size
-    # allocation is ~3 GB at 600k residues x 1280 dims.
+    # copy=False: a third full-size allocation is ~3 GB at 600k residues x 1280 dims.
     X = np.concatenate(all_X, axis=0).astype("float32", copy=False)
     y = np.concatenate(all_y, axis=0).astype("int64", copy=False)
     return X, y, np.concatenate(all_g, axis=0)
 
 
-# ---------------------------------------------------------------------------
 # Linear probe
-# ---------------------------------------------------------------------------
 
 
 def drop_ignored_residues(
@@ -324,10 +280,8 @@ def drop_ignored_residues(
 ):
     """Drop residues carrying ``IGNORE_LABEL`` from the embeddings AND labels.
 
-    Some datasets mark residues with no ground truth (SS8's unassigned termini).
-    They must be removed from both arrays together -- removing them earlier, at
-    decode time, would shorten the label list and shift every later label
-    against its residue embedding.
+    Must happen on both arrays together; dropping at decode time would shift every
+    later label against its residue embedding.
     """
     keep = y >= 0 if y.size else np.ones(0, dtype=bool)
     if keep.all():
@@ -344,13 +298,7 @@ def fit_residue_linear_probe(
     problem_type: str = "multiclass",
     probe_type: str = "linear",
 ):
-    """Fit the selected probe on per-residue embeddings.
-
-    Same registry as the sequence-level tasks (``make_probe_model``): ``linear``
-    is StandardScaler + LogisticRegression(lbfgs, 100 iters) -- scaling lets
-    lbfgs converge in ~100 iters even on SS3's ~600k residues (saga on raw
-    features was ~900s/task vs ~60-120s); ``torch_linear`` is the GPU head.
-    """
+    """Fit the selected probe on per-residue embeddings (same ``make_probe_model`` registry)."""
     from protein_benchmark_suite import _make_probe_model_for_training_size
 
     probe = _make_probe_model_for_training_size(probe_type, problem_type, len(X))
@@ -358,9 +306,7 @@ def fit_residue_linear_probe(
     return probe
 
 
-# ---------------------------------------------------------------------------
 # Public dispatch
-# ---------------------------------------------------------------------------
 
 
 def _compute_metrics(
@@ -397,8 +343,7 @@ def _compute_metrics(
         rho, _ = spearmanr(y_true, y_pred)
         metrics["Spearman"] = float(rho) if rho == rho else 0.0
 
-    # Ensure main_metric is always present (e.g. custom metric not in the
-    # standard set computed above).
+    # Ensure main_metric is always present (custom metric outside the standard set).
     metrics.setdefault(main_metric, 0.0)
     return {k: float(v) for k, v in metrics.items()}
 
@@ -422,15 +367,10 @@ def evaluate_token_classification(
 ) -> Dict[str, float]:
     """Run the residue probe pipeline for a token-classification task.
 
-    If ``cache`` is provided, residue embeddings for each split are
-    cached to disk under ``cache_key(model_hash, task, split)`` and
-    reused on hit.
-
-    If ``test_sequences`` is None, a 4-fold protein-level CV (GroupKFold) is
-    run over the train residues -- residues of one protein never land on both
-    sides of a fold. Default ``n_splits=4`` matches ``protein_benchmark_suite``.
+    With ``cache``, per-split embeddings are cached under ``cache_key(...)``. Without
+    ``test_sequences``, a 4-fold protein-level GroupKFold CV over train residues is
+    run (a protein never lands on both sides of a fold).
     """
-    import time
 
     from sklearn.model_selection import GroupKFold
 

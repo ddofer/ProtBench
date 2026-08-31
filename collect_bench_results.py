@@ -3,7 +3,7 @@
 Single human-readable results file across models / probes / splits / tasks,
 with a free-text `notes` column. Append + dedup (latest wins per key)."""
 from __future__ import annotations
-import argparse, csv, json, os, sys, time
+import argparse, csv, json, sys
 from pathlib import Path
 
 # Robust import: try package-style first, fall back to adding bench dir to sys.path

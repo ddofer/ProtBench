@@ -10,8 +10,7 @@ and phmmer) through the identical splits and metrics, so they are comparable.
     python protein_benchmark_suite.py -m facebook/esm2_t6_8M_UR50D \
         --tasks solubility -p linear --eval_split test
 
-Task counts and preset membership are deliberately not written here; they go
-stale. Ask the code: --list_tasks. Full usage is in README.md.
+Task counts and preset membership: ask --list_tasks. Full usage in README.md.
 """
 
 import argparse
@@ -56,15 +55,8 @@ BENCHMARK_SEED = 42
 def seed_all(seed: int) -> None:
     """Seed every global RNG the benchmark can reach.
 
-    BENCHMARK_SEED alone only covers what it is explicitly threaded into --
-    sklearn's random_state and datasets.shuffle. Anything reaching for a global
-    RNG instead (torch init, an unseeded permutation, dataloader shuffling,
-    fine-tuning dropout) was previously free to vary between runs that both
-    reported the same seed.
-
-    Deliberately not calling torch.use_deterministic_algorithms(True): it makes
-    several embedding kernels error or fall back to far slower paths, and
-    embedding is inference-only here, so it buys nothing.
+    Deliberately not torch.use_deterministic_algorithms(True): it errors or
+    slows several embedding kernels and embedding is inference-only here.
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -73,8 +65,7 @@ def seed_all(seed: int) -> None:
 
 # Bootstrap resamples for metric CIs. 0 disables; --bootstrap N sets it.
 BOOTSTRAP_N = 0
-# Above this many evaluation rows the bootstrap draw count is scaled down: the
-# interval is already ~+/-0.001 and each draw recomputes the full metric block.
+# Above this many eval rows the draw count is scaled down (interval already ~+/-0.001).
 _BOOTSTRAP_FULL_ROWS = 50_000
 _BOOTSTRAP_MIN_DRAWS = 100
 # Training proteins for the pairwise contact probe; --contact_train_proteins.
@@ -84,11 +75,7 @@ CONTACT_TRAIN_PROTEINS = 400
 def _boot_ci(metric_fn, y_true, y_pred, n_boot: int, seed: int) -> Dict[str, float]:
     """Percentile CIs by resampling test predictions and recomputing metrics.
 
-    ``metric_fn(y_true, y_pred) -> dict`` is the caller's existing metric block,
-    so the interval is computed for exactly the metrics it already reports and
-    nothing has to be reimplemented per metric. No refitting: the probe is
-    fixed, and this is the sampling distribution of the *test estimate*, which
-    is the quantity a "is this gap real?" question is about.
+    No refitting: this is the sampling distribution of the test estimate.
     """
     if not n_boot:
         return {}
@@ -107,9 +94,8 @@ def _boot_ci(metric_fn, y_true, y_pred, n_boot: int, seed: int) -> Dict[str, flo
         for key, value in sample.items():
             draws.setdefault(key, []).append(value)
 
-    # Refuse to report an interval built from a handful of surviving resamples.
-    # On a task with rare classes most draws can fail, and a 2.5th percentile
-    # over a dozen values looks exactly like one over a thousand in the CSV.
+    # Never report an interval built from a handful of surviving resamples: with
+    # rare classes most draws fail and a 12-sample percentile looks identical in the CSV.
     usable = {k: v for k, v in draws.items() if len(v) >= max(20, n_boot // 10)}
     if len(usable) < len(draws):
         logger.warning(
@@ -129,12 +115,8 @@ DEFAULT_EMBED_MAX_LENGTH = 1024
 DEFAULT_BLAS_THREAD_LIMIT = 1
 # KNN keeps n_jobs=1 (threading backend; higher values can hit OpenBLAS thread limits)
 DEFAULT_KNN_N_JOBS = 1
-# OvR linear probes use process-based parallelism (loky); each worker inherits
-# OPENBLAS_NUM_THREADS=1 so no thread explosion regardless of cpu_count.
-# Use a bounded value: n_jobs=-1 spawns cpu_count() workers which causes IPC
-# overhead to dominate for the ~12k-sample tasks here.
+# OvR linear probes use loky; bounded because n_jobs=-1 makes IPC dominate at ~12k samples.
 DEFAULT_OVR_N_JOBS = int(os.environ.get("PROTEIN_BENCH_OVR_JOBS", "8"))
-# Legacy alias (n_jobs=1 is safe there).
 DEFAULT_SKLEARN_N_JOBS = DEFAULT_KNN_N_JOBS
 
 # NOTE: datasets is imported locally in task evaluation functions to avoid
@@ -150,9 +132,7 @@ from sklearn.metrics import (
     confusion_matrix,
     accuracy_score,
     average_precision_score,
-    balanced_accuracy_score,
     f1_score,
-    matthews_corrcoef,
     mean_absolute_error,
     r2_score,
     roc_auc_score,
@@ -209,24 +189,20 @@ from model_utils import (
     _prepare_amplify_inputs,
 )
 
-# Reduce TensorFlow log noise
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("TRANSFORMERS_NO_TF_IMPORT", "1")
 
-# Suppress sklearn warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 warnings.filterwarnings("default", category=ConvergenceWarning)
 
 apply_esmplusplus_compat_patch()
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# Reduce noisy HTTP logs from Hugging Face hubs/datasets
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 logging.getLogger("datasets").setLevel(logging.WARNING)
@@ -243,12 +219,8 @@ PROBE_LABELS = {
 # Multilabel tasks (GO/EC) only have linear heads: OvR LogisticRegression or
 # one multi-output torch head. knn/histgb are silently the linear evaluator there.
 MULTILABEL_PROBES = frozenset({DEFAULT_RESULT_PROBE, "torch_linear"})
-# Tasks where sklearn's solver scales badly in the number of outputs or rows, so
-# ``-p auto`` routes them to the torch head. Measured on ESM-C 300M, full data:
-# remote_homology (1195 classes) 61s lbfgs vs 2.2s; ec_classification (572
-# labels, one liblinear fit per label) 156s vs 15s; ss3 615s and
-# conservation_flip 749s single-core at 38GB RSS (~2.8M residues). Everything
-# else is faster in sklearn.
+# Tasks where sklearn's solver scales badly in outputs or rows, so ``-p auto``
+# routes them to the torch head. Everything else is faster in sklearn.
 _AUTO_TORCH_TASKS = frozenset({"remote_homology", "cath_eat"})
 _MODEL_SIGNATURE_PATTERNS = (
     "*.json",
@@ -286,8 +258,7 @@ def _model_signature_paths(model_path: Path) -> list[Path]:
 def _hub_snapshot_revision(model_name: str) -> str | None:
     """Commit sha of the locally-resolved snapshot for a hub model id, else None.
 
-    Reads the HF cache only, so it works offline and adds no network call. Returns
-    None for anything not resolvable, which keeps the caller on its old behaviour.
+    Reads the HF cache only: works offline, no network call.
     """
     try:
         from huggingface_hub import try_to_load_from_cache
@@ -303,20 +274,16 @@ def _hub_snapshot_revision(model_name: str) -> str | None:
 def _model_cache_namespace(model_name: str) -> str:
     """Build a cache namespace that changes when a local checkpoint changes.
 
-    The pooling mode is part of the namespace because it changes the stored VECTORS.
-    Without it every PLM_BENCH_POOL mode for one model shared a single
-    embed_cache/<model>_<digest>/embeddings.pth: modes run in sequence silently reused
-    the first mode's vectors, and modes run CONCURRENTLY (one arm per GPU) read and
-    overwrote each other mid-sweep.
+    The pooling mode is part of the namespace because it changes the stored
+    VECTORS; without it concurrent PLM_BENCH_POOL modes silently share one cache.
     """
     model_path = Path(model_name)
     safe_name = safe_model_name(model_name)
     pool = _pool_mode()
     suffix = "" if pool == "mean" else f"__pool_{pool}"
     if not model_path.exists():
-        # Hub id: key on the resolved snapshot commit. Keyed on the bare name, the
-        # cache did NOT invalidate when upstream republished, so a benchmark could
-        # silently score the previous release's vectors under the new weights' name.
+        # Hub id: key on the resolved snapshot commit, else an upstream republish
+        # silently scores the old release's cached vectors under the new name.
         revision = _hub_snapshot_revision(model_name)
         return f"{safe_name}_{revision[:12]}{suffix}" if revision else safe_name + suffix
 
@@ -357,11 +324,8 @@ def _result_eval_mode(cfg: TaskConfig) -> str:
 def cosine_zeroshot_enabled() -> bool:
     """Whether the embedding-cosine ProteinGym zero-shot path is enabled.
 
-    Off by default. It embeds every mutant (2.47M forwards on DMS substitutions)
-    to score ~0.68 clinical AUC, while ``proteingym_mlm_zeroshot.py`` scores
-    ~0.87 from ~86k masked forwards -- one per mutated POSITION, shared by every
-    variant at that position. Set ``PLM_BENCH_PGYM_COSINE=1`` to restore it, e.g.
-    to reproduce an older row or to score a model with no reachable MLM head.
+    Off by default: far more forwards and a much weaker score than
+    ``proteingym_mlm_zeroshot.py``. ``PLM_BENCH_PGYM_COSINE=1`` restores it.
     """
     return os.environ.get("PLM_BENCH_PGYM_COSINE", "") not in ("", "0", "false", "False")
 
@@ -375,12 +339,8 @@ _PGYM_COSINE_DISABLED = (
 
 
 def _auto_probe_type(cfg: TaskConfig) -> str:
-    """Resolve ``-p auto`` to the probe that is fastest for this task's shape.
-
-    Single source of the routing rule: the CLI, ``scripts/run_bench.py`` and any
-    other caller all come through here, so a task cannot get a different probe
-    depending on how the benchmark was invoked.
-    """
+    """Resolve ``-p auto`` to the fastest probe for this task's shape (single
+    source of the routing rule; every caller comes through here)."""
     task_key = _TASK_NAME_TO_KEY.get(cfg.name, cfg.name)
     if (
         cfg.problem_type in {"multilabel", "token_classification"}
@@ -393,11 +353,7 @@ def _auto_probe_type(cfg: TaskConfig) -> str:
 def effective_probe_type(cfg: TaskConfig, requested_probe: str) -> str:
     """Return the probe label that reflects the evaluator actually used.
 
-    ``auto`` resolves per task (see ``_auto_probe_type``) and is never persisted
-    as-is -- the CSV records what actually ran. Retrieval and ProteinGym
-    zero-shot evaluations have no probe; multilabel only supports the linear
-    heads (``MULTILABEL_PROBES``). Anything else is persisted as the default
-    linear probe identity for apples-to-apples comparisons.
+    ``auto`` is never persisted as-is -- the CSV records what actually ran.
     """
     if requested_probe == "auto":
         requested_probe = _auto_probe_type(cfg)
@@ -430,9 +386,7 @@ def _make_probe_variant_label(
 def _progress_bars_enabled(local_rank: Optional[int] = None) -> bool:
     """Return whether tqdm-style progress bars should be shown.
 
-    Resolution order:
-    1) `PROTEIN_PROGRESS_BARS=on|off` forces behavior.
-    2) `auto` (default) enables bars on rank 0.
+    `PROTEIN_PROGRESS_BARS=on|off` forces it; `auto` (default) = rank 0 only.
     """
     raw = os.environ.get("PROTEIN_PROGRESS_BARS", "auto").strip().lower()
     if raw in {"1", "true", "yes", "on"}:
@@ -453,10 +407,7 @@ def _progress_bars_enabled(local_rank: Optional[int] = None) -> bool:
 
 
 def _configure_tqdm_defaults(progress_enabled: bool) -> float:
-    """Configure tqdm update cadence to reduce log spam.
-
-    Returns the effective min-interval in seconds.
-    """
+    """Configure tqdm update cadence; returns the min-interval in seconds."""
     if not progress_enabled:
         return 0.0
 
@@ -484,7 +435,7 @@ def parse_seed_list(seed_text: str) -> list[int]:
         seed_text: String such as ``"42,67,73"``.
 
     Returns:
-        Parsed benchmark seeds in input order.
+        Seeds in input order.
 
     Raises:
         ValueError: If no valid seeds are provided.
@@ -501,18 +452,14 @@ def parse_seed_list(seed_text: str) -> list[int]:
     return seeds
 
 
-# =============================================================================
 # Model Loading (SentenceTransformer + HF Fallback)
-# =============================================================================
 
 
 def _fix_sbert_tokenizer(model) -> None:
     """Fix tokenizer for SentenceTransformer-wrapped models.
 
-    Handles three cases:
-    - ESMplusplus/FastPLM: replace ST tokenizer with the model's native tokenizer
-    - ESM2: disable token_dropout bug (HuggingFace transformers >=5.x)
-    - Other models: resize embeddings if tokenizer/model vocab sizes mismatch
+    Native tokenizer for ESMplusplus/FastPLM, token_dropout off for ESM2, resized
+    embeddings elsewhere on a vocab-size mismatch.
     """
     if not (hasattr(model, "_modules") and len(model._modules) > 0):
         return
@@ -526,7 +473,6 @@ def _fix_sbert_tokenizer(model) -> None:
     if needs_esm2_token_dropout_workaround(auto_model):
         disable_esm2_token_dropout(auto_model)
 
-    # Check if model has a native tokenizer (ESMplusplus)
     native_tokenizer = None
     if hasattr(auto_model, "tokenizer") and auto_model.tokenizer is not None:
         native_tokenizer = auto_model.tokenizer
@@ -537,7 +483,6 @@ def _fix_sbert_tokenizer(model) -> None:
         logger.info("-> Detected ESMplusplus model, using native tokenizer")
         first_module.tokenizer = native_tokenizer
     elif hasattr(first_module, "tokenizer"):
-        # Check for vocab mismatch on non-ESMplusplus models
         tokenizer = first_module.tokenizer
         embedding_layer = auto_model.get_input_embeddings()
         if embedding_layer is not None:
@@ -557,15 +502,10 @@ def _fix_sbert_tokenizer(model) -> None:
 
 
 def resolve_proteva_runtime(torch_dtype, is_cpu):
-    """Weight dtype + ``flash_attn_mode`` for the Proteva encoder, honoring the
-    requested precision instead of force-casting bf16.
+    """Weight dtype + ``flash_attn_mode`` for the Proteva encoder.
 
-    The frozen probe defaults to fp32 (``torch_dtype`` None) so precision is a
-    non-confound across models and near-degenerate-sequence tasks (GB1, DMS subs)
-    keep their sub-bf16-noise-floor signal. ``fa2-varlen`` is a bf16/fp16-only
-    kernel, so fp32 MUST use the dense SDPA path (``"off"``) — bit-identical to
-    AMPLIFY in fp32 (verified). Explicit bf16 keeps the fast flash kernel. CPU is
-    always fp32 + ``"off"`` (no flash_attn; bf16 matmul unsupported/slow there).
+    ``fa2-varlen`` is bf16/fp16-only, so fp32 MUST use the dense SDPA path
+    (``"off"``). CPU is always fp32 + ``"off"`` (no flash_attn there).
     """
     if is_cpu:
         return torch.float32, "off"
@@ -589,10 +529,8 @@ def load_model(
 ):
     """Load a model, then make its tokenizer tolerant of unknown residues.
 
-    A thin wrapper over ``_load_model_impl`` rather than a patch inside it: the
-    impl has eight return paths and the guard has to cover every one. FastPLM's
-    tokenizer raises ``KeyError`` on any out-of-vocabulary character, which takes
-    down a whole task -- CATH lookup69k alone contains a NUL byte that does it.
+    Wraps ``_load_model_impl`` (eight return paths) so the guard covers all of
+    them: FastPLM's tokenizer raises KeyError on any out-of-vocabulary character.
     """
     obj, is_sbert, dev = _load_model_impl(
         model_name, device, torch_dtype, attn_implementation
@@ -603,8 +541,7 @@ def load_model(
         tokenizer = obj[0]
     else:
         tokenizer = None
-    # The embedding path prefers model.tokenizer over the one returned here, so
-    # patch both -- they are often different objects.
+    # Patch both: the embedding path prefers model.tokenizer, often a different object.
     inner = obj[1] if isinstance(obj, tuple) and len(obj) == 2 else obj
     for tok in (tokenizer, getattr(inner, "tokenizer", None)):
         if tok is not None:
@@ -624,20 +561,16 @@ def _load_model_impl(
     Args:
         model_name: HuggingFace model name or local path
         device: Device to load model on
-        torch_dtype: Optional dtype for model weights (e.g., torch.bfloat16)
-        attn_implementation: Optional explicit attention backend override for
-            HF model loads. Supported values: ``flash_attention_2``, ``sdpa``,
-            ``eager``. ``None`` uses model_utils auto-selection.
+        torch_dtype: Optional dtype for model weights
+        attn_implementation: ``flash_attention_2``/``sdpa``/``eager``; ``None``
+            uses model_utils auto-selection.
 
     Returns:
-        Tuple of (model_obj, is_sbert, device)
-        - model_obj: SentenceTransformer, (tokenizer, model) tuple
-        - is_sbert: Boolean indicating if it's a SentenceTransformer
-        - device: The device being used
+        ``(model_obj, is_sbert, device)``; model_obj is a SentenceTransformer or
+        a ``(tokenizer, model)`` tuple.
     """
-    # "kmer" / "kmer4" is the no-learning baseline: fixed k-mer frequency
-    # vectors, no weights to load and nothing to put on a device. It rides the
-    # normal path from here on so it gets the same probes, splits and metrics.
+    # "kmer" / "kmer4": no-learning baseline, no weights and no device. Rides the
+    # normal path from here so it gets the same probes, splits and metrics.
     kmer_k = parse_kmer_model_name(model_name)
     if kmer_k is not None:
         logger.info("Using the k-mer baseline (k=%d, %d dims)", kmer_k, 20**kmer_k)
@@ -757,61 +690,32 @@ def _load_model_impl(
         return (tokenizer, model), False, device
 
     if model_type == "proteva":
-        # Proteva is this project's HF-native encoder. It is benchmarked the
-        # SAME way it was trained: BF16 weights + the model's own
-        # ``flash_attn_mode="fa2-varlen"`` attention (block-diagonal varlen over
-        # packed, UNPADDED sequences). We deliberately do NOT pass an HF
-        # ``attn_implementation`` here — the encoder reads ``flash_attn_mode``
-        # from ``config.encoder_config`` and dispatches flash-attn internally;
-        # HF's attn dispatch does not apply to this custom model. Embeddings are
-        # produced by the varlen path in ``embed_sequences`` (pack -> forward ->
-        # segment-mean-pool), never the padded/SDPA-dense path.
+        # The encoder reads ``flash_attn_mode`` from ``config.encoder_config`` and
+        # dispatches flash-attn itself, so HF's ``attn_implementation`` does not apply.
         import plm.hf  # noqa: F401  (registers ProtevaConfig/ProtevaForPretraining)
 
         logger.info("-> Detected Proteva model, loading with AutoModel (fp32->BF16, fa2-varlen override)")
-        # Build with INFERENCE-SAFE kernels, overriding whatever the checkpoint
-        # trained with (weights are identical; outputs are equivalent — both
-        # validated):
-        #   * flash_attn_mode="fa2-varlen": fa3-varlen NaNs on real multi-segment
-        #     packed inputs in eval-mode bf16 (100% NaN, verified); fa2-varlen is
-        #     block-diagonal + bit-exact-validated. (fa3 is fine for TRAINING.)
-        #   * fused_rmsnorm=False: native RMSNorm — no FLA/FLA_TILELANG dependency
-        #     in the bench env; numerically equivalent to the fused kernel.
-        # Load in fp32 FIRST then cast to bf16: loading directly in bf16 makes
-        # __init__ compute the RoPE sin/cos cache in bf16 -> NaN embeddings.
+        # Inference-safe kernel overrides: fa3-varlen NaNs on packed multi-segment
+        # inputs in eval-mode bf16; fused_rmsnorm=False avoids an FLA dependency.
         from plm.hf.config import ProtevaConfig
 
         _cfg = ProtevaConfig.from_pretrained(model_name)
         _is_cpu = str(device).startswith("cpu")
-        # Honor the requested precision (was force-bf16, which made AMPLIFY-fp32
-        # vs Proteva-bf16 an unfair comparison on precision-sensitive tasks).
-        # fp32 (default) -> dense SDPA ("off") since fa2-varlen is bf16-only;
-        # explicit bf16 -> the fast flash kernel.
         _weight_dtype, _flash_mode = resolve_proteva_runtime(torch_dtype, _is_cpu)
         if isinstance(getattr(_cfg, "encoder_config", None), dict):
             _cfg.encoder_config["flash_attn_mode"] = _flash_mode
             _cfg.encoder_config["fused_rmsnorm"] = False
-        # Load fp32 FIRST then cast (loading directly in bf16 makes __init__
-        # compute the RoPE sin/cos cache in bf16 -> NaN); fix_proteva_rope_buffer
-        # below recomputes it in fp32 regardless. fp32 weight_dtype -> no-op cast.
-        # torch.compile saves every state-dict key '_orig_mod.'-prefixed. Loading
-        # such a checkpoint matches NOTHING and HF returns a SILENTLY
-        # randomly-initialized body -> every probe scores at chance (AUC 0.5000,
-        # Spearman 0.0000) while looking like a real result. The final root save
-        # (<out>/model.safetensors) is written unwrapped and is CLEAN; the periodic
-        # checkpoint-N/ saves are written from the compiled module and are PREFIXED.
-        # This branch calls AutoModel.from_pretrained directly, so it bypasses the
-        # strip + key-overlap guard inside model_utils.from_pretrained_with_flash —
-        # invoke both explicitly here. _validate_local_checkpoint_integrity is the
-        # hard gate: it RAISES rather than let a mismatched load proceed.
+        # Load fp32 FIRST then cast: loading directly in bf16 makes __init__ compute
+        # the RoPE sin/cos cache in bf16 -> NaN embeddings.
+        # A '_orig_mod.'-prefixed (torch.compile) checkpoint matches NOTHING and HF
+        # returns a SILENTLY random body -> every probe scores at chance. This branch
+        # bypasses the guard in from_pretrained_with_flash, so invoke both explicitly;
+        # _validate_local_checkpoint_integrity RAISES rather than let it proceed.
         from model_utils import _validate_local_checkpoint_integrity
         from plm.hf.checkpoint_utils import strip_orig_mod_prefix
 
-        # NOT wrapped in try/except: strip_orig_mod_prefix returns 0 WITHOUT writing
-        # when the checkpoint is already clean, so it can only fail while fixing a
-        # genuinely prefixed checkpoint — exactly the case where continuing would
-        # benchmark random weights. Swallowing that is what caused the 2026-07-21
-        # incident in the first place. Let it raise.
+        # Deliberately un-wrapped: strip_orig_mod_prefix only fails while fixing a
+        # genuinely prefixed checkpoint, exactly when continuing benchmarks random weights.
         if os.path.isdir(model_name):
             n_stripped = strip_orig_mod_prefix(model_name)
             if n_stripped:
@@ -822,24 +726,16 @@ def _load_model_impl(
         model = AutoModel.from_pretrained(model_name, config=_cfg)
         _validate_local_checkpoint_integrity(model_name, model)
         model.to(device).to(_weight_dtype).eval()
-        # ProteinEncoder registers rope_cs as a NON-persistent buffer, so HF's
-        # from_pretrained leaves it as uninitialized meta/garbage memory (it is
-        # absent from the checkpoint and never re-run through __init__'s
-        # _precompute_rope). That silently DISABLES RoPE for the benched model and
-        # was the root cause of the constant ~0.03-0.32 downstream gap vs native
-        # AMPLIFY benched on identical weights. Recompute it explicitly (analogous
-        # to fix_amplify_meta_tensors for AMPLIFY's freqs_cis).
+        # rope_cs is a NON-persistent buffer, so from_pretrained leaves it
+        # uninitialized -- that silently DISABLES RoPE. Recompute it explicitly.
         fix_proteva_rope_buffer(model)
         enc_mode = getattr(getattr(model, "encoder", None), "config", None)
         enc_mode = getattr(enc_mode, "flash_attn_mode", "?")
         logger.info(f"-> Proteva encoder flash_attn_mode={enc_mode}")
-        # The HF checkpoint ships weights only; load the project tokenizer.
         try:
             tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         except Exception as exc:
-            # Some Proteva checkpoints ship weights without a tokenizer. Point
-            # $PROTEVA_TOKENIZER at one rather than hardcoding a path that only
-            # exists on the machine this was written on.
+            # Some Proteva checkpoints ship weights without a tokenizer.
             fallback = os.environ.get("PROTEVA_TOKENIZER")
             if not fallback:
                 raise RuntimeError(
@@ -851,7 +747,6 @@ def _load_model_impl(
         logger.info("-> Loaded as HF AutoModel (Proteva)")
         return (tokenizer, model), False, device
 
-    # 1. Try SentenceTransformer first (preferred for non-ESMplusplus pretrained models)
     try:
         from sentence_transformers import SentenceTransformer
 
@@ -870,14 +765,12 @@ def _load_model_impl(
         logger.info(f"SentenceTransformer load failed ({type(e).__name__}: {e})")
         logger.info("Falling back to HuggingFace AutoModel...")
 
-    # 2. Try HF AutoModel (for base models)
     try:
         model = from_pretrained_with_flash(AutoModel, model_name, **hf_load_kwargs)
         if needs_esm2_token_dropout_workaround(model):
             disable_esm2_token_dropout(model)
         model.to(device).eval()
 
-        # Get tokenizer - prefer model's own tokenizer if available
         if hasattr(model, "tokenizer") and model.tokenizer is not None:
             tokenizer = model.tokenizer
             logger.info("-> Using tokenizer from model attribute")
@@ -895,9 +788,7 @@ def _load_model_impl(
         raise RuntimeError(f"Failed to load model: {model_name}") from e
 
 
-# =============================================================================
 # Data Loading & Processing
-# =============================================================================
 
 
 def find_column(columns: List[str], candidates: List[str]) -> Optional[str]:
@@ -939,8 +830,7 @@ def _resolve_local_dataset_path(dataset_name: str) -> Optional[Path]:
     return None
 
 
-# data/<name> -> the script that builds it. Kept explicit rather than guessed
-# from the name, so a rename breaks the test instead of the error message.
+# data/<name> -> the script that builds it. Explicit so a rename breaks the test.
 _PREP_SCRIPTS = {
     "data/conservation_flip": "scripts/prep_conservation.py",
     "data/disprot": "scripts/prep_disprot.py",
@@ -952,9 +842,7 @@ _PREP_SCRIPTS = {
 def require_local_dataset(dataset_name: str) -> Path:
     """Resolve a `data/...` dataset, or explain how to build it.
 
-    Without this, `datasets` reports "doesn't exist on the Hub", which sends the
-    reader looking for a deleted HuggingFace dataset rather than at a prep
-    script in this repo.
+    Otherwise `datasets` reports "doesn't exist on the Hub" for a local dataset.
     """
     path = _resolve_local_dataset_path(dataset_name)
     if path is not None:
@@ -1140,13 +1028,11 @@ def extract_sequences(
     """Extract sequences from dataset using input mapping with fallback heuristics."""
     available_cols = data.column_names
 
-    # Resolve actual column names (with fallback heuristics)
     resolved_cols = {}
     for key, col in input_map.items():
         if col in available_cols:
             resolved_cols[key] = col
         else:
-            # Try common alternatives
             alternatives = {
                 "seq": [
                     "sequence",
@@ -1177,7 +1063,6 @@ def extract_sequences(
                     f"Available: {available_cols}"
                 )
 
-    # Extract based on number of sequence inputs
     if len(resolved_cols) == 1:
         col = list(resolved_cols.values())[0]
         sequences = list(data[col])
@@ -1185,7 +1070,6 @@ def extract_sequences(
             return [_normalize_sequence_value(sequence) for sequence in sequences]
         return sequences
     else:
-        # Multiple inputs (e.g., PPI) - return as tuples
         ordered_keys = sorted(resolved_cols.keys())
         columns_data = [data[resolved_cols[k]] for k in ordered_keys]
         sequences = list(zip(*columns_data))
@@ -1201,7 +1085,6 @@ def extract_labels(data, label_col: str, problem_type: str) -> Tuple[List, str]:
     """Extract and process labels from dataset."""
     available_cols = data.column_names
 
-    # Find label column (with fallbacks)
     actual_col = label_col
     if label_col not in available_cols:
         alternatives = [
@@ -1252,8 +1135,7 @@ def extract_labels(data, label_col: str, problem_type: str) -> Tuple[List, str]:
 def truncate_label_fields(labels: List, n_fields: Optional[int]) -> List:
     """Keep the first `n_fields` dot-separated fields of each label.
 
-    SCOPe sccs ids are hierarchical ("a.5.6.1" = class.fold.superfamily.family),
-    so n_fields=2 -> "a.5" (fold), 3 -> "a.5.6" (superfamily), None -> unchanged.
+    SCOPe sccs ids are hierarchical: n_fields=2 -> "a.5" (fold), None -> unchanged.
     """
     if not n_fields:
         return labels
@@ -1314,16 +1196,10 @@ def _subsample_paired_data(
 IGNORE_LABEL = -1
 
 _SS3_ALPHABET = "HEC"
-# The 8 DSSP states, and only those -- this is the published Q8 label set, so
-# `ss8` (GleghornLab) and `ss8_cb513` (proteinea) assign the same id to the same
-# state and their F1_Macro values are comparable.
+# The 8 published DSSP states only, so `ss8` and `ss8_cb513` ids -- and their
+# F1_Macro values -- are comparable. GleghornLab's extra unassigned `D` is
+# IGNORE_LABEL, as standard Q8 evaluation masks it out.
 _SS8_ALPHABET = "GHIBESTC"
-# GleghornLab/SS8 additionally marks unassigned residues `D`: 6.4% of train and
-# 11.5% of test residues, 91% of them in terminal runs and so trivially
-# predictable from position alone. Scoring them as a 9th class would inflate
-# Accuracy and turn F1_Macro into a 9-class average that no published Q8 number
-# can be compared against, so they are marked IGNORE_LABEL and dropped at fit
-# time. Standard Q8 evaluation masks them out the same way.
 _DISORDER_ALPHABET = "01"
 
 
@@ -1331,46 +1207,34 @@ def _decode_residue_label(task_name: str, label_col: str, raw: Any) -> List[int]
     """Decode per-residue labels.
 
     SS3 / SS8 / Disorder use string alphabets (``HEC`` / ``GHIBESTC`` / ``01``);
-    other tasks expect already-tokenized integer lists or comma-separated
-    strings. Robust to lists, strings, and falls back to ``int(c)``.
-
-    Residues with no ground truth decode to ``IGNORE_LABEL`` and are dropped
-    later by ``token_classification_probe.drop_ignored_residues``.
+    other tasks expect integer lists or comma-separated strings. Residues with no
+    ground truth decode to ``IGNORE_LABEL``.
     """
     if isinstance(raw, list):
         return [int(x) for x in raw]
     s = str(raw)
     name_lower = task_name.lower()
-    # Branch ORDER is load-bearing. Task names overlap -- "Disorder (NetSurfP-SS3
-    # mask)" contains "ss3", and an 8-state task is also named "Secondary
-    # Structure ..." -- and every alphabet branch DROPS symbols it does not
-    # recognise rather than raising. A mis-routed task therefore returns a short
-    # or empty label list that the residue probe silently truncates against,
-    # producing a plausible number computed on the wrong residues. Most specific
-    # match first: disorder, then 8-state, then 3-state.
+    # Branch ORDER is load-bearing: task names overlap and each branch silently
+    # DROPS unrecognised symbols, so a mis-routed task scores the wrong residues.
+    # Most specific first: disorder, then 8-state, then 3-state.
     if "disorder" in name_lower or label_col.startswith("disorder"):
-        # NetSurfP ships this column as a stringified float list,
-        # "['0.0', '1.0', ...]", not as bare 0/1 characters.
+        # NetSurfP ships this column as a stringified float list, not bare 0/1 chars.
         if "." in s or "[" in s:
             return [int(float(tok)) for tok in re.findall(r"-?\d+(?:\.\d+)?", s)]
         return [_DISORDER_ALPHABET.index(c) for c in s if c in _DISORDER_ALPHABET]
     if label_col == "dssp8" or "ss8" in name_lower or "dssp8" in name_lower:
-        # Unassigned residues map to IGNORE_LABEL rather than being dropped:
-        # dropping them would shorten the list and SHIFT every later label
-        # against its residue embedding.
+        # Unassigned -> IGNORE_LABEL, never dropped: dropping would SHIFT every
+        # later label against its residue embedding.
         return [
             _SS8_ALPHABET.index(c) if c in _SS8_ALPHABET else IGNORE_LABEL for c in s
         ]
     if "ss3" in name_lower or "secondary structure" in name_lower:
-        # Same ignore-don't-drop rule as the SS8 branch, so the two alphabets
-        # agree on what an unrecognised symbol means. No shipped dataset emits
-        # one, but dropping would silently shift every later label.
+        # Same ignore-don't-drop rule as SS8.
         return [
             _SS3_ALPHABET.index(c) if c in _SS3_ALPHABET else IGNORE_LABEL for c in s
         ]
     if "," in s:
         return [int(tok) for tok in s.split(",") if tok.strip()]
-    # Fallback: try character-by-character int parsing
     return [int(c) for c in s if c.isdigit()]
 
 
@@ -1379,11 +1243,7 @@ def _prepare_token_classification_data(
     max_samples: Optional[int],
     eval_split: str,
 ) -> Tuple[List[str], List[List[int]], Optional[List[str]], Optional[List[List[int]]], Dict[str, Any]]:
-    """Load a residue-level dataset and decode per-residue labels.
-
-    Mirrors the split-selection logic of ``prepare_data`` but emits
-    per-residue label lists (not sequence-level scalars).
-    """
+    """Load a residue-level dataset and decode per-residue labels."""
     train_data, eval_data, split_metadata = _load_residue_splits(
         cfg, max_samples, eval_split
     )
@@ -1417,15 +1277,7 @@ def _prepare_token_classification_data(
 def load_dataset_splits(dataset: str, data_files: Optional[Dict[str, str]] = None, **kwargs):
     """``load_dataset`` that tolerates per-split files with different columns.
 
-    Handing several CSVs to one ``load_dataset`` call makes the builder unify
-    their schemas, and raw hub CSV repos rarely agree: in
-    ``proteinea/secondary_structure_prediction``, `CASP13.csv` carries
-    `xyz_coordinates`, `CASP14.csv` also carries an `Unnamed: 0` index column,
-    and `training_hhblits.csv` carries `cb513_mask`. Unifying them raises
-    "Please either edit the data files to have matching columns".
-
-    Loading each split on its own sidesteps that entirely -- the tasks only ever
-    read the sequence and label columns, which every file does share.
+    One call over several CSVs makes the builder unify schemas and raise.
     """
     from datasets import DatasetDict, load_dataset
 
@@ -1444,10 +1296,7 @@ def load_dataset_splits(dataset: str, data_files: Optional[Dict[str, str]] = Non
 def _unwrap_encoder_tokenizer(model_obj, is_sbert: bool):
     """Return ``(tokenizer, encoder)`` for the per-token extraction paths.
 
-    A SentenceTransformer wraps the encoder, so reach through to the underlying
-    HF model and its native tokenizer -- ``.encode()`` only ever hands back a
-    pooled vector, and both the residue probe and the contact probe need the
-    per-token hidden states.
+    Reaches through a SentenceTransformer wrapper (``.encode()`` pools).
     """
     if is_sbert:
         first_module = list(model_obj._modules.values())[0]
@@ -1464,14 +1313,9 @@ def _prepare_contact_data(
 ) -> Tuple[List[Dict[str, Any]], Optional[List[Dict[str, Any]]], Dict[str, Any]]:
     """Load a contact-prediction dataset: sequences plus CB coordinates.
 
-    Returns one record per protein, ``{"seq", "tertiary", "valid_mask"}``. The
-    coordinates build the contact LABELS in ``contact_metrics``; the model is
-    only ever shown ``seq``.
-
-    ``train_proteins`` truncates the train split BEFORE the rows are pulled out
-    of Arrow. The probe only ever uses that many, and materialising all 25k
-    coordinate arrays as Python lists costs an order of magnitude more memory
-    than the 167 MB the dataset occupies on disk.
+    One record per protein, ``{"seq", "tertiary", "valid_mask"}``; coordinates
+    build the LABELS, the model only sees ``seq``. ``train_proteins`` truncates
+    the train split BEFORE rows leave Arrow (memory).
     """
     train_data, eval_data, split_metadata = _load_residue_splits(
         cfg, max_samples, eval_split
@@ -1489,9 +1333,8 @@ def _prepare_contact_data(
         ]
 
     if train_proteins and len(train_data) > train_proteins:
-        # Shuffle first, matching every other subsampling site. Taking rows in
-        # file order would make --fast (which shuffles via max_samples) and
-        # --no-fast train on different subsets and report non-comparable numbers.
+        # Shuffle first, like every other subsampling site: file order would make
+        # --fast and --no-fast train on different, non-comparable subsets.
         train_data = train_data.shuffle(seed=BENCHMARK_SEED).select(
             range(train_proteins)
         )
@@ -1515,11 +1358,9 @@ def _load_residue_splits(
 ):
     """Split selection for the per-protein task paths (residue and contact).
 
-    Mirrors ``prepare_data``'s split logic but returns the raw HF splits, since
-    neither per-residue labels nor coordinate arrays survive the sequence-level
-    parser. Returns ``(train_data, eval_data_or_None, split_metadata)``.
+    Returns raw HF splits ``(train_data, eval_data_or_None, split_metadata)``:
+    per-residue labels and coordinates do not survive the sequence-level parser.
     """
-    from datasets import load_dataset
 
     normalized_eval_split = _normalize_split_value(eval_split)
     if normalized_eval_split not in SUPPORTED_EVAL_SPLITS:
@@ -1589,12 +1430,8 @@ def _load_residue_splits(
             else:
                 split_metadata["eval_strategy"] = "validation_cv4_train"
                 split_metadata["cv_fallback"] = True
-                # A task can have a real held-out test set and no validation
-                # split -- the CASP/CB513 secondary-structure sets are exactly
-                # that. Falling back to CV on train then answers a different
-                # question than the task exists to ask, and every sibling task
-                # sharing the train file reports the same number. It is recorded
-                # in the EvalStrategy column, but say so out loud too.
+                # A task can have a real held-out test set and no validation split;
+                # CV-on-train then answers a different question, so say so out loud.
                 if cfg.test_split in all_keys:
                     logger.warning(
                         "%s has no validation split, so --eval_split validation "
@@ -1631,7 +1468,6 @@ def prepare_data(
     Dict[str, Any],
 ]:
     """Load and prepare train/eval data for a task."""
-    from datasets import load_dataset
 
     normalized_eval_split = _normalize_split_value(eval_split)
     if normalized_eval_split not in SUPPORTED_EVAL_SPLITS:
@@ -1659,16 +1495,14 @@ def prepare_data(
 
     logger.info(f"Loading dataset: {cfg.dataset}")
 
-    # Load dataset — support both HF Hub datasets and local disk datasets
     load_kwargs = {}
     if cfg.dataset_config:
         load_kwargs["name"] = cfg.dataset_config
     if cfg.data_dir:
         load_kwargs["data_dir"] = cfg.data_dir
 
-    # A data/... task is built by a prep script, never downloaded. Resolve it up
-    # front so a missing one reports the script to run, rather than falling into
-    # the Hub path below and reporting that the dataset does not exist there.
+    # A data/... task is built by a prep script, never downloaded: resolve up front
+    # so a missing one names the script instead of falling into the Hub path.
     if str(cfg.dataset).startswith("data/"):
         require_local_dataset(cfg.dataset)
     local_dataset_path = _resolve_local_dataset_path(cfg.dataset)
@@ -1700,7 +1534,6 @@ def prepare_data(
     all_keys = [str(k) for k in ds_keys()]
     logger.info(f"  Available splits: {all_keys}")
 
-    # ProteinGym tasks: load full dataset and return groups array for per-assay evaluation
     if cfg.eval_mode.startswith("proteingym"):
         split_metadata["eval_strategy"] = "proteingym_unchanged"
         train_data = get_split_data(ds, cfg.train_split, all_keys)
@@ -1708,7 +1541,6 @@ def prepare_data(
             train_data = train_data.shuffle(seed=BENCHMARK_SEED).select(
                 range(min(len(train_data), max_samples))
             )
-        # Zero-shot: verify the WT column exists before proceeding
         if cfg.eval_mode == "proteingym_zeroshot":
             wt_col = cfg.input_map.get("wt")
             if wt_col and wt_col not in train_data.column_names:
@@ -1850,14 +1682,12 @@ def prepare_data(
                     range(max_samples)
                 )
 
-    # Handle auto-split for datasets with only train split in explicit test mode
     elif cfg.auto_split or (
         cfg.test_split not in all_keys and "test" not in str(all_keys).lower()
     ):
         logger.info("  Auto-splitting train into train/test (80/20)...")
         train_data = get_split_data(ds, cfg.train_split, all_keys)
 
-        # Group-aware split: split by group (e.g., protein/DMS_id) to avoid leakage
         if cfg.group_by:
             if cfg.group_by not in train_data.column_names:
                 logger.warning(
@@ -1884,7 +1714,6 @@ def prepare_data(
                     f"{len(eval_groups)} eval groups -> {len(train_data)} train, {len(eval_data)} eval samples"
                 )
 
-                # Apply max_samples AFTER group split to get balanced subsampling
                 if max_samples and not defer_sample_cap:
                     if len(train_data) > max_samples:
                         train_data = train_data.shuffle(seed=BENCHMARK_SEED).select(
@@ -1904,7 +1733,6 @@ def prepare_data(
                         "Try reducing split ratio or checking group distribution."
                     )
 
-        # Fallback: standard random split (no group-by or group column missing)
         if not cfg.group_by or cfg.group_by not in train_data.column_names:
             if max_samples and not defer_sample_cap:
                 total_needed = min(max_samples * 2, len(train_data))
@@ -1979,7 +1807,6 @@ def prepare_data(
         split_metadata["eval_strategy"],
     )
 
-    # Extract sequences
     train_seqs = extract_sequences(
         train_data,
         cfg.input_map,
@@ -1991,23 +1818,19 @@ def prepare_data(
         remove_sequence_whitespace=cfg.remove_sequence_whitespace,
     )
 
-    # Extract labels
     train_labels, _ = extract_labels(train_data, cfg.label_col, cfg.problem_type)
     test_labels, _ = extract_labels(eval_data, cfg.label_col, cfg.problem_type)
 
-    # Apply label_map if provided (e.g., mapping '0' -> 'Benign' for clinical_indels)
     if cfg.label_map:
         train_labels = _apply_label_map(train_labels, cfg.label_map)
         test_labels = _apply_label_map(test_labels, cfg.label_map)
 
-    # Handle multilabel top-K filtering
     mlb = None
     if cfg.problem_type == "multilabel" and effective_top_k_labels:
         train_labels, mlb = _filter_multilabel_top_k(
             train_labels,
             effective_top_k_labels,
         )
-        # Filter test_labels with the same top_k (we don't need a new mlb)
         test_labels, _ = _filter_multilabel_top_k(test_labels, effective_top_k_labels)
     elif cfg.problem_type == "multiclass" and effective_top_k_labels:
         train_seqs, train_labels = _filter_multiclass_top_k(
@@ -2035,9 +1858,7 @@ def prepare_data(
     return train_seqs, train_labels, test_seqs, test_labels, mlb, split_metadata
 
 
-# =============================================================================
 # Embedding
-# =============================================================================
 
 
 def _sanitize_nan(embs: np.ndarray) -> np.ndarray:
@@ -2062,22 +1883,16 @@ def _l2_normalize_embeddings(embs: np.ndarray) -> np.ndarray:
 def _pack_token_id_rows(rows: List[np.ndarray]) -> Dict[str, Any]:
     """Pack per-sequence token-id arrays into the fa2-varlen layout.
 
-    Mirrors the packing produced by ``plm.hf.collator.ProteinPackedCollator``
-    (the path the model was trained with): variable-length rows are
-    concatenated into a single ``(1, total_tokens)`` sequence with no padding,
-    accompanied by ``cu_seqlens`` (prefix-sum segment boundaries) and
-    per-segment RoPE ``position_ids``. The model's flash-attn varlen kernel
-    uses ``cu_seqlens`` for block-diagonal attention so segments never attend
-    across protein boundaries.
+    Rows are concatenated into one unpadded ``(1, total_tokens)`` sequence with
+    ``cu_seqlens`` boundaries, which the varlen kernel uses for block-diagonal
+    attention so segments never attend across protein boundaries.
 
     Args:
-        rows: list of 1-D int token-id arrays, one per sequence (already
-            tokenized + cropped; no padding).
+        rows: 1-D int token-id arrays, one per sequence (tokenized, unpadded).
 
     Returns:
-        Dict with ``input_ids`` ``(1, T)``, ``attention_mask`` ``(1, T)``,
-        ``cu_seqlens_q``/``cu_seqlens_k`` ``(num_segments + 1,)`` int32,
-        ``position_ids`` ``(1, T)``, and ``max_seqlen_q``/``max_seqlen_k`` ints.
+        Dict of ``input_ids``, ``attention_mask``, ``cu_seqlens_q``/``_k``,
+        ``position_ids``, ``max_seqlen_q``/``_k``.
     """
     if not rows:
         raise ValueError("_pack_token_id_rows received no rows")
@@ -2105,19 +1920,9 @@ def _pack_token_id_rows(rows: List[np.ndarray]) -> Dict[str, Any]:
 # Pooling variants for the frozen-embedding probes. Set PLM_BENCH_POOL.
 #
 #   mean        (default) mean over EVERY token in the segment, including <cls>/<eos>.
-#               What every recorded benchmark number to date used.
 #   mean_nospec mean over residues only, dropping the <cls>/<eos> brackets.
 #   cls         the <cls> vector alone.
 #   cls_mean    concat(<cls>, residue-mean) -> 2H dims.
-#
-# Motivation, measured 2026-08-21 on a Proteva checkpoint: <cls> carries a MASSIVE
-# ACTIVATION in the late blocks -- max/median token norm 1.2x through block 13, 8.1x at
-# block 27, 2.1x at block 29, always position 0 (the attention-sink pattern of
-# arXiv:2402.17762). Separately, Proteva's per-protein aux heads were trained on a pool
-# that INCLUDED <cls>, so a trained model's <cls> may carry taxonomy / pLDDT / function
-# signal that a vanilla model's does not. Unlike picking a better LAYER -- which lifts
-# vanilla identically and therefore cannot move a delta -- this readout can be
-# asymmetric between the two models, which is what makes it worth measuring.
 _POOL_MODES = ("mean", "mean_nospec", "cls", "cls_mean")
 
 
@@ -2131,12 +1936,9 @@ def _pool_mode() -> str:
 def _dense_pool(hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """Pool ``(B, T, H)`` dense hidden states to ``(B, H)`` under ``PLM_BENCH_POOL``.
 
-    Dense counterpart of :func:`_segment_mean_pool`. Both must implement the same modes:
-    tasks take one path or the other depending on whether the model runs packed, and a
-    mode implemented in only one of them silently falls back to plain mean pooling.
-
-    ``mask`` is ``(B, T)`` and true on real (non-pad) tokens. The first real token is
-    ``<cls>`` and the last is ``<eos>``.
+    Dense counterpart of :func:`_segment_mean_pool`; both MUST implement the same
+    modes, or a mode present in only one silently falls back to plain mean pooling.
+    ``mask`` is ``(B, T)``, true on real tokens; first is ``<cls>``, last ``<eos>``.
     """
     mode = _pool_mode()
     m = mask.bool()
@@ -2151,8 +1953,7 @@ def _dense_pool(hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 
     if mode == "mean":
         return _masked_mean(m)
-    # Residues only: drop the first and last real token, unless the row is so short that
-    # nothing would remain (then keep it whole rather than dividing by ~0).
+    # Residues only: drop first/last real token, unless nothing would remain.
     body = m & (idx != first) & (idx != last)
     body = torch.where((lengths > 2).unsqueeze(1), body, m)
     if mode == "mean_nospec":
@@ -2166,13 +1967,8 @@ def _dense_pool(hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 def _segment_mean_pool(hidden: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
     """Pool packed hidden states back to one vector per segment.
 
-    Inverse of :func:`_pack_token_id_rows`: given ``(1, total_tokens, H)``
-    hidden states and the ``cu_seqlens`` boundaries, reduce each segment's
-    token vectors to one row. Output is always float32 (the model forwards in
-    bf16; the linear probe wants float).
-
-    The reduction is selected by ``PLM_BENCH_POOL`` (see ``_POOL_MODES``); the default
-    ``mean`` is bit-identical to the historical behaviour.
+    Inverse of :func:`_pack_token_id_rows`. Output is always float32 (the model
+    forwards in bf16). Reduction selected by ``PLM_BENCH_POOL`` (``_POOL_MODES``).
     """
     mode = _pool_mode()
     h = hidden.squeeze(0).float()  # (total_tokens, H)
@@ -2181,8 +1977,7 @@ def _segment_mean_pool(hidden: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.
     for i in range(len(bounds) - 1):
         lo, hi = bounds[i], bounds[i + 1]
         seg = h[lo:hi]
-        # A segment is <cls> ... <eos>; length <= 2 has no residues, so fall back to
-        # the whole segment rather than averaging an empty slice.
+        # A segment is <cls> ... <eos>; length <= 2 has no residues to average.
         body = seg[1:-1] if seg.shape[0] > 2 else seg
         if mode == "mean":
             rows.append(seg.mean(dim=0))
@@ -2210,18 +2005,14 @@ def embed_sequences(
 ) -> np.ndarray:
     """Generate embeddings for sequences (single or pairs).
 
-    Supports:
-    - SentenceTransformer models (is_sbert=True)
-    - HuggingFace models (is_sbert=False, model_obj = (tokenizer, model))
+    ``is_sbert`` selects a SentenceTransformer or a ``(tokenizer, model)`` pair.
     """
 
     if not sequences:
         return np.array([])
 
-    # Check if input is pairs
     is_pair = isinstance(sequences[0], (tuple, list)) and len(sequences[0]) == 2
 
-    # Flatten pairs for batch processing, deduplicating to avoid redundant embeddings
     if is_pair:
         unique_set = set()
         for pair in sequences:
@@ -2245,7 +2036,6 @@ def embed_sequences(
     elif is_sbert:
         if getattr(model_obj, "max_seq_length", None) != max_length:
             model_obj.max_seq_length = max_length
-        # SentenceTransformer handles batching internally
         embs = model_obj.encode(
             flat_seqs,
             batch_size=batch_size,
@@ -2253,8 +2043,6 @@ def embed_sequences(
             convert_to_numpy=True,
         )
     else:
-        # Manual HuggingFace embedding with mean pooling
-        # Handle tuple format: (tokenizer, model)
         tokenizer, model = model_obj
 
         is_amplify_model = (
@@ -2275,14 +2063,9 @@ def embed_sequences(
             model.embed_dataset
         )
         if has_embed_dataset:
-            # Only the legacy ESM++ signature (sequences=, max_len=, pooling_types=,
-            # save_path=) is understood below. Current FastPLM builds ship
-            # embed_dataset(inputs, *, pooling=, max_length=, output=, ...); calling
-            # that with the old keywords raises "missing 1 required positional
-            # argument: 'inputs'". The suite catches that per task and records it as
-            # an Error row, so the sweep still exits 0 with an empty results table --
-            # silent, and only found by reading the CSV. Detect the signature and
-            # fall through to the generic batched path, which handles any HF model.
+            # Only the legacy ESM++ signature is understood below; a non-legacy
+            # FastPLM signature raises and is recorded as a silent per-task Error row,
+            # so detect it and fall through to the generic batched path instead.
             import inspect as _inspect
 
             try:
@@ -2310,19 +2093,11 @@ def embed_sequences(
             or proteva_flash_off_mode == "legacy_single_packed"
         )
         if _use_proteva_packed:
-            # Proteva fa2-varlen path: tokenize each sequence, pack a chunk of
-            # rows into a single UNPADDED (1, total_tokens) sequence with
-            # cu_seqlens + per-segment position_ids, forward through the model's
-            # block-diagonal flash-attn (BF16, the trained attention path), then
-            # segment-mean-pool back to one (H,) vector per sequence. No padding
-            # (mask is all-ones over the packed tokens), no SDPA-dense fallback.
+            # Proteva fa2-varlen path: pack rows unpadded, forward through
+            # block-diagonal flash-attn, then segment-mean-pool back per sequence.
             model_device = next(model.parameters()).device
-            # CPU / flash-off fallback: the non-flash SDPA/manual attention path
-            # attends densely and IGNORES cu_seqlens, so packing >1 sequence would
-            # leak across segment boundaries. Forwarding ONE sequence per packed
-            # call (single segment) makes the dense full-attention exact. Detect
-            # via the encoder's resolved flash_attn_mode (set to "off" on CPU in
-            # load_model). GPU fa2-varlen is unchanged (packs `batch_size` rows).
+            # CPU / flash-off: the dense attention path IGNORES cu_seqlens, so packing
+            # >1 sequence would leak across segments -- pack one segment per call.
             _pack_bs = (
                 1
                 if (_proteva_flash_off or model_device.type == "cpu")
@@ -2331,7 +2106,6 @@ def embed_sequences(
             embs_list = []
             for i in range(0, len(flat_seqs), _pack_bs):
                 batch = flat_seqs[i : i + _pack_bs]
-                # Tokenize per sequence (no padding) -> per-row id arrays.
                 tok = tokenizer(
                     batch,
                     add_special_tokens=True,
@@ -2369,30 +2143,23 @@ def embed_sequences(
             embs = np.concatenate(embs_list, axis=0)
 
         elif has_embed_dataset:
-            # embed_dataset handles batching/sorting internally; returns dict[seq->tensor]
-            # Note: embed_dataset truncates sequences to max_len, so dict keys are
-            # truncated. We truncate the lookup keys to match.
+            # embed_dataset returns dict[seq->tensor], keys truncated to max_len.
             embed_tokenizer = getattr(model, "tokenizer", None)
-            # Use a model-specific save path if provided; otherwise disable caching
-            # entirely so different models never share stale cached embeddings.
+            # No save path -> caching off, so models never share stale embeddings.
             _use_cache = embed_save_path is not None
             if _use_cache:
                 assert embed_save_path is not None
                 os.makedirs(os.path.dirname(embed_save_path), exist_ok=True)
-            # IMPORTANT: embed_dataset() unconditionally loads from save_path
-            # when the file exists (regardless of the `save` flag).  When
-            # caching is disabled we must pass a guaranteed-nonexistent path
-            # so stale embeddings from a prior model are never loaded.
+            # IMPORTANT: embed_dataset() unconditionally loads from save_path when the
+            # file exists (regardless of `save`), so with caching off pass a
+            # guaranteed-nonexistent path or a prior model's embeddings get used.
             if _use_cache:
-                # Append PID so concurrent subprocesses never share a cache file.
-                # The FastESM embed_dataset performs a non-atomic torch.save after
-                # a read-modify-write, which races and corrupts the .pth when
-                # multiple GPU workers target the same model path.
+                # PID-suffixed: FastESM's non-atomic torch.save races and corrupts
+                # the .pth when several workers target one model path.
                 base, ext = os.path.splitext(embed_save_path)
                 _save_path = f"{base}.pid{os.getpid()}{ext}"
-                # Seed this process's file from the shared cache so a second split
-                # or a restart does not re-embed everything. This only ever *reads*
-                # the shared file, so it cannot participate in the write race.
+                # Seed from the shared cache (read-only, so no part in the write race)
+                # so a second split or a restart does not re-embed everything.
                 if os.path.exists(embed_save_path) and not os.path.exists(_save_path):
                     try:
                         shutil.copyfile(embed_save_path, _save_path)
@@ -2404,11 +2171,9 @@ def embed_sequences(
                             exc,
                         )
             else:
-                # embed_dataset gets save=False below, so it neither reads nor
-                # writes this path -- it exists only so a stale file from a
-                # previous model can never be picked up. Do NOT mkdtemp here:
-                # the directory would never be written to and never cleaned up,
-                # and since caching became opt-in that leaked on every run.
+                # save=False below, so this path is never read or written; it exists
+                # only so a previous model's stale file cannot be picked up. Do NOT
+                # mkdtemp: the directory would leak, unwritten, on every run.
                 _save_path = os.path.join(
                     tempfile.gettempdir(), f"_no_cache_embeddings.{os.getpid()}.pth"
                 )
@@ -2429,12 +2194,8 @@ def embed_sequences(
             if not emb_dict:
                 raise RuntimeError("embed_dataset returned no embeddings")
             if _use_cache and os.path.exists(_save_path):
-                # Publish this process's cache for the next one. os.replace is
-                # atomic within a filesystem, so a reader never sees a partial
-                # file -- unlike the non-atomic torch.save that caused the
-                # original corruption. Concurrent workers still write only their
-                # own pid file; the last to publish wins, which costs reuse but
-                # never validity.
+                # Publish for the next process. os.replace is atomic, so a reader
+                # never sees a partial file; last publisher wins, costing reuse only.
                 try:
                     os.replace(_save_path, embed_save_path)
                 except OSError as exc:
@@ -2444,7 +2205,6 @@ def embed_sequences(
                         embed_save_path,
                         exc,
                     )
-            # Re-order dict results to match original input order.
             # embed_dataset keys are truncated sequences; truncate lookups to match.
             embs_list = []
             missing_keys = []
@@ -2452,7 +2212,6 @@ def embed_sequences(
                 key = s[:max_length]
                 val = emb_dict.get(key)
                 if val is None:
-                    # Fallback: try untruncated key (short sequences)
                     val = emb_dict.get(s)
                 if val is None:
                     missing_keys.append(key)
@@ -2464,14 +2223,10 @@ def embed_sequences(
                     f"{len(missing_keys)} sequence(s); example key: {missing_keys[0]!r}"
                 )
             embs = np.stack(embs_list, axis=0)
-            # Fall through to shared reassembly logic below (pair concat / dedup restore)
 
         else:
-            # Longest-first batching. Padding is to the batch maximum, so feeding the model in
-            # dataset order makes a batch of one 1000-residue sequence and 63 short ones pad all 64
-            # to 1000. Grouping similar lengths removes that waste; results are unchanged because
-            # padded positions are masked out of the mean pooling below. Same approach the residue
-            # path already takes (token_classification_probe.iter_residue_embeddings).
+            # Longest-first batching: padding is to the batch maximum, so grouping
+            # similar lengths cuts waste. Results unchanged (pad positions are masked).
             order = sorted(range(len(flat_seqs)), key=lambda i: len(flat_seqs[i]), reverse=True)
             out: List[Optional[np.ndarray]] = [None] * len(flat_seqs)
 
@@ -2498,7 +2253,6 @@ def embed_sequences(
                 )
 
                 try:
-                    # Save boolean mask for pooling before any conversion
                     pooling_mask = inputs["attention_mask"]
                     orig_len = inputs["input_ids"].shape[1]
 
@@ -2514,7 +2268,6 @@ def embed_sequences(
                                 else (param.dtype if param is not None else None)
                             ),
                         )
-                        # Cast additive mask to match autocast dtype for xformers
                         if amp_dtype is not None:
                             additive_mask = additive_mask.to(amp_dtype)
                         with amp_ctx:
@@ -2533,7 +2286,6 @@ def embed_sequences(
                     logger.error(f"Model inference failed: {e}")
                     raise
 
-                # Extract hidden states — models return them in various formats
                 if (
                     hasattr(outputs, "last_hidden_state")
                     and outputs.last_hidden_state is not None
@@ -2554,7 +2306,6 @@ def embed_sequences(
                             f"Could not extract embeddings from model output: {type(outputs)}"
                         )
 
-                # Slice back to original (pre-padding) length
                 hidden = hidden[:, :orig_len, :]
 
                 # Apply AMPLIFY's final layer norm (not included in hidden_states)
@@ -2564,22 +2315,17 @@ def embed_sequences(
                         with torch.inference_mode():
                             hidden = model.layer_norm_2(hidden)
 
-                # Pooling with attention mask (always boolean, not additive).
-                # SAME PLM_BENCH_POOL modes as the packed path in _segment_mean_pool --
-                # this is the DENSE path, and it is the one most tasks actually take.
-                # Patching only one of the two is how the first attempt at this produced
-                # four identical result sets.
+                # Dense path; must carry the SAME PLM_BENCH_POOL modes as the packed
+                # path in _segment_mean_pool, or a mode silently does nothing here.
                 batch_embs = _dense_pool(hidden, pooling_mask).detach().float().cpu().numpy()
 
                 for j, i in enumerate(idx):
                     out[i] = batch_embs[j]
 
-            # Scatter back to input order: emb_dict below is built by zipping with flat_seqs.
             embs = np.stack(out)
 
     embs = _sanitize_nan(embs)
 
-    # Reassemble output in original order via lookup dict
     emb_dict = {seq: embs[i] for i, seq in enumerate(flat_seqs)}
     if is_pair:
         output_embs = np.array(
@@ -2595,9 +2341,7 @@ def embed_sequences(
     return output_embs
 
 
-# =============================================================================
 # Evaluation
-# =============================================================================
 
 
 def evaluate_binary(X_train, y_train, X_test, y_test) -> Dict[str, float]:
@@ -2634,9 +2378,8 @@ def evaluate_multilabel(
 ) -> Dict[str, Any]:
     """Evaluate multilabel classification task.
 
-    ``linear`` = one liblinear LogisticRegression per label (OvR); ``torch_linear``
-    = one multi-output sigmoid head (one fit for all labels -- the OvR loop is
-    what makes GO/EC slow). Other probes fall back to ``linear``.
+    ``linear`` = OvR liblinear per label, ``torch_linear`` = one multi-output
+    sigmoid head; other probes fall back to ``linear``.
     """
     if mlb is None:
         mlb = MultiLabelBinarizer()
@@ -2644,7 +2387,6 @@ def evaluate_multilabel(
 
     y_test_bin = mlb.transform(y_test)
 
-    # Filter out samples with no labels after filtering
     train_mask = y_train_bin.sum(axis=1) > 0
     test_mask = y_test_bin.sum(axis=1) > 0
 
@@ -2670,9 +2412,7 @@ def evaluate_multilabel(
 
     preds = clf.predict(X_test_f)
 
-    # No MCC or balanced accuracy here: neither is defined over a multilabel
-    # indicator matrix. Bootstrap resampling is fine though -- it resamples
-    # rows, and every metric below accepts 2D indicator input.
+    # No MCC or balanced accuracy: neither is defined over a multilabel indicator matrix.
     def _metrics(yt, yp):
         return {
             "Accuracy": accuracy_score(yt, yp),
@@ -2706,18 +2446,17 @@ def make_probe_model(
     """Construct a probe model for a supported task type.
 
     Args:
-        probe_type: Type of probe ("linear", "torch_linear", "histgb", "knn").
-        problem_type: Type of problem ("regression", "binary", "multiclass").
-        knn_k: Number of neighbors for KNN probes (default: 3).
-        knn_weights: Weight function for KNN ("uniform" or "distance", default: "uniform").
+        probe_type: "linear", "torch_linear", "histgb" or "knn".
+        problem_type: "regression", "binary" or "multiclass".
+        knn_k: Neighbors for KNN probes.
+        knn_weights: KNN weighting, "uniform" or "distance".
     """
     if probe_type == DEFAULT_RESULT_PROBE:
         if problem_type == "regression":
             return make_pipeline(StandardScaler(), Ridge(alpha=1.0))
         if problem_type in {"binary", "multiclass"}:
-            # lbfgs = native multinomial (no OvR), quasi-Newton; with the
-            # StandardScaler it converges in ~100 iters even for 1195-class
-            # remote_homology. saga (stochastic) was ~750s/multiclass task here.
+            # lbfgs = native multinomial (no OvR); with StandardScaler it converges
+            # in ~100 iters even for 1195-class remote_homology.
             return make_pipeline(
                 StandardScaler(),
                 LogisticRegression(
@@ -2729,8 +2468,7 @@ def make_probe_model(
         from torch_linear_head import TorchLinearHead
 
         if problem_type == "regression":
-            # Standardise y too: MSE from a zero-init head on raw-scale targets
-            # (Topt in C, ddG in kcal) would need many more steps.
+            # Standardise y too: a zero-init head on raw-scale targets needs far more steps.
             return TransformedTargetRegressor(
                 regressor=make_pipeline(
                     StandardScaler(), TorchLinearHead(task="regression", seed=BENCHMARK_SEED)
@@ -2742,9 +2480,8 @@ def make_probe_model(
                 StandardScaler(), TorchLinearHead(task="classification", seed=BENCHMARK_SEED)
             )
         if problem_type == "multilabel":
-            # Sparse per-label gradients (EC: 572 labels, 0.3 % positives) need a
-            # higher lr and more patience than a few-output sequence task; set
-            # here, where the task shape is known, rather than hidden in the head.
+            # Sparse per-label gradients (EC: 572 labels, 0.3% positives) need a
+            # higher lr and more patience than a few-output task.
             return make_pipeline(
                 StandardScaler(),
                 TorchLinearHead(
@@ -2813,8 +2550,7 @@ def _make_probe_model_for_training_size(
 def timed_fit(model, X, y) -> float:
     """Fit ``model`` and return the wall seconds it took.
 
-    One definition so ``ProbeFitSec`` means the same thing on every path
-    (sequence, residue, multilabel, CV).
+    One definition, so ``ProbeFitSec`` means the same on every path.
     """
     start = time.perf_counter()
     model.fit(X, y)
@@ -2824,11 +2560,7 @@ def timed_fit(model, X, y) -> float:
 def bootstrap_draws_for(n_boot: int, n_rows: int) -> int:
     """Scale the bootstrap draw count down on very large evaluation sets.
 
-    Residue tasks score 150k-600k rows; each draw recomputes the whole metric
-    block, which measures ~0.13 s at 150k rows and ~0.5 s at 600k -- 1000 draws
-    would cost minutes against a 60-120 s probe fit. The CI half-width is already
-    ~+/-0.001 there, so the extra draws buy nothing. Small evaluation sets, where
-    the interval is actually wide, keep the full count.
+    Each draw recomputes the whole metric block; small eval sets keep the count.
     """
     if n_boot <= 0 or n_rows <= _BOOTSTRAP_FULL_ROWS:
         return n_boot
@@ -2839,13 +2571,9 @@ def bootstrap_draws_for(n_boot: int, n_rows: int) -> int:
 def classification_metrics(problem_type: str, y_true, y_pred) -> dict[str, float]:
     """Point metrics for binary / multiclass predictions.
 
-    Single definition shared by the sequence-level probe evaluators and the
-    residue-level probe (``token_classification_probe``), and the block that
-    ``_boot_ci`` resamples -- so every path reports the same columns.
-
-    Derived from ONE confusion matrix rather than 4-5 independent sklearn passes
-    over the labels: each of those builds its own matrix internally, which is
-    ~6x slower on the 150k-600k-row residue arrays this is the inner loop for.
+    Shared by the sequence- and residue-level probes and resampled by ``_boot_ci``,
+    so every path reports the same columns. Derived from ONE confusion matrix (~6x
+    faster than separate sklearn passes on 150k-600k-row residue arrays).
     """
     y_true, y_pred = np.asarray(y_true), np.asarray(y_pred)
     if y_true.size == 0:
@@ -3010,8 +2738,7 @@ def evaluate_regression_probe(
     }
 
     def _resampled(yt, yp):
-        # NaN correlations on a degenerate resample fall back to 0.0, matching
-        # how the point estimate above treats a constant prediction.
+        # NaN correlations on a degenerate resample -> 0.0, as for the point estimate.
         rho, _ = spearmanr(yt, yp)
         r, _ = pearsonr(yt, yp)
         return {
@@ -3034,11 +2761,9 @@ def _aggregate_cv_metrics(fold_metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
         return {"Error": "No valid CV folds"}
 
     df = pd.DataFrame(fold_metrics)
-    # Select only numeric columns and drop missing
     df_num = df.select_dtypes(include=[np.number])
     aggregated = {k: float(v) for k, v in df_num.mean().items() if np.isfinite(v)}
-    # Fit time is a cost, not a score: report the total spent across folds so the
-    # column means the same thing as it does on a holdout row.
+    # Fit time is a cost, not a score: total across folds, as on a holdout row.
     if "ProbeFitSec" in df_num:
         aggregated["ProbeFitSec"] = float(df_num["ProbeFitSec"].sum())
     aggregated["CV_Folds"] = len(fold_metrics)
@@ -3276,11 +3001,9 @@ def evaluate_retrieval(
 ) -> Dict[str, float]:
     """Evaluate all-vs-all retrieval (cosine, self excluded) at the label level given.
 
-    Returns Recall@K over all queries (legacy definition: singleton-label queries
-    count as misses), plus MAP over the full ranking and the same metrics over
-    the *eligible* queries only (>=1 non-self gallery item with the same label),
-    as in mmseqs_baseline.py / bootstrap_ci.py. Labels decide the hierarchy
-    level: pass fold / superfamily / family ids to get that level.
+    Recall@K over all queries (singleton-label queries count as misses), MAP over
+    the full ranking, and both over *eligible* queries only (>=1 non-self gallery
+    item sharing the label). Labels set the hierarchy level.
     """
     if len(embeddings) != len(labels):
         raise ValueError("Embeddings and labels must have the same number of rows")
@@ -3349,11 +3072,8 @@ def _run_zeroshot_tta(
 ):
     """Per-assay WT test-time training for the ProteinGym zero-shot path.
 
-    Returns a list of per-group metric values, or ``None`` when TTA cannot apply
-    to this model (SentenceTransformer, or no reachable MLM head) so the caller
-    falls back to the standard embedding-cosine path. The embedding cache is
-    bypassed (``embed_save_path=None``): per-assay adapted weights make any cached
-    embedding stale by construction.
+    Returns per-group metric values, or ``None`` when TTA cannot apply (no
+    reachable MLM head). The cache is bypassed: adapted weights make it stale.
     """
     if is_sbert:
         logger.info(
@@ -3417,18 +3137,14 @@ def evaluate_task(
     test-time training on the ProteinGym zero-shot path; ignored elsewhere.
     """
 
-    # Resolve the probe ONCE, here, so every downstream evaluator receives a real
-    # probe rather than a request: 'auto' picks per task shape, and a probe the
-    # task cannot route through (knn on multilabel) collapses to the linear
-    # identity. Doing it at the entry point is what lets the per-branch guards go.
+    # Resolve the probe ONCE here, so every downstream evaluator gets a real probe
+    # rather than a request ('auto', or knn on multilabel).
     probe_type = effective_probe_type(cfg, probe_type)
 
     logger.info(f"Evaluating: {cfg.name}")
 
-    # The cosine zero-shot path embeds every mutant -- 2.47M forwards on DMS
-    # substitutions -- for a much weaker score than the masked-marginal scorer in
-    # proteingym_mlm_zeroshot.py (~86k forwards). Refuse early and say what to
-    # run instead, rather than spending the GPU time.
+    # Refuse the cosine zero-shot path early rather than spend the GPU time: far
+    # more forwards and a weaker score than proteingym_mlm_zeroshot.py.
     if cfg.eval_mode == "proteingym_zeroshot" and not cosine_zeroshot_enabled():
         logger.warning("  %s", _PGYM_COSINE_DISABLED)
         return (
@@ -3437,10 +3153,8 @@ def evaluate_task(
             "task_exception",
         )
 
-    # Residue-level (per-token) tasks use a separate linear-probe path that
-    # extracts per-residue hidden states + fits a LogisticRegression. The
-    # sequence-level ``prepare_data`` parser cannot handle per-residue
-    # labels, so dispatch BEFORE it runs. See token_classification_probe.py.
+    # Residue-level tasks use a separate probe path; ``prepare_data`` cannot handle
+    # per-residue labels, so dispatch BEFORE it runs. See token_classification_probe.py.
     if cfg.problem_type == "token_classification":
         from token_classification_probe import (
             EmbeddingCache,
@@ -3567,7 +3281,6 @@ def evaluate_task(
             eval_strategy,
         )
 
-    # --- ProteinGym per-assay evaluation ---
     if cfg.eval_mode.startswith("proteingym"):
         if not train_seqs:
             return (
@@ -3590,10 +3303,8 @@ def evaluate_task(
             mutants = [s[0] for s in train_seqs]
             wts = [s[1] for s in train_seqs]
 
-            # Optional wild-type test-time training: adapt the model to each
-            # assay's WT (a few MLM rounds) before the same cosine readout.
-            # Returns None (and we fall through to baseline) when TTA is not
-            # applicable to this model — e.g. SentenceTransformer or no MLM head.
+            # Optional WT test-time training before the same cosine readout;
+            # None means TTA does not apply here, so fall through to baseline.
             if tta_cfg is not None:
                 tta_group_metrics = _run_zeroshot_tta(
                     cfg, model_obj, is_sbert, device, mutants, wts, groups, labels,
@@ -3654,11 +3365,8 @@ def evaluate_task(
                     corr, _ = spearmanr(y_g, s_g)
                     group_metrics.append(float(corr) if not np.isnan(corr) else 0.0)
                 else:
-                    # Clinical pathogenicity: pathogenic = deleterious = mutant
-                    # embedding FURTHER from WT = LOWER cosine. Negate so
-                    # pathogenic ranks high (same sign convention as the MLM
-                    # masked-marginal path). Raw cosine gives an inverted AUC
-                    # (~0.32 → 0.68 after the flip).
+                    # Pathogenic = further from WT = LOWER cosine; negate so
+                    # pathogenic ranks high. Raw cosine gives an inverted AUC.
                     try:
                         group_metrics.append(roc_auc_score(y_g, -s_g))
                     except ValueError:
@@ -3714,12 +3422,9 @@ def evaluate_task(
 
     mlb = extra_data if isinstance(extra_data, MultiLabelBinarizer) else None
 
-    # Content-addressed disk cache so the TRAIN embeddings extracted for the
-    # validation probe are reused by the test probe (a separate process) instead
-    # of re-extracted — the sequence path never persisted them (only the residue
-    # + embed_dataset paths did), so heavy tasks paid their train extraction
-    # twice. Safe: keyed on the exact seqs + embed config; ANY mismatch or cache
-    # error re-extracts (perf-only, never changes results). See seq_embed_cache.
+    # Content-addressed disk cache so the validation probe's TRAIN embeddings are
+    # reused by the test probe. Keyed on the exact seqs + embed config; any
+    # mismatch or cache error re-extracts (perf-only, never changes results).
     from seq_embed_cache import cached_embed_sequences
 
     _seq_cache_root = (
@@ -3785,7 +3490,6 @@ def evaluate_task(
             )
         return metrics, resolved_eval_split, eval_strategy
 
-    # --- Standard evaluation path ---
     if test_seqs is None or test_labels is None:
         return (
             {"Error": "Missing eval data for standard evaluation"},
@@ -3810,7 +3514,6 @@ def evaluate_task(
         test_labels, dtype=object if cfg.problem_type == "multilabel" else None
     )
 
-    # Apply L2 normalization if requested
     if l2_normalize_embeddings:
         norms_train = np.linalg.norm(X_train, axis=1, keepdims=True).clip(min=1e-12)
         X_train = X_train / norms_train
@@ -3857,20 +3560,14 @@ def evaluate_task(
     return results, resolved_eval_split, eval_strategy
 
 
-# =============================================================================
 # Result Tracking
-# =============================================================================
 
 
 class ResultTracker:
     """Track and display benchmark results.
 
-    Uses a stable filename per model (`bench_{model}.csv`) so that successive
-    runs with different tasks can be appended into the same file.  Each row
-    carries a `Date` column (YYYY-MM-DD).  When merging with an existing CSV:
-        - Duplicate (Task, Samples, Date, Probe, EvalMode, EvalSplit, EvalStrategy)
-            rows are overwritten by the new run.
-    - Rows from different days are preserved (history).
+    One stable file per model (`bench_{model}.csv`), appended across runs. On
+    merge, rows duplicated on the dedup key are overwritten; other days survive.
     """
 
     round_decimals = 5
@@ -3912,16 +3609,11 @@ class ResultTracker:
             "EvalSplit": eval_split,
             "EvalStrategy": eval_strategy,
             "EmbeddingNorm": embedding_norm,
-            # Which benchmark code produced this row. Two rows can agree on model,
-            # task, probe and split and still be different measurements if the
-            # code moved between them; Date cannot say that.
+            # Which benchmark code produced this row: two rows can match on model,
+            # task, probe and split and still be different measurements.
             "CodeVersion": code_version(),
-            # Pooling changes the stored VECTORS, so it changes the number -- but it
-            # lived only in PLM_BENCH_POOL and in the embed-cache namespace, never in
-            # the row. Measured 2026-08-27 on vanilla ESM-C: Solubility AUC reads
-            # 0.75334 under mean pooling and 0.80690 under cls, and nothing in the
-            # emitted CSV distinguished them, so a cross-run comparison silently mixed
-            # two protocols. A reader cannot interpret a metric without it.
+            # Pooling changes the stored VECTORS, so it changes the number; without
+            # it a cross-run comparison silently mixes two protocols.
             "Pooling": _pool_mode(),
         }
         if benchmark_seed is not None:
@@ -3971,9 +3663,7 @@ class ResultTracker:
             "EmbeddingNorm": "none",
             "BenchmarkSeed": "",
             "Samples": "Full",
-            # Rows written before Pooling existed were all produced under the default,
-            # so backfilling "mean" is a statement of fact, not a guess. It also keeps
-            # them from colliding with a future cls-pooled row in the dedup key.
+            # Rows predating the Pooling column all ran under the default.
             "Pooling": "mean",
         }
         for col, val in defaults.items():
@@ -3983,14 +3673,11 @@ class ResultTracker:
 
         safe_model_name = self.model_name.replace("/", "_").replace("\\", "_")
         filename = f"bench_{safe_model_name}.csv"
-        # Create the directory here rather than relying on each caller. Saving is
-        # the LAST thing a run does, so a missing output dir discards the whole
-        # run's compute at the final step -- an hour of contact_catjac scoring,
-        # in the case that prompted this.
+        # Create the dir here, not per caller: saving is the LAST thing a run does,
+        # so a missing output dir would discard the whole run's compute.
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         filepath = Path(output_dir) / filename
 
-        # Merge with existing results if the file already exists
         if filepath.exists():
             try:
                 old_df = pd.read_csv(filepath)
@@ -3998,7 +3685,6 @@ class ResultTracker:
                     if col not in old_df.columns:
                         old_df[col] = val
                     old_df[col] = old_df[col].fillna(val).astype(str)
-                # Concatenate old + new, then drop same-day duplicates (keep new)
                 merged = pd.concat([old_df, new_df], ignore_index=True)
                 dedup_cols = [
                     "Task",
@@ -4010,14 +3696,9 @@ class ResultTracker:
                     "EvalSplit",
                     "EvalStrategy",
                     "EmbeddingNorm",
-                    # A re-run under different code is a different measurement,
-                    # so it appends rather than overwriting the older row.
+                    # A re-run under different code, or a different pooling mode, is a
+                    # different measurement: append rather than silently OVERWRITE.
                     "CodeVersion",
-                    # Same reasoning: a different pooling mode is a different
-                    # measurement. Without this, a cls-pooled run on the same day
-                    # silently OVERWRITES the mean-pooled row for that task -- the
-                    # column alone would record the protocol while destroying the
-                    # value it was added to distinguish.
                     "Pooling",
                 ]
                 dedup_cols = [c for c in dedup_cols if c in merged.columns]
@@ -4049,16 +3730,13 @@ class ResultTracker:
         return filepath
 
 
-# =============================================================================
 # CLI & Main
-# =============================================================================
 
 
 def print_task_table() -> None:
     """Print every task with its type, metric, and which preset selects it."""
-    # Derived from the actual preset membership, not assumed. A few tasks
-    # (cafa5, go_mf) are in no preset at all and must say so -- claiming
-    # "default" would send people to --no-fast, which does not include them.
+    # Derived from actual preset membership: some tasks are in no preset at all
+    # and must say "none" rather than claim "default".
     groups = {
         k: (
             "very-fast" if k in VERY_FAST_TASKS
@@ -4091,7 +3769,6 @@ def parse_args():
         description="Evaluate protein language models on benchmark tasks"
     )
 
-    # Comparison mode
     parser.add_argument(
         "--compare",
         action="store_true",
@@ -4110,7 +3787,6 @@ def parse_args():
         help="Second model/directory/CSV file for comparison",
     )
 
-    # Evaluation mode (default)
     parser.add_argument(
         "--model_name",
         "-m",
@@ -4149,8 +3825,7 @@ def parse_args():
         nargs="+",
         default=None,
         choices=sorted(TASKS.keys()),
-        # metavar keeps argparse from printing all 43 task names twice in the
-        # usage line, which buried every other flag. --list_tasks shows them.
+        # metavar keeps argparse from printing every task name twice in the usage line.
         metavar="TASK",
         help="Tasks to run. Overrides the presets. With no --tasks, --fast is on "
         "by default; pass --no-fast for the full set. See --list_tasks.",
@@ -4343,7 +4018,6 @@ def parse_args():
         ),
     )
 
-    # --- WT test-time training (TTT/TTA), opt-in; ProteinGym zero-shot only ---
     parser.add_argument(
         "--tta",
         action="store_true",
@@ -4402,14 +4076,12 @@ def main():
         logger.info("Bootstrap CIs enabled: %d resamples per metric", BOOTSTRAP_N)
     CONTACT_TRAIN_PROTEINS = args.contact_train_proteins
 
-    # Several older copies of this suite still exist on disk, and they disagree
-    # about the task registry (ec_classification in particular). Record which one
-    # actually ran, so a results directory can never be traced to the wrong code.
+    # Older copies of this suite exist on disk with different task registries;
+    # record which one actually ran so results trace to the right code.
     logger.info(
         "Suite: %s (%d tasks)", Path(__file__).resolve(), len(TASKS)
     )
 
-    # Handle comparison mode
     if args.compare:
         if not args.compare_model1 or not args.compare_model2:
             raise ValueError("--compare requires --compare_model1 and --compare_model2")
@@ -4422,7 +4094,6 @@ def main():
         )
         display_comparison(comparison_df)
 
-        # Save the comparison
         safe_name1 = Path(args.compare_model1).name
         safe_name2 = Path(args.compare_model2).name
         output_path = (
@@ -4433,7 +4104,6 @@ def main():
         logger.info(f"Comparison saved to: {output_path}")
         return
 
-    # Handle evaluation mode (default)
     config = {
         "model": args.model_name,
         "probe_type": args.probe_type,
@@ -4460,23 +4130,19 @@ def main():
         "probe_embed_mode": args.probe_embed_mode,
     }
 
-    # Device selection
     device = config["device"] or ("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Device: {device}")
     logger.info(f"Model: {config['model']}")
 
-    # Performance tweaks
     if device == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        # SDPA best practices: allow all standard optimized backends explicitly
         torch.backends.cuda.enable_flash_sdp(True)
         torch.backends.cuda.enable_mem_efficient_sdp(True)
         torch.backends.cuda.enable_math_sdp(True)
 
-    # Model weight dtype follows --amp_dtype.
-    # Default fp32 is safer/reproducible; bf16 is opt-in for speed.
-    # Keeping weight dtype aligned with compute mode avoids mixed-dtype attention issues.
+    # Weight dtype follows --amp_dtype; aligning it with the compute mode avoids
+    # mixed-dtype attention issues.
     torch_dtype = None
     if (
         config.get("amp_dtype") == "bf16"
@@ -4498,7 +4164,6 @@ def main():
     else:
         logger.info("Attention backend: auto (FA2 if available, else SDPA)")
 
-    # Load model with torch_dtype and optional attention backend override.
     model_obj, is_sbert, device = load_model(
         config["model"],
         device,
@@ -4557,7 +4222,6 @@ def main():
     else:
         task_keys = list(DEFAULT_TASKS)
 
-    # --proteingym adds all 8 ProteinGym tasks (deduplicating)
     if config.get("proteingym"):
         existing = set(task_keys)
         for t in PROTEINGYM_TASKS:
@@ -4566,9 +4230,7 @@ def main():
 
     logger.info(f"Tasks to evaluate ({len(task_keys)}): {task_keys}")
 
-    # Sample cap: ONLY in --very-fast (scout) mode. Default/--fast and --no-fast
-    # run full data (no truncation); --very-fast caps sequences + residue-level
-    # token-classification tasks to stay within a few minutes for quick scouts.
+    # Sample cap ONLY in --very-fast (scout) mode; every other preset runs full data.
     if config.get("very_fast"):
         max_samples = config.get("max_samples")
         if max_samples is None or max_samples > FAST_MAX_SAMPLES:
@@ -4580,8 +4242,7 @@ def main():
             max_samples,
         )
 
-    # AMP setup: fp32 embeddings by default for reproducibility and numerical stability
-    # (model weights still use bf16 if available, but embeddings computed in full precision)
+    # fp32 embeddings by default for reproducibility, even when weights are bf16.
     amp_dtype = None
     if (
         config.get("amp_dtype") == "bf16"
@@ -4595,7 +4256,6 @@ def main():
             "Using float32 for embedding computations (default: maximum reproducibility)."
         )
 
-    # Embedding cache path (model-specific, or None to disable caching)
     embed_save_path = None
     if args.clear_cache:
         removed_dirs = _clear_model_cache_dirs(
@@ -4619,7 +4279,6 @@ def main():
     else:
         logger.info("Embedding cache disabled (use --cache_embeddings to enable).")
 
-    # Run evaluations
     tracker = ResultTracker(config["model"])
 
     tta_cfg = None
@@ -4671,12 +4330,9 @@ def main():
                 print(f"{'=' * 60}")
 
                 _raw_max_samples = config.get("max_samples")
-                # Token-classification tasks run residue-level logistic
-                # regression; cap sequences tighter than FAST_MAX_SAMPLES to
-                # stay within a few minutes on CPU (~400k residues at 2k seqs).
-                # Contact prediction is capped by --contact_train_proteins
-                # instead; it embeds every sampled protein and then expands each
-                # into O(L^2) pairs, so a sequence-count cap is the wrong knob.
+                # Residue-level tasks cap sequences tighter than FAST_MAX_SAMPLES.
+                # Contact prediction expands each protein into O(L^2) pairs, so it is
+                # capped by --contact_train_proteins instead.
                 _task_max_samples = (
                     FAST_TOKEN_CLASS_MAX_SAMPLES
                     if (
@@ -4751,21 +4407,17 @@ def main():
                     ),
                 )
 
-            # GPU memory cleanup between task evaluations
             if device == "cuda":
                 gc.collect()
                 torch.cuda.empty_cache()
 
-    # Display and save results
     tracker.display()
 
     os.makedirs(config.get("output_dir", "."), exist_ok=True)
     tracker.save(config.get("output_dir", "."))
 
 
-# =============================================================================
 # Execution
-# =============================================================================
 
 if __name__ == "__main__":
     main()

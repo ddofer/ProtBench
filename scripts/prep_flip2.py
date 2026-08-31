@@ -31,8 +31,6 @@ def main():
 
     print("Downloading LiteFold/FLIP2 (may take a moment)...")
     ds = load_dataset("LiteFold/FLIP2")
-    full = ds["train"]  # all 801k rows are in 'train' HF split
-    test_full = ds.get("test")  # 88k test rows if present
 
     # Combine train + test into one iterable for filtering
     all_rows_by_split = {}

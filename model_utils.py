@@ -47,31 +47,24 @@ ModelType = Literal[
     "standard",
 ]
 
-# Flash attention availability (cached at import time)
 try:
-    # Probe the symbol, not the spec: flash_attn_4 installs a `flash_attn/` tree
-    # holding only `cute`, so find_spec resolves it as a namespace package and
-    # reports True while `from flash_attn import flash_attn_varlen_func` still
-    # raises — sending fa2-varlen checkpoints down a load path that then fails.
+    # Probe the symbol, not the spec: flash_attn_4 ships a namespace `flash_attn/`
+    # tree, so find_spec reports True while the varlen import still raises.
     from flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func  # noqa: F401
 
     HAS_FLASH_ATTN = True
 except Exception:
     HAS_FLASH_ATTN = False
 
-# =============================================================================
 # Model type detection
-# =============================================================================
 
 
 def detect_model_type(model_name: str) -> ModelType:
     """Detect model family, treating a local ``config.json`` as authoritative."""
     name_lower = model_name.lower()
 
-    # A local checkpoint's config describes what its files ARE; its directory
-    # name describes only where somebody put them. Check config first so names
-    # such as ``amplifyc_PTM_*`` (a Proteva wrapper warm-started from AMPLIFY-C)
-    # do not get routed through the incompatible stock-AMPLIFY loader.
+    # Config beats directory name: ``amplifyc_PTM_*`` (Proteva warm-started from
+    # AMPLIFY-C) must not be routed through the stock-AMPLIFY loader.
     config_path = Path(model_name) / "config.json"
     if config_path.exists():
         try:
@@ -100,8 +93,6 @@ def detect_model_type(model_name: str) -> ModelType:
                 return "proteva"
             return "standard"
         except (AttributeError, OSError, TypeError, ValueError):
-            # A malformed/unreadable config cannot be authoritative; retain the
-            # historical name-based fallback so remote/cache-adjacent paths work.
             pass
 
     if "amplify" in name_lower:
@@ -110,40 +101,29 @@ def detect_model_type(model_name: str) -> ModelType:
     if "esmplusplus" in name_lower or "esm++" in name_lower or "esm-c" in name_lower:
         return "esmplusplus"
 
-    # Synthyra FastPLM ESM2 re-implementation (e.g. Synthyra/ESM2-150M)
-    # Matches: "Synthyra/ESM2-*", names containing "fastplm"
     if "synthyra/esm2" in name_lower or "fastplm" in name_lower:
         return "fastplm_esm2"
 
-    # Synthyra DPLM2 (e.g. Synthyra/DPLM2-150M, Synthyra/DPLM2-650M)
     if "dplm2" in name_lower:
         return "dplm2"
 
-    # Synthyra Profluent-E1 (e.g. Synthyra/Profluent-E1-150M)
     if ("profluent" in name_lower and "synthyra" in name_lower) or "e1-" in name_lower:
         return "profluent_e1"
 
-    # Proteva (this project's HF-native encoder; loaded fa2-varlen + BF16)
     if "proteva" in name_lower:
         return "proteva"
 
     return "standard"
 
 
-# =============================================================================
 # Transformers compatibility patch (ESMplusplus)
-# =============================================================================
 
 
 def apply_esmplusplus_compat_patch():
     """Patch transformers to handle ESMplusplus models lacking 'all_tied_weights_keys'.
 
-    Also ensures 'entrypoint_setup' (a side-effect config module shipped with the
-    ESMplusplus Hub repo) is importable from the HF modules cache.  transformers'
-    check_imports() treats any top-level import as a PyPI dependency; this module
-    doesn't exist on PyPI so we copy it into the modules cache on demand.
-
-    Safe to call multiple times — applies only once via a sentinel attribute.
+    Also puts Synthyra Hub snapshot dirs on sys.path so the non-PyPI
+    ``entrypoint_setup`` module they import resolves. Idempotent.
     """
     try:
         from transformers.modeling_utils import PreTrainedModel
@@ -163,10 +143,6 @@ def apply_esmplusplus_compat_patch():
     except ImportError:
         pass
 
-    # ── entrypoint_setup: make importable ─────────────────────────────────────
-    # Older ESMplusplus Hub code did `import entrypoint_setup` at the top level.
-    # We search ALL Synthyra snapshot dirs (not just ESMplusplus_small) and add
-    # them to sys.path so the import resolves.  Best-effort; no-op if not found.
     try:
         import sys
         from pathlib import Path as _P
@@ -194,14 +170,9 @@ def apply_esmplusplus_compat_patch():
 def apply_esm_rotary_autograd_patch() -> None:
     """Patch ESM RotaryEmbedding.forward to sanitize inference-mode caches.
 
-    During some SentenceTransformer cached-loss code paths, ESM rotary caches
-    (``_cos_cached``/``_sin_cached``) can be refreshed under inference mode,
-    then reused in a grad-enabled pass, triggering:
-    ``RuntimeError: Inference tensors cannot be saved for backward``.
-
-    This patch is idempotent and safe: in grad-enabled forwards, if a cached
-    rotary tensor is inference-mode, it is cloned back to a normal tensor before
-    continuing.
+    SentenceTransformer cached-loss paths can refresh ``_cos_cached``/``_sin_cached``
+    under inference mode and reuse them with grad enabled ("Inference tensors cannot
+    be saved for backward"); grad-enabled forwards clone them back. Idempotent.
     """
     try:
         from transformers.models.esm.modeling_esm import RotaryEmbedding
@@ -230,9 +201,7 @@ def apply_esm_rotary_autograd_patch() -> None:
     RotaryEmbedding._rotary_autograd_patch_applied = True
 
 
-# =============================================================================
 # Shared model-loading helpers
-# =============================================================================
 
 
 def from_pretrained_with_flash(model_cls, model_name: str, **extra_kwargs):
@@ -289,22 +258,14 @@ def from_pretrained_with_flash(model_cls, model_name: str, **extra_kwargs):
     elif env_attn and env_attn != "auto":
         selected_attn = env_attn
     elif HAS_FLASH_ATTN:
-        # Prefer FlashAttention-2 when available unless explicitly overridden.
         selected_attn = "flash_attention_2"
     else:
-        # Stable fallback that avoids custom eager-mode mask code paths.
         selected_attn = "sdpa"
 
     kwargs["attn_implementation"] = selected_attn
 
-    # Auto-fix torch.compile checkpoints. A model saved while torch.compile-wrapped
-    # has every state-dict key prefixed with '_orig_mod.', so from_pretrained matches
-    # NOTHING and SILENTLY returns a randomly-initialized model (garbage benchmarks).
-    # Strip the prefix in-place for LOCAL checkpoint dirs; idempotent no-op when the
-    # prefix is absent. Hub ids (chandar-lab/AMPLIFY_120M, Synthyra/ESMplusplus_small
-    # / ESM-C-600M, EvolutionaryScale/*, ...) are not local dirs -> skipped, so this
-    # is safe for every model type. Only rewrites single-file model.safetensors
-    # (sharded checkpoints are left untouched).
+    # torch.compile checkpoints carry '_orig_mod.' keys that from_pretrained matches
+    # NOTHING against and SILENTLY loads random weights; strip in place (local dirs only).
     if os.path.isdir(model_name):
         try:
             from plm.hf.checkpoint_utils import strip_orig_mod_prefix
@@ -335,12 +296,8 @@ def from_pretrained_with_flash(model_cls, model_name: str, **extra_kwargs):
 _WRAPPER_PREFIXES = (
     "student.",
     "teacher.",
-    # torch.compile prefix (subsumes the JEPA _orig_mod.student./.teacher. forms).
-    # MUST stay listed: from_pretrained matches nothing against it and silently
-    # returns a RANDOM model, which benchmarks as plausible garbage (AUC 0.500,
-    # F1 0.000) instead of crashing. The pre-load auto-strip is best-effort — a
-    # no-op on sharded checkpoints, and its failures are swallowed — so this gate
-    # is the real guarantee. Incident: v6-rtd re-bench 2026-07-21, ~3.5 GPU-h.
+    # MUST stay listed: from_pretrained silently returns a RANDOM model on this prefix
+    # (benchmarks as AUC 0.500, not a crash); the pre-load strip is best-effort only.
     "_orig_mod.",
 )
 
@@ -378,11 +335,7 @@ def _assert_no_wrapper_prefixes(model_path: str) -> None:
 
 
 def _validate_local_checkpoint_integrity(model_name: str, loaded_model) -> None:
-    """Validate local checkpoint key integrity and emit actionable warnings.
-
-    This catches common export mistakes (for example leftover ``student.`` keys)
-    before benchmark runs silently proceed with mismatched parameters.
-    """
+    """Raise on wrapper-prefixed keys or <50% key overlap in a local checkpoint."""
 
     model_path = Path(model_name)
     if not model_path.is_dir():
@@ -436,16 +389,10 @@ def _validate_local_checkpoint_integrity(model_name: str, loaded_model) -> None:
 
 
 def disable_esm2_token_dropout(model) -> bool:
-    """Disable ESM2 token_dropout to work around HuggingFace transformers bug.
+    """Disable ESM2 token_dropout to work around a transformers >=5 bug.
 
-    HuggingFace transformers >=5.x broke ESM2's token_dropout: the attention_mask
-    is no longer passed to the embeddings layer, causing incorrect scaling of
-    embeddings during both training and inference.  See:
-    https://github.com/huggingface/transformers/issues/44162
-
-    This sets config.token_dropout = False on the model (and any wrapped inner
-    model) so the broken code path is never entered.  Safe to call on any model;
-    returns True if a fix was applied.
+    The attention_mask no longer reaches the embeddings layer, so they are mis-scaled
+    (https://github.com/huggingface/transformers/issues/44162). Returns True if applied.
     """
     fixed = False
     if not needs_esm2_token_dropout_workaround(model):
@@ -513,11 +460,7 @@ def needs_esm2_token_dropout_workaround(model) -> bool:
 
 
 def uses_hf_esm_rotary_embeddings(model) -> bool:
-    """Return True when the model contains HF ESM RotaryEmbedding modules.
-
-    This is capability-based rather than family-name-based, so it also catches
-    wrappers/reimplementations that directly reuse HF's RotaryEmbedding class.
-    """
+    """Return True when the model contains HF ESM RotaryEmbedding modules (capability-based)."""
     for obj in _iter_model_wrappers(model):
         if not isinstance(obj, nn.Module):
             continue
@@ -549,9 +492,7 @@ def get_torch_compile_settings(model) -> tuple[dict[str, object], bool]:
     return compile_kwargs, uses_hf_esm_rotary_embeddings(model)
 
 
-# =============================================================================
 # AMPLIFY helpers
-# =============================================================================
 
 
 def fix_amplify_meta_tensors(model):
@@ -565,32 +506,17 @@ def fix_amplify_meta_tensors(model):
 
 
 def fix_proteva_rope_buffer(model):
-    """Recompute Proteva's ``encoder.rope_cs`` RoPE cache after ``from_pretrained``.
+    """Recompute Proteva's non-persistent ``encoder.rope_cs`` after ``from_pretrained``.
 
-    ``ProteinEncoder`` registers ``rope_cs`` (the precomputed cos/sin RoPE cache)
-    as a NON-persistent buffer (``persistent=False``), so it is intentionally
-    excluded from the safetensors checkpoint. HF's ``from_pretrained`` materializes
-    the model on a meta device and copies tensors from the state dict; because the
-    buffer is absent from the checkpoint, it is left as the meta/empty allocation
-    and is NEVER re-run through ``__init__``'s ``_precompute_rope``. The result is a
-    garbage ``rope_cs`` (observed: all-zeros, or non-deterministic memory junk that
-    differs run-to-run) — i.e. RoPE is silently DISABLED for the benched model.
-
-    This is the exact analogue of the AMPLIFY ``freqs_cis`` meta-tensor problem that
-    :func:`fix_amplify_meta_tensors` repairs. Without this fix, benched Proteva
-    embeddings carry no positional information and the linear-probe scores sit a
-    constant ~0.03–0.32 below the same AMPLIFY weights benched natively.
-
-    Recomputes the buffer from the encoder config (matching ``ProteinEncoder.__init__``)
-    and writes it back on the buffer's existing device/dtype. No-op for non-Proteva
-    models or when the buffer is already valid.
+    The buffer is absent from the checkpoint, so HF leaves the meta allocation as
+    garbage and RoPE is silently DISABLED (probe scores ~0.03-0.32 below native
+    AMPLIFY). Analogue of :func:`fix_amplify_meta_tensors`. No-op when valid.
     """
     enc = getattr(model, "encoder", None)
     if enc is None or not hasattr(enc, "rope_cs"):
         return
     buf = enc.rope_cs
-    # Reference cos at position 1, pair 0 must be cos(1 * inv_freq[0]) = cos(1) ≈ 0.5403.
-    # A meta/zero/garbage buffer fails this; a correct buffer always has cos[0]==1.0.
+    # A valid cache has cos==1 / sin==0 at position 0; meta/zero/garbage fails this.
     pos0_ok = bool(torch.allclose(buf[0, :, 0].float(), torch.ones_like(buf[0, :, 0].float()), atol=1e-3))
     pos0_sin_ok = bool(torch.allclose(buf[0, :, 1].float(), torch.zeros_like(buf[0, :, 1].float()), atol=1e-3))
     if pos0_ok and pos0_sin_ok and not bool(torch.isnan(buf).any()):
@@ -625,17 +551,9 @@ _AMPLIFY_PATCHED_MODULES: set[str] = set()
 def patch_amplify_attention_fallback(model) -> None:
     """Patch AMPLIFY remote-code xformers call to fall back to PyTorch SDPA.
 
-    AMPLIFY imports ``memory_efficient_attention`` from xformers at module-import
-    time and calls it unconditionally.  When xformers is present but its CUDA
-    kernels are not compatible with the running PyTorch/CUDA build the forward
-    pass raises ``NotImplementedError``.  This monkey-patches the module-level
-    symbol with a wrapper that tries xformers first and silently falls back to
-    ``F.scaled_dot_product_attention``.
-
-    Set ``PROTJEPA_AMPLIFY_FORCE_SDPA=1`` to skip xformers entirely.
-
-    Safe to call multiple times – subsequent calls on already-patched modules
-    are no-ops.
+    xformers kernels incompatible with the running torch/CUDA build raise
+    ``NotImplementedError`` in forward. ``PROTJEPA_AMPLIFY_FORCE_SDPA=1`` skips
+    xformers entirely. Idempotent.
     """
     module_name = model.__class__.__module__
     if module_name in _AMPLIFY_PATCHED_MODULES:
@@ -712,10 +630,8 @@ def _prepare_amplify_inputs(input_ids, attention_mask, device=None, dtype=None):
         )
         attention_mask, _ = _pad_to_multiple(attention_mask, 8, value=0)
 
-    # Additive mask: 0.0 for real tokens, -inf for padding
     additive_mask = torch.where(attention_mask.bool(), 0.0, float("-inf"))
 
-    # Match compute dtype (bf16 under autocast, or model param dtype)
     if torch.is_autocast_enabled():
         additive_mask = additive_mask.to(torch.get_autocast_dtype("cuda"))
     elif dtype is not None:
@@ -726,20 +642,14 @@ def _prepare_amplify_inputs(input_ids, attention_mask, device=None, dtype=None):
     return input_ids, additive_mask, orig_len, pad_len
 
 
-# =============================================================================
 # Out-of-vocabulary residue fallback
-# =============================================================================
 
 
 class _FallbackVocab(dict):
     """Vocabulary dict that returns a fallback id for any unknown token.
 
-    Defined at module level, with ``__reduce__``, so it survives pickling into
-    spawned dataloader workers.
-
-    ``__missing__`` fires only on ``[]`` lookup, so ``in``, ``len()`` and
-    ``get_vocab()`` still report the true vocabulary -- nothing downstream sees a
-    larger vocab than the embedding matrix has rows.
+    Module-level with ``__reduce__`` so it pickles into dataloader workers. ``__missing__``
+    fires only on ``[]``, so ``in``/``len()``/``get_vocab()`` still report the true vocab.
     """
 
     def __init__(self, mapping, fallback_id):
@@ -756,22 +666,9 @@ class _FallbackVocab(dict):
 def patch_unknown_residue_tokens(tokenizer):
     """Map any token missing from the vocabulary onto 'X' instead of raising.
 
-    FastPLM's ``_convert_token_to_id`` raises ``KeyError`` for an out-of-vocabulary
-    token rather than falling back to ``unk_token``. Stock ``EsmTokenizer`` does
-    not -- so this only bites models whose ``model.tokenizer`` is FastPLM's, which
-    is exactly the tokenizer the embedding path uses. Probing ``AutoTokenizer``
-    instead will report that the problem does not exist; it does.
-
-    Offenders seen in practice: 'J' (IUPAC ambiguity code, the one letter absent
-    from the ESM2 vocabulary), '|' in Peptide-HLA, '#' in Thermostability (FLIP),
-    and a NUL byte in CATH lookup69k domain 9pcyA00 that errored the whole
-    cath_eat task. Enumerating A-Z covers only the residue family, so the fallback
-    is installed for every unknown key instead.
-
-    'X' rather than ``<unk>`` deliberately: ESM2 was pretrained with 'X' as the
-    unknown-residue symbol and has essentially never seen ``<unk>`` inside a
-    sequence, so 'X' keeps the input in the pretraining distribution.
-
+    FastPLM's ``_convert_token_to_id`` raises ``KeyError`` on OOV tokens ('J', '|',
+    '#', a NUL byte -- all seen in real tasks); probing ``AutoTokenizer`` will not
+    show it. 'X' rather than ``<unk>`` keeps input in ESM2's pretraining distribution.
     Idempotent.
     """
     table = getattr(tokenizer, "_token_to_id", None)
@@ -786,18 +683,13 @@ def patch_unknown_residue_tokens(tokenizer):
     )
 
 
-# =============================================================================
 # ESMplusplus SDPA fix
-# =============================================================================
 
 
 def force_sdpa_backend(model):
     """Ensure SDPA attention backend on ESMplusplus / Synthyra models.
 
-    ESM++ now defaults to SDPA (model card updated Feb 2026), so this is largely
-    a safety net in case the Hub code changes again or an older cached version is
-    loaded. Safe to call on any model — no-op when transformer.attn_backend is
-    absent.
+    Safety net against Hub code changes; no-op when ``transformer.attn_backend`` is absent.
     """
     transformer = getattr(model, "transformer", None)
     if transformer is None:
@@ -814,9 +706,7 @@ def force_sdpa_backend(model):
     logger.info("   Forced SDPA attention backend (flex_attention disabled)")
 
 
-# =============================================================================
 # Model wrappers
-# =============================================================================
 
 
 class _PLMWrapperBase(nn.Module):
@@ -858,12 +748,7 @@ class _PLMWrapperBase(nn.Module):
 
 
 class ESMplusplusWrapper(_PLMWrapperBase):
-    """ESMplusplus thin wrapper: extracts last_hidden_state for SentenceTransformer.
-
-    ESM++ (Feb 2026) defaults to SDPA and exposes output.last_hidden_state from
-    standard forward(). We simply use that path — no _embed() hack needed.
-    force_sdpa_backend() is still called at load time as a safety net.
-    """
+    """ESMplusplus thin wrapper: extracts last_hidden_state for SentenceTransformer."""
 
     def _prepare_inputs(self, input_ids, attention_mask):
         return {
@@ -875,7 +760,6 @@ class ESMplusplusWrapper(_PLMWrapperBase):
     def forward(self, input_ids=None, attention_mask=None, **kwargs):
         model_kwargs, orig_len = self._prepare_inputs(input_ids, attention_mask)
         outputs = self.model(**model_kwargs)
-        # last_hidden_state is available directly; fall back to hidden_states tuple
         if (
             hasattr(outputs, "last_hidden_state")
             and outputs.last_hidden_state is not None
@@ -887,12 +771,7 @@ class ESMplusplusWrapper(_PLMWrapperBase):
 
 
 class FastPLMESM2Wrapper(ESMplusplusWrapper):
-    """Wrapper for Synthyra's FastPLM ESM2 re-implementation.
-
-    FastPLM ESM2 (Synthyra/ESM2-*) is a bug-fixed ESM2 that correctly handles
-    attention_mask in embeddings (unlike HuggingFace transformers >=5.x).
-    Identical to ESMplusplusWrapper but raises on missing hidden states.
-    """
+    """Wrapper for Synthyra's FastPLM ESM2; raises on missing hidden states."""
 
     def forward(self, input_ids=None, attention_mask=None, **kwargs):
         model_kwargs, orig_len = self._prepare_inputs(input_ids, attention_mask)
@@ -910,12 +789,7 @@ class FastPLMESM2Wrapper(ESMplusplusWrapper):
 
 
 class DPLM2Wrapper(ESMplusplusWrapper):
-    """Wrapper for Synthyra's DPLM2 (protein diffusion language model).
-
-    DPLM2 (Synthyra/DPLM2-150M, Synthyra/DPLM2-650M) returns last_hidden_state
-    from standard forward(). Uses AutoModel (not AutoModelForMaskedLM) and has
-    model.tokenizer for standard HF tokenization.
-    """
+    """Wrapper for Synthyra's DPLM2 (AutoModel; has ``model.tokenizer``)."""
 
     def forward(self, input_ids=None, attention_mask=None, **kwargs):
         model_kwargs, orig_len = self._prepare_inputs(input_ids, attention_mask)
@@ -933,12 +807,7 @@ class DPLM2Wrapper(ESMplusplusWrapper):
 
 
 class ProfluentE1Wrapper(ESMplusplusWrapper):
-    """Wrapper for Synthyra's Profluent-E1 (retrieval-augmented protein encoder).
-
-    Profluent-E1 (Synthyra/Profluent-E1-150M, -300M, -600M) returns last_hidden_state
-    from standard forward(). Uses AutoModelForMaskedLM and may have model.tokenizer
-    or model.prep_tokens for tokenization.
-    """
+    """Wrapper for Synthyra's Profluent-E1 (AutoModelForMaskedLM)."""
 
     def forward(self, input_ids=None, attention_mask=None, **kwargs):
         model_kwargs, orig_len = self._prepare_inputs(input_ids, attention_mask)
@@ -970,7 +839,6 @@ class AMPLIFYWrapper(_PLMWrapperBase):
         model_kwargs, orig_len = self._prepare_inputs(input_ids, attention_mask)
         outputs = self.model(**model_kwargs)
         embedding = outputs.hidden_states[-1][:, :orig_len, :]
-        # Apply final layer norm — AMPLIFY excludes it from hidden_states
         if hasattr(self.model, "layer_norm_2"):
             embedding = self.model.layer_norm_2(embedding)
         return (embedding,)

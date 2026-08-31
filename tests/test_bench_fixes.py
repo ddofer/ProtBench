@@ -21,7 +21,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
 
 _BENCH = Path(__file__).resolve().parent.parent
 if str(_BENCH) not in sys.path:
@@ -361,7 +360,6 @@ def test_probe_fit_seconds_is_a_total_not_a_per_fold_mean():
 def test_classification_metrics_bootstrap_is_capped_on_huge_arrays():
     """Residue tasks resample 150k-600k rows; an uncapped bootstrap costs minutes
     per task against a ~60s probe fit."""
-    import numpy as np
 
     from protein_benchmark_suite import bootstrap_draws_for
 

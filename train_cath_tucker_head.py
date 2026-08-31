@@ -53,7 +53,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cath_levels import (  # noqa: E402
     EXPECTED_ANSWERABLE,
     LEVELS,
-    bootstrap_ci,
     nearest_neighbour,
     score_levels,
 )
@@ -283,7 +282,6 @@ def selfcheck() -> int:
     # Negative at cath_a must share cath_c (parent) but differ at cath_a.
     # Row 0 (c=1,a=1.1): valid cath_a negatives are rows 2,3 (c=1,a=1.2). Rows
     # 4-7 (c=2) must NEVER be selected as the cath_a negative for row 0.
-    dist = torch.cdist(z, z, p=2)
     lab_a = labels["cath_a"]
     lab_c = labels["cath_c"]
     same_a = lab_a[:, None] == lab_a[None, :]
@@ -294,7 +292,6 @@ def selfcheck() -> int:
 
     # A level with zero valid triplets (all identical labels) must be skipped,
     # not crash -- cath_t/cath_h above are constant, so only c/a contribute.
-    only_c_a_labels = {k: v for k, v in labels.items() if k in ("cath_c", "cath_a")}
     import cath_levels
     old_levels = cath_levels.LEVELS
     try:

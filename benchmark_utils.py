@@ -1,20 +1,7 @@
 """Shared benchmark utilities for result processing and comparison.
 
-This module centralizes common constants, data-prep functions, and metric
-utilities used across:
-  - benchmark_comparison.py
-  - benchmark_comparison.py
-  - collect_bench_results.py
-  - protein_benchmark_suite.py
-
-Usage:
-    from benchmark_utils import (
-        METRIC_PRIORITY,
-        RESULT_IDENTITY_COLUMNS,
-        prepare_result_df,
-        relative_delta_pct,
-        find_result_file,
-    )
+Constants, result-DataFrame prep, and metric helpers used by
+benchmark_comparison.py, collect_bench_results.py and protein_benchmark_suite.py.
 """
 
 from __future__ import annotations
@@ -30,9 +17,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# ============================================================================
 # Constants
-# ============================================================================
 
 DEFAULT_RESULT_PROBE = "linear"
 DEFAULT_RESULT_EVAL_MODE = "standard"
@@ -49,9 +34,8 @@ RESULT_IDENTITY_COLUMNS = (
     "CodeVersion",
 )
 
-# Rows written before the stamp existed. They are NOT interchangeable with
-# stamped rows: the residue CV fallback, for one, moved from residue-level KFold
-# (which leaked residues of a protein across folds) to protein-level GroupKFold.
+# Rows written before the stamp existed; NOT interchangeable with stamped rows
+# (e.g. the residue CV fallback moved from residue-level KFold to GroupKFold).
 UNKNOWN_CODE_VERSION = "unknown"
 
 # Ordered metric priority for selection: first valid metric in both runs is used.
@@ -67,14 +51,12 @@ METRIC_PRIORITY = [
     "Recall@10",
     "Recall@1",
     "Recall@30",
-    # Contact prediction. Long-range precision-at-L/5 is the conventional
-    # headline; without it a contact row matches nothing here and --compare
-    # silently reports no metric for the task.
+    # Contact-prediction headline; without it a contact row matches nothing and
+    # --compare silently reports no metric for the task.
     "P@L/5_long",
     "F1_Micro",
 ]
 
-# Task group colors for visualization.
 TASK_GROUP_COLORS = {
     "Binary": "#1f77b4",
     "Multiclass": "#ff7f0e",
@@ -89,21 +71,15 @@ TASK_GROUP_COLORS = {
 EPSILON = 1e-12
 
 
-# ============================================================================
 # File Resolution
-# ============================================================================
 
 
 @lru_cache(maxsize=1)
 def code_version() -> str:
     """Short git description of the benchmark code that produced a result.
 
-    Two rows can share model, task, probe and split and still be different
-    measurements, because the code between them changed -- the residue CV
-    fallback moved from residue-level KFold to protein-level GroupKFold, and the
-    indel RED arm had its sign corrected. ``Date`` cannot express that; this can.
-    ``-dirty`` marks uncommitted changes. Falls back to ``unknown`` outside a git
-    checkout, which is also what old, unstamped rows read as.
+    Same model/task/probe/split can still differ by code; ``Date`` cannot express
+    that. ``-dirty`` marks uncommitted changes; ``unknown`` outside a git checkout.
     """
     import subprocess
 
@@ -142,13 +118,11 @@ def find_result_file(model_or_dir: str, output_dir: str = "results/benchmarks") 
     """
     path = Path(model_or_dir)
 
-    # If it's a direct CSV file, return it
     if path.suffix == ".csv":
         if path.exists():
             return path
         raise FileNotFoundError(f"Result CSV not found: {path}")
 
-    # If it's a directory, find the most recent CSV in it
     if path.is_dir():
         csv_files = sorted(
             path.glob("bench_*.csv"), key=lambda p: p.stat().st_mtime, reverse=True
@@ -160,7 +134,6 @@ def find_result_file(model_or_dir: str, output_dir: str = "results/benchmarks") 
             f"No benchmark CSV files found in {path}. Expected pattern: bench_*.csv"
         )
 
-    # If it's a model name, search in output_dir
     output_path = Path(output_dir)
     if not output_path.exists():
         raise FileNotFoundError(
@@ -168,10 +141,8 @@ def find_result_file(model_or_dir: str, output_dir: str = "results/benchmarks") 
             f"{output_path}"
         )
 
-    # Create a safe version of the model name for matching
     safe_model = model_or_dir.replace("/", "_").replace("\\", "_")
 
-    # Find CSV files matching this model (stable and legacy formats)
     exact_file = output_path / f"bench_{safe_model}.csv"
     legacy_files = list(output_path.glob(f"bench_{safe_model}_*.csv"))
 
@@ -193,9 +164,7 @@ def find_result_file(model_or_dir: str, output_dir: str = "results/benchmarks") 
     )
 
 
-# ============================================================================
 # Result DataFrame Preparation
-# ============================================================================
 
 
 def prepare_result_df(
@@ -205,9 +174,6 @@ def prepare_result_df(
     extra_dedup_columns: list[str] | None = None,
 ) -> pd.DataFrame:
     """Normalize result rows and keep the latest row per result identity.
-
-    Handles missing columns, converts types, deduplicates by identity columns,
-    and keeps the last (most recent) row for each unique combination.
 
     Args:
         df: Raw benchmark dataframe
@@ -231,7 +197,6 @@ def prepare_result_df(
             columns={prepared.index.name or "index": "Task"}
         )
 
-    # Standard defaults
     defaults = {
         "Samples": "Full",
         "Probe": DEFAULT_RESULT_PROBE,
@@ -242,21 +207,17 @@ def prepare_result_df(
         "CodeVersion": UNKNOWN_CODE_VERSION,
     }
 
-    # Merge any extra defaults provided
     if extra_defaults:
         defaults.update(extra_defaults)
 
-    # Apply defaults and handle legacy column names
     for column, default_value in defaults.items():
         if column not in prepared.columns:
             prepared[column] = default_value
         prepared[column] = prepared[column].fillna(default_value)
 
-    # Handle legacy BenchmarkSeed -> benchmark_seed
     if "benchmark_seed" not in prepared.columns and "BenchmarkSeed" in prepared.columns:
         prepared["benchmark_seed"] = prepared["BenchmarkSeed"]
 
-    # Type conversions
     prepared["Samples"] = prepared["Samples"].astype(str)
     prepared["Probe"] = prepared["Probe"].astype(str)
     prepared["EvalMode"] = prepared["EvalMode"].astype(str)
@@ -264,12 +225,10 @@ def prepare_result_df(
     prepared["EvalStrategy"] = prepared["EvalStrategy"].astype(str)
     prepared["Date"] = prepared["Date"].astype(str)
 
-    # Date-based sorting
     prepared["_date_sort"] = pd.to_datetime(prepared["Date"], errors="coerce")
     prepared["_row_order"] = np.arange(len(prepared))
     prepared = prepared.sort_values(["_date_sort", "_row_order"])
 
-    # Deduplication: keep last (most recent) row for each identity
     dedup_cols = list(RESULT_IDENTITY_COLUMNS)
     if extra_dedup_columns:
         dedup_cols.extend(extra_dedup_columns)
@@ -278,9 +237,7 @@ def prepare_result_df(
     return prepared.drop(columns=["_date_sort", "_row_order"])
 
 
-# ============================================================================
 # Metric Selection and Conversion
-# ============================================================================
 
 
 def get_best_metric_for_task(row: pd.Series) -> Tuple[Optional[str], float]:
@@ -293,7 +250,6 @@ def get_best_metric_for_task(row: pd.Series) -> Tuple[Optional[str], float]:
     for metric in METRIC_PRIORITY:
         if metric in row.index and pd.notna(row[metric]):
             val = row[metric]
-            # For MSE, lower is better, so return negative value for comparison
             if metric == "MSE":
                 return (metric, -val)
             return (metric, val)
@@ -317,13 +273,9 @@ def comparison_value(metric: str, value: float) -> float:
 def relative_delta_pct(
     metric: str, baseline_value: float, experiment_value: float
 ) -> float:
-    """Compute relative delta percentage where positive means better than baseline.
+    """Relative delta in percent; positive means better than baseline.
 
-    For higher-is-better metrics (AUC, F1, etc.):
-        delta_pct = 100 * (experiment - baseline) / abs(baseline)
-
-    For lower-is-better metrics (MSE):
-        delta_pct = 100 * (baseline - experiment) / abs(baseline)
+    Higher-is-better: ``100 * (exp - base) / |base|``; MSE: ``100 * (base - exp) / |base|``.
 
     Args:
         metric: Metric name
@@ -340,9 +292,7 @@ def relative_delta_pct(
 
 
 def first_common_metric(cols_a: Iterable[str], cols_b: Iterable[str]) -> Optional[str]:
-    """Find the first comparable metric present in both sets of columns.
-
-    Uses METRIC_PRIORITY to determine which metric to select.
+    """Find the first METRIC_PRIORITY metric present in both sets of columns.
 
     Args:
         cols_a: Column names from first dataframe/series
@@ -383,9 +333,7 @@ def format_result_key(result_key: tuple[str, str, str, str, str, str]) -> str:
     return " | ".join(parts)
 
 
-# ============================================================================
 # Task Grouping
-# ============================================================================
 
 
 def task_group_map(include_non_standard: bool = False) -> dict[str, str]:

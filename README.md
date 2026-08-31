@@ -1,7 +1,7 @@
 # ProtBench
 
 Benchmark protein models — language models, alignment search, or a k-mer count —
-on 60 tasks, scored identically and written to one CSV.
+on 62 tasks, scored identically and written to one CSV.
 
 The point is comparability. A protein language model, a LoRA fine-tune, an
 MMseqs2 search and a bag of amino-acid triplets all go through the same splits, the
@@ -123,7 +123,7 @@ each task, skips tasks this model already has results for, and writes a
 readable summary:
 
 ```bash
-python scripts/run_bench.py -m Synthyra/ESMplusplus_small              # --preset fast (17 tasks)
+python scripts/run_bench.py -m Synthyra/ESMplusplus_small              # --preset fast (21 tasks)
 python scripts/run_bench.py -m /path/to/checkpoint --preset no-fast    # everything
 python scripts/run_bench.py -m MODEL --tasks solubility ss3            # explicit tasks
 python scripts/run_bench.py -m MODEL --proteingym                      # probes + ProteinGym zero-shot
@@ -175,9 +175,9 @@ hyperparameter search to be fair.
 python protein_benchmark_suite.py --list_tasks
 ```
 
-Prints all 60 with their type, metric, and which preset includes them.
+Prints all 62 with their type, metric, and which preset includes them.
 
-**Run the broad set.** `--no-fast` gives you 37 tasks:
+**Run the broad set.** `--no-fast` gives you 36 tasks:
 
 ```bash
 python protein_benchmark_suite.py -m facebook/esm2_t33_650M_UR50D \
@@ -189,13 +189,13 @@ The presets are not nested, which surprises people:
 | Preset | Tasks | Notes |
 | --- | --- | --- |
 | `--very-fast` | 8 | Curated scout subset. |
-| `--fast` *(default)* | 17 | Includes `scope40_retrieval` (family); `--no-fast` adds `scope40_retrieval_superfamily` and `_fold`. |
-| `--no-fast` | 32 | The broad set — but **not** a superset of `--fast`. Drops `scope40_retrieval`. |
+| `--fast` *(default)* | 21 | Includes the three `scope40_retrieval*` tasks. |
+| `--no-fast` | 36 | The broad set — but **not** a superset of `--fast`. Drops the three `scope40_retrieval*` tasks. |
 | `--proteingym` | +8 | Large and slow, so opt-in. |
 
 `cafa5`, `go_mf`, `go_bp` and `go_cc` are in **no** preset — they have thousands
-of labels and would dominate a sweep. Request them by name with `--tasks`. So is
-`scope40_retrieval` if you want it alongside `--no-fast`.
+of labels and would dominate a sweep; neither is `temperature_stability`. Request
+them by name with `--tasks`, likewise `scope40_retrieval*` alongside `--no-fast`.
 
 The ten held-out secondary-structure sets (`ss3_casp12` … `ss8_ts115`) are also
 opt-in. They train on the same data as `ss3`/`ss8` and differ only in which
@@ -217,8 +217,8 @@ for MODEL in facebook/esm2_t6_8M_UR50D facebook/esm2_t33_650M_UR50D; do
 done
 ```
 
-`--fast` is the default (18 tasks, capped at 100k samples each). `--very-fast`
-is a curated 8-task subset for a quick signal.
+`--fast` is the default (21 tasks, full data). `--very-fast` is a curated
+8-task subset with a sample cap, for a quick signal.
 
 **Compare two models.** Use the built-in comparison — it picks each task's
 main metric for you and prints the winner and the gap:
@@ -294,11 +294,14 @@ Rows written before the stamp existed read `unknown`. **They are not
 interchangeable with stamped rows** — treat a comparison that mixes them as
 suspect unless the affected paths above are irrelevant to it.
 
+`e4dd5f1-dirty` and `0ec12b1` are the same code (`0ec12b1` is that working
+tree committed unchanged), so rows carrying either stamp compare directly.
+
 ## Gotchas
 
 These are the ones that produce a wrong number rather than an error.
 
-**`--fast` is on by default.** A bare run does 18 tasks, not all 60. See the
+**`--fast` is on by default.** A bare run does 21 tasks, not all 62. See the
 preset table above — the presets are not nested.
 
 **Result CSVs accumulate.** Re-running into the same `--output_dir` merges into
@@ -558,14 +561,14 @@ Python ≥ 3.10. MMseqs2 is a system binary and cannot be installed from here �
 ## Tests
 
 ```bash
-pytest -m "not slow"    # 254 tests, no network
+pytest -m "not slow"    # 394 tests, no network
 pytest                  # adds tests that download models
 ```
 
 Three further tests cover the fine-tuning `TrainingArguments` builder and need
 `accelerate`, which arrives with `uv sync --extra finetune`. Without it they fail
-on import rather than skip, so a bare sync reports 254 passed and 3 failed — not
-a regression.
+on import rather than skip, so a bare sync reports 3 failures there — not a
+regression.
 
 ## Reproducibility
 

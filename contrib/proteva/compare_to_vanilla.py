@@ -28,7 +28,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from benchmark_tasks import (  # noqa: E402  -- canonical metric direction
-    LOWER_IS_BETTER_METRICS,
     metric_greater_is_better,
     signed_delta,
 )

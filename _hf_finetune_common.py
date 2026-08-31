@@ -19,9 +19,8 @@ from transformers import AutoConfig, AutoTokenizer, TrainingArguments
 
 logger = logging.getLogger(__name__)
 
-# Proteva stage-2 checkpoints are saved WITHOUT tokenizer files (they reuse the
-# AMPLIFY vocab). When AutoTokenizer can't build one from the checkpoint, fall
-# back to AMPLIFY's tokenizer — what the probe suite already does for them.
+# Proteva stage-2 checkpoints ship no tokenizer files (they reuse the AMPLIFY
+# vocab); fall back to AMPLIFY's tokenizer when AutoTokenizer can't build one.
 AMPLIFY_TOKENIZER = "chandar-lab/AMPLIFY_120M"
 
 
@@ -43,24 +42,13 @@ def load_encoder_for_head(
 ):
     """Load ``ckpt`` into the HF auto-model ``head_cls``.
 
-    Handles three model families:
-
-    * **Proteva** (``model_type == "proteva"``): import ``plm.hf`` to register
-      ``ProtevaForSequenceClassification`` / ``ProtevaForTokenClassification``
-      with the Auto factories, then dispatch through them. The head's own
-      ``from_pretrained`` forces ``flash_attn_mode="off"`` (dense SDPA, honors
-      the padded ``attention_mask``) and repairs the non-persistent RoPE cache —
-      the validated equivalent of the bench loader. ``trust_remote_code`` is
-      irrelevant (types are locally registered), but we keep it harmless.
-    * **AMPLIFY**: set ``config.model_type == "AMPLIFY"`` (some repos omit it;
-      the sibling suite's AMPLIFY detection depends on it) + remote code.
-    * Everything else (ESM, …): standard HF dispatch.
+    Proteva (``model_type == "proteva"``): ``plm.hf`` registers the Proteva heads
+    with the Auto factories; the head's ``from_pretrained`` forces dense SDPA and
+    repairs the RoPE cache. AMPLIFY: force ``config.model_type == "AMPLIFY"`` (some
+    repos omit it). Everything else: standard HF dispatch.
     """
-    # Register ProtevaConfig + the two discriminative heads on the Auto factories
-    # BEFORE the AutoConfig lookup — otherwise ``AutoConfig.from_pretrained`` on a
-    # ``model_type=="proteva"`` checkpoint raises (the type is unknown until
-    # ``plm.hf`` is imported). Idempotent: the registration swallows duplicate
-    # errors. Best-effort so non-Proteva environments (no plm package) still work.
+    # Must import plm.hf BEFORE AutoConfig: a model_type=="proteva" checkpoint is
+    # unknown until it registers. Best-effort so non-Proteva envs still work.
     try:
         import plm.hf  # noqa: F401
     except Exception:
@@ -75,13 +63,11 @@ def load_encoder_for_head(
             config.id2label = id2label
         if label2id is not None:
             config.label2id = label2id
-        # ProtevaConfig has no problem_type in its __init__ signature; the head
-        # reads it via getattr, so set it as a plain attribute when supplied.
+        # ProtevaConfig has no problem_type kwarg; the head reads it via getattr.
         problem_type = kwargs.pop("problem_type", None)
         if problem_type is not None:
             config.problem_type = problem_type
-        # Load fp32 (the RoPE cache must be computed in fp32, NOT bf16 -> NaN);
-        # HF Trainer casts to bf16 for the train/eval forward when bf16=True.
+        # Load fp32: a RoPE cache computed in bf16 goes NaN; Trainer casts later.
         return head_cls.from_pretrained(
             ckpt,
             config=config,
@@ -98,8 +84,7 @@ def load_encoder_for_head(
         config.id2label = id2label
     if label2id is not None:
         config.label2id = label2id
-    # ``problem_type`` is a config attribute, not a model __init__ kwarg; set it
-    # on the config object directly so it isn't forwarded to the model constructor.
+    # ``problem_type`` is a config attribute, not a model __init__ kwarg.
     problem_type = kwargs.pop("problem_type", None)
     if problem_type is not None:
         config.problem_type = problem_type
@@ -112,38 +97,21 @@ def load_encoder_for_head(
     )
 
 
-# Per-model-family LoRA target module names (the body's attention + FFN
-# Linears). Resolved by ``config.model_type``. NOT "all-linear" — that would
-# also wrap the embedding, the MLM decoder, and the aux heads, which we want
-# left frozen (we measure the BODY's adaptability; the classifier head trains
-# separately via ``modules_to_save``).
-#
-# Proteva — ALL body Linears (QLoRA best practice: adapt every linear projection,
-# not just attention) PLUS the value embeddings. Verified by named_modules() on
-# the checkpoint: 24× each of wq/wk/wv/wo + attn_gate (attention, incl. the
-# --head-gate Linear) and w12 (packed gate+value) / w3 (down) (SwiGLU FFN), plus
-# ve_first/ve_last (the value-embedding nn.Embeddings — PEFT wraps these with
-# LoRA Embedding adapters). The MLM ``decoder`` and pretraining aux heads
-# (di3_head/cons_head/…) are deliberately NOT listed — the downstream classifier
-# trains separately via ``modules_to_save``.
+# Per-family LoRA targets (body attention + FFN Linears). NOT "all-linear": that
+# would also wrap the embedding, MLM decoder and aux heads, which must stay frozen.
+# Proteva: every body Linear + the ve_first/ve_last value embeddings.
 PROTEVA_LORA_TARGETS = ["wq", "wk", "wv", "wo", "attn_gate", "w12", "w3",
                         "ve_first", "ve_last"]
-# AMPLIFY (chandar-lab/AMPLIFY_120M remote code): SEPARATE attention projections
-# ``q``/``k``/``v``/``wo`` (NOT fused ``Wqkv``) + SwiGLU FFN ``w12``/``w3``.
-# Verified by named_modules() on the 120M checkpoint: 24× each of q/k/v/wo/w12/w3.
-# (``Wqkv``/``fc1``/``fc2`` are other AMPLIFY revs and don't exist here → would
-# silently match nothing, leaving q/k/v unadapted.)
+# AMPLIFY: separate q/k/v (NOT fused ``Wqkv`` -- another rev; it would silently
+# match nothing and leave q/k/v unadapted) + SwiGLU w12/w3.
 AMPLIFY_LORA_TARGETS = ["q", "k", "v", "wo", "w12", "w3"]
-# ESM-2 (HF): self-attention q/k/v/out + FFN intermediate/output dense.
 ESM_LORA_TARGETS = ["query", "key", "value", "dense"]
 
 
 def lora_target_modules(model_type: str | None) -> list[str] | str:
     """Return the LoRA ``target_modules`` for a model family.
 
-    Falls back to ``"all-linear"`` for unknown families (PEFT's own default),
-    which is safe for vanilla encoders but is explicitly NOT used for Proteva
-    (see ``PROTEVA_LORA_TARGETS``).
+    Unknown families fall back to PEFT's ``"all-linear"`` default (never used for Proteva).
     """
     mt = (model_type or "").lower()
     if mt == "proteva":
@@ -158,9 +126,8 @@ def lora_target_modules(model_type: str | None) -> list[str] | str:
 def _encoder_blocks(base_model):
     """Best-effort handle on the per-layer block ``ModuleList`` for last-N.
 
-    Proteva: ``encoder.blocks`` (plm/model.py). HF ESM: ``encoder.layer``.
-    AMPLIFY: ``transformer_encoder``. Returns ``None`` if not found (caller then
-    treats last-N as a no-op and warns)."""
+    Proteva: ``encoder.blocks``; HF ESM: ``encoder.layer``; AMPLIFY:
+    ``transformer_encoder``. Returns ``None`` if not found."""
     for attr in ("blocks", "layer", "layers", "transformer_encoder"):
         mod = getattr(base_model, attr, None)
         if mod is not None and hasattr(mod, "__len__"):
@@ -188,16 +155,10 @@ def apply_finetune_mode(
 ):
     """Apply ``probe`` / ``full`` / ``lora`` / ``last_n`` to a head model.
 
-    * ``probe``: freeze the encoder body (``model.base_model``); train only the head.
-    * ``full``: train everything (no-op).
-    * ``lora``: wrap the body with PEFT LoRA using model-type-aware target
-      modules (``r``, ``alpha`` configurable); the classifier head is kept
-      trainable + saved via ``modules_to_save``.
-    * ``last_n``: freeze the body, then unfreeze the top ``N`` encoder blocks +
-      the encoder's final norm; the head is always trainable.
-
-    Returns the (possibly PEFT-wrapped) model. The accepted ``mode`` aliases
-    ``"lastn"`` -> ``"last_n"`` so the shell driver's token matches the script.
+    ``probe`` freezes ``model.base_model``; ``full`` is a no-op; ``lora`` wraps the
+    body with PEFT LoRA (head kept trainable via ``modules_to_save``); ``last_n``
+    unfreezes the top N blocks + final norm. Accepts ``"lastn"`` as an alias.
+    Returns the (possibly PEFT-wrapped) model.
     """
     mode = "last_n" if mode == "lastn" else mode
 
@@ -224,7 +185,6 @@ def apply_finetune_mode(
             n = min(int(last_n), len(blocks))
             for blk in list(blocks)[len(blocks) - n:]:
                 blk.requires_grad_(True)
-            # Final norm sits after the last block; unfreeze it too.
             final_norm = getattr(base, "final_norm", None)
             if final_norm is not None:
                 final_norm.requires_grad_(True)
@@ -242,31 +202,17 @@ def apply_finetune_mode(
             r=int(lora_r),
             lora_alpha=int(lora_alpha),
             lora_dropout=float(lora_dropout),
-            # bias="none" (QLoRA standard): LoRA adapts no bias terms; base-model
-            # biases stay frozen. Regression's intercept is NOT lost — the task
-            # head (Linear with bias) is fully trained via modules_to_save.
+            # No intercept is lost: the head's own bias trains via modules_to_save.
             bias="none",
-            # rank-stabilized LoRA: scale by alpha/sqrt(r) not alpha/r, so higher
-            # r (we run r=64 for ~16% trainable) actually pays off + stays stable.
+            # rsLoRA scales by alpha/sqrt(r) so high r (we run r=64) stays stable.
             use_rslora=True,
             task_type=task_type,
             target_modules=lora_target_modules(model_type),
-            # Keep the classification head fully trainable + saved with the
-            # adapter (it is NOT in target_modules, so PEFT would otherwise
-            # freeze it). We measure the body's adaptability; the head learns
-            # alongside in fp32.
+            # The head is NOT in target_modules; PEFT would otherwise freeze it.
             modules_to_save=[classifier_module],
         )
-        # Wrap the WHOLE head model (not just ``model.base_model``): the head's
-        # ``forward`` (pooling + classifier + loss) must remain the entry point,
-        # and ``PeftModel.forward`` delegates to it. ``target_modules`` match by
-        # name suffix anywhere in the tree, so they still hit ONLY the encoder
-        # body Linears (wq/wk/wv/wo, w12/w3). Wrapping the bare encoder instead
-        # routes through PEFT's task-specific forward, which reads
-        # ``self.config.use_return_dict`` — absent on the encoder's plain
-        # ``EncoderConfig`` dataclass — and crashes. The PeftModel exposes
-        # ``.config`` (the ProtevaConfig) and ``save_pretrained`` (adapter only),
-        # so the Trainer + JSONL/adapter-save paths are unaffected.
+        # Wrap the WHOLE head model: wrapping the bare encoder routes through PEFT's
+        # task forward, which reads config.use_return_dict (absent on EncoderConfig) and crashes.
         return get_peft_model(model, lora_cfg)
 
     raise ValueError(f"Unknown finetune mode: {mode!r}")
@@ -297,8 +243,7 @@ def align_labels_with_tokens(
         if is_special:
             aligned.append(-100)
         else:
-            # short residue_labels (malformed CSV row, short signal_peptide
-            # sequence) defaults to ignore-index rather than raising mid-batch.
+            # short residue_labels default to ignore-index rather than raising mid-batch.
             aligned.append(int(next(res_iter, -100)))
     return aligned
 
@@ -322,8 +267,6 @@ def add_common_finetune_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--notes", type=str, default="",
                         help="Free-text note copied into each result record (e.g. 'amplify-120M-HEAD + epoch1').")
     parser.add_argument("--dataloader_num_workers", type=int, default=2)
-    # Discriminative-tier (LoRA / last-N) hyper-parameters. Shared by the
-    # sequence + residue scripts. Spec defaults: r=16, alpha=32 (=2r), last_n=4.
     parser.add_argument("--lora_r", type=int, default=16)
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
@@ -339,13 +282,9 @@ def add_common_finetune_args(parser: argparse.ArgumentParser) -> None:
                              "is too coarse for the regression head -> constant preds / Spearman~0.")
 
 
-# Metrics where LOWER is better, for early-stopping / best-model selection.
-# Everything else our tasks use (AUC / F1* / Spearman / Pearson / Accuracy / MCC
-# / Recall@k / AP) is higher-is-better. NOTE: e.g. ``meltome`` is a regression
-# task whose main_metric is MSE — hardcoding greater_is_better=True would make
-# early stopping keep the WORST epoch, so the direction must follow the metric.
+# Metric direction must follow the metric: ``meltome``'s main metric is MSE, and a
+# hardcoded greater_is_better=True would make early stopping keep the WORST epoch.
 from benchmark_tasks import (  # noqa: E402  -- canonical metric direction
-    LOWER_IS_BETTER_METRICS as _LOWER_IS_BETTER_METRICS,
     metric_greater_is_better,
 )
 
@@ -359,16 +298,12 @@ def resolve_early_stopping(
 ):
     """Select the in-loop eval dataset + early-stopping callbacks for the FT scripts.
 
-    Only the ``"validation"`` split may drive in-loop eval / best-model
-    selection. The ``"test"`` split is NEVER used for this: choosing the best
-    checkpoint on test and then reporting that same test metric is a selection
-    leak. When ``early_stop`` is requested but there is no validation split, warn
-    and return no callbacks so the caller trains to the max-epoch cap (the caller
-    must also pass ``eval_available=False`` to :func:`build_training_args` so
-    ``load_best_model_at_end`` is disabled for that run).
+    Only ``"validation"`` may drive best-model selection; ``"test"`` is NEVER used
+    (selecting on test then reporting test is a leak). With ``early_stop`` but no
+    validation split, warn and return no callbacks (caller must also pass
+    ``eval_available=False`` to :func:`build_training_args`).
 
-    Returns ``(eval_during_train, callbacks)``. Without ``early_stop`` both are
-    empty (the old fixed-epoch / no-eval behavior)."""
+    Returns ``(eval_during_train, callbacks)``; both empty without ``early_stop``."""
     eval_during_train = None
     callbacks: List[Any] = []
     if not early_stop:
@@ -390,15 +325,9 @@ def resolve_early_stopping(
 def keep_logits_only(logits, labels):
     """``preprocess_logits_for_metrics`` hook: keep the logits, drop the rest.
 
-    Encoders differ in what the classification head returns. ESM-C
-    (``Synthyra/ESMplusplus_small``) returns ``(logits, hidden_states, ...)``;
-    Proteva returns a bare tensor. HF accumulates EVERY returned tensor over the
-    eval set, so without this hook the raw tuple reaches ``compute_metrics`` and
-    ``np.array(...)`` fails on the ragged result ("inhomogeneous shape ... (2, N)",
-    where the 2 is the tuple length), while the retained hidden states pin the
-    whole eval set's activations in memory (OOM). Reducing here fixes both.
-
-    Passes a single tensor through unchanged.
+    ESM-C heads return ``(logits, hidden_states, ...)``; HF accumulates every tensor
+    over the eval set, so the ragged tuple breaks ``np.array`` in ``compute_metrics``
+    and the retained hidden states OOM. Passes a single tensor through unchanged.
     """
     return logits[0] if isinstance(logits, (tuple, list)) else logits
 
@@ -409,19 +338,10 @@ def build_training_args(
 ) -> TrainingArguments:
     """TrainingArguments for the FT scripts.
 
-    When ``args.early_stop`` is set AND ``main_metric`` is given AND a validation
-    split is available (``eval_available``), switch on per-epoch eval +
-    ``load_best_model_at_end`` (paired with an ``EarlyStoppingCallback`` in the
-    driver). ``num_train_epochs`` then acts as the MAX-epoch cap, not a fixed
-    count: easy/regression tasks stop after the metric plateaus (avoiding
-    overfit), hard tasks (e.g. 1195-class fold) get the epochs they need. All our
-    main metrics (F1_Macro/Spearman/AUC/Accuracy) are higher-is-better.
-
-    ``eval_available=False`` (no validation split) forces the fixed-epoch path
-    even under ``--early_stop``: selecting ``load_best_model_at_end`` on the only
-    in-loop eval set left (test) and then reporting that test metric is a leak.
-    Without early-stop it keeps the old fixed-epoch / no-eval / keep-last
-    behavior."""
+    With ``args.early_stop`` + ``main_metric`` + ``eval_available``: per-epoch eval and
+    ``load_best_model_at_end``; ``num_train_epochs`` becomes the MAX cap. Otherwise
+    fixed epochs, no eval, keep last. ``eval_available=False`` (no validation split)
+    forces the fixed-epoch path: selecting on test then reporting test is a leak."""
     kw = dict(
         output_dir=str(output_dir / "trainer"),
         num_train_epochs=args.num_train_epochs,
@@ -433,10 +353,8 @@ def build_training_args(
         report_to=[],
         seed=args.seed,
         fp16=False,
-        # bf16 forward is too coarse for regression: the MSE loss is fp32 but the
-        # LOGITS come from a bf16 forward (~3 sig digits) -> the head cannot rank
-        # fine fitness differences -> constant predictions, Spearman~0. --fp32
-        # (set by run_full_bench for regression tasks) keeps the whole forward fp32.
+        # bf16 logits (~3 sig digits) cannot rank fine regression targets -> constant
+        # preds, Spearman~0; --fp32 (set for regression tasks) keeps the forward fp32.
         bf16=torch.cuda.is_bf16_supported() and not getattr(args, "fp32", False),
         dataloader_num_workers=args.dataloader_num_workers,
     )

@@ -14,7 +14,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import List
 
 import numpy as np
 import pytest
@@ -55,7 +55,6 @@ class _TinyEncoder:
         self.config = type("Cfg", (), {"model_type": "tiny"})()
 
     def __call__(self, input_ids, attention_mask=None, **kwargs):
-        import torch
 
         # (B, L, H)
         last_hidden_state = self.W[input_ids]

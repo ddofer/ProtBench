@@ -19,7 +19,6 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -29,13 +28,11 @@ from benchmark_utils import (
     DEFAULT_RESULT_EVAL_SPLIT,
     DEFAULT_RESULT_EVAL_STRATEGY,
     DEFAULT_RESULT_PROBE,
-    METRIC_PRIORITY,
     RESULT_IDENTITY_COLUMNS,
     comparison_value,
     find_result_file,
     first_common_metric,
     format_result_key,
-    get_best_metric_for_task,
     prepare_result_df,
 )
 

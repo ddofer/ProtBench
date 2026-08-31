@@ -5,7 +5,6 @@ a tiny AMPLIFY-shaped stub model (config.model_type == "AMPLIFY"), so the real
 ``resolve_mlm_head`` AMPLIFY branch is tested without downloading AMPLIFY_120M.
 """
 
-import copy
 import math
 
 import pytest

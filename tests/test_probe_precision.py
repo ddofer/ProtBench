@@ -18,7 +18,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
 
 _BENCH = Path(__file__).resolve().parent.parent
 if str(_BENCH) not in sys.path:

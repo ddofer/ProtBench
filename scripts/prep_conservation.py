@@ -16,7 +16,6 @@ Each row has columns:
 
 Problem type: token_classification (9 classes: 1-9)
 """
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -37,7 +36,7 @@ def _curl_download(url, dest):
         print(f"  Using cached {dest}")
         return
     print(f"Downloading {url} ...")
-    result = subprocess.run(
+    subprocess.run(
         ["curl", "--max-time", "300", "-#", url, "-o", str(dest)],
         check=True,
     )

@@ -11,6 +11,7 @@ import hashlib
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression  # type: ignore[import-untyped]
@@ -59,6 +60,8 @@ def sampled_fit_positions(
     *,
     seed: int,
     negatives_per_positive: int,
+    candidate_residues: frozenset[str] | None = None,
+    outside_candidate_positives: Literal["error", "ignore"] = "error",
 ) -> list[int]:
     """Keep all positives and deterministic hard-cap sampling of negatives.
 
@@ -68,8 +71,33 @@ def sampled_fit_positions(
 
     if negatives_per_positive < 1:
         raise ValueError("negatives_per_positive must be positive")
-    positives = [index for index, label in enumerate(example.labels) if label]
-    negatives = [index for index, label in enumerate(example.labels) if not label]
+    if candidate_residues is not None and not candidate_residues:
+        raise ValueError("candidate_residues must not be empty")
+    if outside_candidate_positives not in {"error", "ignore"}:
+        raise ValueError("outside_candidate_positives must be 'error' or 'ignore'")
+    positive_outside_candidates = [
+        index
+        for index, (residue, label) in enumerate(
+            zip(example.sequence, example.labels, strict=True)
+        )
+        if label
+        and candidate_residues is not None
+        and residue not in candidate_residues
+    ]
+    if positive_outside_candidates and outside_candidate_positives == "error":
+        raise ValueError(
+            f"{example.row_id}: positive labels outside candidate residues at "
+            f"{positive_outside_candidates[:5]}"
+        )
+    eligible = [
+        index
+        for index, residue in enumerate(example.sequence)
+        if candidate_residues is None or residue in candidate_residues
+    ]
+    positives = [index for index in eligible if example.labels[index]]
+    negatives = [index for index in eligible if not example.labels[index]]
+    if not eligible:
+        return []
     n_negative = min(
         len(negatives),
         max(1, negatives_per_positive * len(positives)),
@@ -89,6 +117,8 @@ def fit_site_probe(
     *,
     seed: int = 1337,
     negatives_per_positive: int = 5,
+    candidate_residues: frozenset[str] | None = None,
+    outside_candidate_positives: Literal["error", "ignore"] = "error",
 ) -> tuple[LogisticRegression, dict[str, int]]:
     features: list[np.ndarray] = []
     labels: list[int] = []
@@ -103,8 +133,11 @@ def fit_site_probe(
             example,
             seed=seed,
             negatives_per_positive=negatives_per_positive,
+            candidate_residues=candidate_residues,
+            outside_candidate_positives=outside_candidate_positives,
         )
-        features.append(_normalized(hidden[positions]))
+        if positions:
+            features.append(_normalized(hidden[positions]))
         labels.extend(example.labels[position] for position in positions)
         seen += 1
     if seen != len(examples):
@@ -131,6 +164,8 @@ def predict_site_probe(
     examples: Sequence[FrozenSiteExample],
     embeddings: Iterable[np.ndarray],
     probe: LogisticRegression,
+    *,
+    candidate_residues: frozenset[str] | None = None,
 ) -> list[PTMSitePrediction]:
     predictions: list[PTMSitePrediction] = []
     seen = 0
@@ -140,10 +175,23 @@ def predict_site_probe(
                 f"embedding alignment mismatch for {example.row_id}: "
                 f"{len(hidden)} != {len(example.sequence)}"
             )
-        scores = probe.predict_proba(_normalized(hidden))[:, 1]
+        positions = [
+            position
+            for position, residue in enumerate(example.sequence)
+            if candidate_residues is None or residue in candidate_residues
+        ]
+        if not positions:
+            seen += 1
+            continue
+        scores = probe.predict_proba(_normalized(hidden[positions]))[:, 1]
         predictions.extend(
-            PTMSitePrediction(example.row_id, position, label, float(scores[position]))
-            for position, label in enumerate(example.labels)
+            PTMSitePrediction(
+                example.row_id,
+                position,
+                example.labels[position],
+                float(score),
+            )
+            for position, score in zip(positions, scores, strict=True)
         )
         seen += 1
     if seen != len(examples):
@@ -178,6 +226,36 @@ def predict_residue_identity_baseline(
         for position, (residue, label) in enumerate(
             zip(example.sequence, example.labels, strict=True)
         )
+    ]
+
+
+def fit_center_residue_baseline(
+    examples: Sequence[FrozenSequenceExample],
+) -> dict[str, float]:
+    """Fit the honest P(label | centre residue) baseline for window tasks."""
+
+    counts: dict[str, Counter[int]] = defaultdict(Counter)
+    for example in examples:
+        counts[example.sequence[len(example.sequence) // 2]][example.label] += 1
+    return {
+        residue: (values[1] + 1) / (values[0] + values[1] + 2)
+        for residue, values in counts.items()
+    }
+
+
+def predict_center_residue_baseline(
+    examples: Sequence[FrozenSequenceExample], probabilities: dict[str, float]
+) -> list[PTMSitePrediction]:
+    """Score one centre site per sequence with a fitted residue-only prior."""
+
+    return [
+        PTMSitePrediction(
+            example.row_id,
+            len(example.sequence) // 2,
+            example.label,
+            probabilities.get(example.sequence[len(example.sequence) // 2], 0.5),
+        )
+        for example in examples
     ]
 
 

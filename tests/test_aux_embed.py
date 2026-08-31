@@ -13,7 +13,6 @@ import types
 from pathlib import Path
 
 import numpy as np
-import pytest
 import torch
 
 _BENCH = Path(__file__).resolve().parent.parent

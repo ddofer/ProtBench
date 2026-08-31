@@ -7,7 +7,6 @@ the lightly-adapted model. Here the readout is the benchmark suite's existing
 zero-shot embedding-cosine score, so the adaptation must move the *encoder*
 representations (last-N transformer blocks), not just the MLM head.
 
-Design + evidence: docs/superpowers/specs/2026-06-05-wt-test-time-training-design.md
 
 Scope: AMPLIFY and Proteva HF models loaded by ``protein_benchmark_suite.load_model``
 (``model_obj == (tokenizer, model)``). The engine itself is architecture-agnostic
