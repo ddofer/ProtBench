@@ -14,7 +14,17 @@ if str(_BENCH) not in sys.path:
     sys.path.insert(0, str(_BENCH))
 sys.path.insert(0, str(_BENCH / "scripts"))
 
-from run_bench import choose_probe, pending_tasks, summarize  # noqa: E402
+from run_bench import _run, choose_probe, pending_tasks, summarize  # noqa: E402
+
+
+def test_strict_mode_propagates_a_failed_benchmark_subprocess(monkeypatch):
+    class Result:
+        returncode = 1
+
+    monkeypatch.setenv("PLM_BENCH_STRICT", "1")
+    monkeypatch.setattr("run_bench.subprocess.run", lambda *_args, **_kwargs: Result())
+    with pytest.raises(RuntimeError, match="benchmark subprocess failed"):
+        _run(["failed-benchmark"])
 
 
 def test_choose_probe_picks_torch_linear_where_sklearn_is_slow():
@@ -37,7 +47,11 @@ def test_pending_tasks_skips_rows_already_in_the_csv(tmp_path):
         [
             {"Task": "Solubility (DeepSol)", "Probe": "linear", "EvalSplit": "test"},
             {"Task": "EC Classification", "Probe": "linear", "EvalSplit": "test"},
-            {"Task": "Stability (Biomap)", "Probe": "linear", "EvalSplit": "validation"},
+            {
+                "Task": "Stability (Biomap)",
+                "Probe": "linear",
+                "EvalSplit": "validation",
+            },
         ]
     ).to_csv(csv, index=False)
     tasks = ["solubility", "ec_classification", "stability"]
@@ -56,10 +70,27 @@ def test_summarize_writes_readable_markdown(tmp_path):
     csv = tmp_path / "bench_m.csv"
     pd.DataFrame(
         [
-            {"Model": "m", "Task": "Solubility (DeepSol)", "Probe": "linear", "EvalSplit": "test",
-             "EvalStrategy": "test_split", "Samples": 100, "AUC": 0.71, "Accuracy": 0.65, "ProbeFitSec": 1.2},
-            {"Model": "m", "Task": "Stability (Biomap)", "Probe": "linear", "EvalSplit": "test",
-             "EvalStrategy": "test_split", "Samples": 100, "Spearman": 0.69, "ProbeFitSec": 0.3},
+            {
+                "Model": "m",
+                "Task": "Solubility (DeepSol)",
+                "Probe": "linear",
+                "EvalSplit": "test",
+                "EvalStrategy": "test_split",
+                "Samples": 100,
+                "AUC": 0.71,
+                "Accuracy": 0.65,
+                "ProbeFitSec": 1.2,
+            },
+            {
+                "Model": "m",
+                "Task": "Stability (Biomap)",
+                "Probe": "linear",
+                "EvalSplit": "test",
+                "EvalStrategy": "test_split",
+                "Samples": 100,
+                "Spearman": 0.69,
+                "ProbeFitSec": 0.3,
+            },
         ]
     ).to_csv(csv, index=False)
     out = summarize(csv, tmp_path / "SUMMARY.md")
@@ -76,13 +107,25 @@ def test_failed_tasks_are_retried_not_treated_as_done(tmp_path):
     csv = tmp_path / "bench_m.csv"
     pd.DataFrame(
         [
-            {"Task": "Solubility (DeepSol)", "Probe": "linear", "EvalSplit": "test",
-             "EvalStrategy": "test_split", "Samples": "Full"},
-            {"Task": "Stability (Biomap)", "Probe": "linear", "EvalSplit": "test",
-             "EvalStrategy": "task_exception", "Samples": "Full"},
+            {
+                "Task": "Solubility (DeepSol)",
+                "Probe": "linear",
+                "EvalSplit": "test",
+                "EvalStrategy": "test_split",
+                "Samples": "Full",
+            },
+            {
+                "Task": "Stability (Biomap)",
+                "Probe": "linear",
+                "EvalSplit": "test",
+                "EvalStrategy": "task_exception",
+                "Samples": "Full",
+            },
         ]
     ).to_csv(csv, index=False)
-    assert pending_tasks(["solubility", "stability"], csv, "test") == {"linear": ["stability"]}
+    assert pending_tasks(["solubility", "stability"], csv, "test") == {
+        "linear": ["stability"]
+    }
 
 
 def test_capped_scout_rows_do_not_satisfy_a_full_run(tmp_path):
@@ -90,8 +133,15 @@ def test_capped_scout_rows_do_not_satisfy_a_full_run(tmp_path):
     sweep look complete, or the CSV silently mixes subsampled and full results."""
     csv = tmp_path / "bench_m.csv"
     pd.DataFrame(
-        [{"Task": "Solubility (DeepSol)", "Probe": "linear", "EvalSplit": "test",
-          "EvalStrategy": "test_split", "Samples": 100000}]
+        [
+            {
+                "Task": "Solubility (DeepSol)",
+                "Probe": "linear",
+                "EvalSplit": "test",
+                "EvalStrategy": "test_split",
+                "Samples": 100000,
+            }
+        ]
     ).to_csv(csv, index=False)
     assert pending_tasks(["solubility"], csv, "test") == {"linear": ["solubility"]}
     assert pending_tasks(["solubility"], csv, "test", max_samples=100000) == {}
@@ -104,7 +154,13 @@ def test_auto_probe_is_resolved_by_the_suite_not_only_the_wrapper():
     from protein_benchmark_suite import PROBE_LABELS, effective_probe_type
 
     assert "auto" in PROBE_LABELS
-    for task in ("remote_homology", "cath_eat", "ec_classification", "ss3", "conservation_flip"):
+    for task in (
+        "remote_homology",
+        "cath_eat",
+        "ec_classification",
+        "ss3",
+        "conservation_flip",
+    ):
         assert effective_probe_type(TASKS[task], "auto") == "torch_linear", task
     for task in ("solubility", "stability", "subcellular_loc"):
         assert effective_probe_type(TASKS[task], "auto") == "linear", task
@@ -132,7 +188,12 @@ def test_presets_match_the_suite_exactly():
     """Re-deriving preset task lists in the wrapper drifts from the suite: --fast
     there is FAST_TASKS + RETRIEVAL_TASKS, and --very-fast carries a sample cap
     that only applies when the suite resolves the preset itself."""
-    from benchmark_tasks import DEFAULT_TASKS, FAST_TASKS, RETRIEVAL_TASKS, VERY_FAST_TASKS
+    from benchmark_tasks import (
+        DEFAULT_TASKS,
+        FAST_TASKS,
+        RETRIEVAL_TASKS,
+        VERY_FAST_TASKS,
+    )
     from run_bench import PRESETS, preset_flag
 
     assert PRESETS["fast"] == list(FAST_TASKS) + list(RETRIEVAL_TASKS)
@@ -161,12 +222,29 @@ def test_summary_headline_metric_matches_the_rest_of_the_repo(tmp_path):
 
     csv = tmp_path / "bench_m.csv"
     rows = [
-        {"Model": "m", "Task": "Solubility (DeepSol)", "Probe": "linear", "EvalSplit": "test",
-         "EvalStrategy": "test_split", "Samples": "Full", "AUC": 0.71, "Accuracy": 0.65,
-         "MCC": 0.3, "ProbeFitSec": 1.2},
-        {"Model": "m", "Task": "Metal Ion Binding", "Probe": "linear", "EvalSplit": "test",
-         "EvalStrategy": "test_split", "Samples": "Full", "Accuracy": 0.68, "MCC": 0.36,
-         "ProbeFitSec": 0.1},
+        {
+            "Model": "m",
+            "Task": "Solubility (DeepSol)",
+            "Probe": "linear",
+            "EvalSplit": "test",
+            "EvalStrategy": "test_split",
+            "Samples": "Full",
+            "AUC": 0.71,
+            "Accuracy": 0.65,
+            "MCC": 0.3,
+            "ProbeFitSec": 1.2,
+        },
+        {
+            "Model": "m",
+            "Task": "Metal Ion Binding",
+            "Probe": "linear",
+            "EvalSplit": "test",
+            "EvalStrategy": "test_split",
+            "Samples": "Full",
+            "Accuracy": 0.68,
+            "MCC": 0.36,
+            "ProbeFitSec": 0.1,
+        },
     ]
     pd.DataFrame(rows).to_csv(csv, index=False)
     text = summarize(csv, tmp_path / "SUMMARY.md").read_text()
@@ -177,15 +255,28 @@ def test_summary_headline_metric_matches_the_rest_of_the_repo(tmp_path):
 
 def test_summary_escapes_pipes_in_cell_values(tmp_path):
     csv = tmp_path / "bench_m.csv"
-    pd.DataFrame([
-        {"Model": "m", "Task": "Solubility (DeepSol)", "Probe": "linear|weird", "EvalSplit": "test",
-         "EvalStrategy": "test_split", "Samples": "Full", "AUC": 0.71, "ProbeFitSec": 1.0}
-    ]).to_csv(csv, index=False)
+    pd.DataFrame(
+        [
+            {
+                "Model": "m",
+                "Task": "Solubility (DeepSol)",
+                "Probe": "linear|weird",
+                "EvalSplit": "test",
+                "EvalStrategy": "test_split",
+                "Samples": "Full",
+                "AUC": 0.71,
+                "ProbeFitSec": 1.0,
+            }
+        ]
+    ).to_csv(csv, index=False)
     text = summarize(csv, tmp_path / "SUMMARY.md").read_text()
     body = [ln for ln in text.splitlines() if ln.startswith("| solubility")][0]
     assert "linear\\|weird" in body, "a raw | would break the table"
+
     # escaped, so the row still has exactly as many real column separators as the header
-    unescaped = lambda ln: len(re.findall(r"(?<!\\)\|", ln))
+    def unescaped(line):
+        return len(re.findall(r"(?<!\\)\|", line))
+
     assert unescaped(body) == unescaped(text.splitlines()[2])
 
 
@@ -212,7 +303,10 @@ def test_proteingym_block_is_skipped_when_already_scored(tmp_path):
     jsonl.write_text(
         '{"task": "proteingym_dms_substitutions_zeroshot", "mode": "mlm_zeroshot"}\n'
     )
-    tasks = ["proteingym_dms_substitutions_zeroshot", "proteingym_clinical_substitutions_zeroshot"]
+    tasks = [
+        "proteingym_dms_substitutions_zeroshot",
+        "proteingym_clinical_substitutions_zeroshot",
+    ]
     assert pending_zeroshot_tasks(tasks, jsonl) == [
         "proteingym_clinical_substitutions_zeroshot"
     ]
@@ -224,17 +318,44 @@ def test_summary_honours_the_task_registry_main_metric(tmp_path):
     Accuracy, disprot MCC). The repo-wide METRIC_PRIORITY is for cross-task
     comparison and must not override that in a per-task summary."""
     csv = tmp_path / "bench_m.csv"
-    pd.DataFrame([
-        {"Model": "m", "Task": "EC Classification", "Probe": "torch_linear", "EvalSplit": "test",
-         "EvalStrategy": "test_split", "Samples": "Full", "F1_Micro": 0.8144, "F1_Macro": 0.6454,
-         "Accuracy": 0.39, "ProbeFitSec": 14.8},
-        {"Model": "m", "Task": "Remote Homology (Fold)", "Probe": "torch_linear", "EvalSplit": "test",
-         "EvalStrategy": "test_split", "Samples": "Full", "Accuracy": 0.5644, "F1_Macro": 0.2783,
-         "ProbeFitSec": 7.9},
-        {"Model": "m", "Task": "Intrinsic Disorder (DisProt)", "Probe": "linear", "EvalSplit": "test",
-         "EvalStrategy": "test_split", "Samples": "Full", "MCC": 0.3828, "F1_Macro": 0.6783,
-         "ProbeFitSec": 60.0},
-    ]).to_csv(csv, index=False)
+    pd.DataFrame(
+        [
+            {
+                "Model": "m",
+                "Task": "EC Classification",
+                "Probe": "torch_linear",
+                "EvalSplit": "test",
+                "EvalStrategy": "test_split",
+                "Samples": "Full",
+                "F1_Micro": 0.8144,
+                "F1_Macro": 0.6454,
+                "Accuracy": 0.39,
+                "ProbeFitSec": 14.8,
+            },
+            {
+                "Model": "m",
+                "Task": "Remote Homology (Fold)",
+                "Probe": "torch_linear",
+                "EvalSplit": "test",
+                "EvalStrategy": "test_split",
+                "Samples": "Full",
+                "Accuracy": 0.5644,
+                "F1_Macro": 0.2783,
+                "ProbeFitSec": 7.9,
+            },
+            {
+                "Model": "m",
+                "Task": "Intrinsic Disorder (DisProt)",
+                "Probe": "linear",
+                "EvalSplit": "test",
+                "EvalStrategy": "test_split",
+                "Samples": "Full",
+                "MCC": 0.3828,
+                "F1_Macro": 0.6783,
+                "ProbeFitSec": 60.0,
+            },
+        ]
+    ).to_csv(csv, index=False)
     text = summarize(csv, tmp_path / "SUMMARY.md").read_text()
     assert "| F1_Micro | 0.8144 |" in text
     assert "| Accuracy | 0.5644 |" in text
@@ -249,18 +370,46 @@ def test_long_format_csv_keeps_rows_from_different_code_apart(tmp_path):
     import sys as _sys
 
     csv = tmp_path / "bench_m.csv"
-    pd.DataFrame([
-        {"Model": "m", "Task": "Solubility (DeepSol)", "Samples": "Full", "Date": "2026-08-01",
-         "Probe": "linear", "EvalMode": "standard", "EvalSplit": "test",
-         "EvalStrategy": "test_split", "AUC": 0.71},
-        {"Model": "m", "Task": "Solubility (DeepSol)", "Samples": "Full", "Date": "2026-08-21",
-         "Probe": "linear", "EvalMode": "standard", "EvalSplit": "test",
-         "EvalStrategy": "test_split", "AUC": 0.75, "CodeVersion": "abc1234"},
-    ]).to_csv(csv, index=False)
+    pd.DataFrame(
+        [
+            {
+                "Model": "m",
+                "Task": "Solubility (DeepSol)",
+                "Samples": "Full",
+                "Date": "2026-08-01",
+                "Probe": "linear",
+                "EvalMode": "standard",
+                "EvalSplit": "test",
+                "EvalStrategy": "test_split",
+                "AUC": 0.71,
+            },
+            {
+                "Model": "m",
+                "Task": "Solubility (DeepSol)",
+                "Samples": "Full",
+                "Date": "2026-08-21",
+                "Probe": "linear",
+                "EvalMode": "standard",
+                "EvalSplit": "test",
+                "EvalStrategy": "test_split",
+                "AUC": 0.75,
+                "CodeVersion": "abc1234",
+            },
+        ]
+    ).to_csv(csv, index=False)
     out = tmp_path / "all.csv"
     subprocess.run(
-        [_sys.executable, "collect_bench_results.py", "--probe-csv", str(csv), "--out", str(out)],
-        cwd=_BENCH, check=True, capture_output=True,
+        [
+            _sys.executable,
+            "collect_bench_results.py",
+            "--probe-csv",
+            str(csv),
+            "--out",
+            str(out),
+        ],
+        cwd=_BENCH,
+        check=True,
+        capture_output=True,
     )
     got = pd.read_csv(out)
     assert "code_version" in got.columns

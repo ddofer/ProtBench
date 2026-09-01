@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -204,6 +205,8 @@ def _run(cmd: list[str]) -> None:
         # A task that dies (missing local dataset, OOM) must not take the sweep
         # with it; the CSV keeps whatever finished and a re-run retries the rest.
         logger.warning("  command failed; continuing")
+        if os.environ.get("PLM_BENCH_STRICT") == "1":
+            raise RuntimeError(f"benchmark subprocess failed: {' '.join(cmd)}")
 
 
 def main(argv=None) -> int:
