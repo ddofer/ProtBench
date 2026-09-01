@@ -71,20 +71,28 @@ class EmbeddingCache:
         return data["X"], data["y"], g
 
     def put(
-        self, key: str, X: np.ndarray, y: np.ndarray, groups: Optional[np.ndarray] = None
+        self,
+        key: str,
+        X: np.ndarray,
+        y: np.ndarray,
+        groups: Optional[np.ndarray] = None,
     ) -> None:
         path = self._path(key)
         # Write to ``<key>.tmp.npz`` then rename so readers never see a half-written
         # file; ``np.savez`` only appends ``.npz`` when missing, so the name is kept.
         tmp = path.with_name(path.stem + ".tmp.npz")
         with open(tmp, "wb") as fh:
-            arrays = {
-                "X": X.astype("float32", copy=False),
-                "y": y.astype("int64", copy=False),
-            }
+            X_out = X.astype("float32", copy=False)
+            y_out = y.astype("int64", copy=False)
             if groups is not None:
-                arrays["g"] = np.asarray(groups).astype("int64", copy=False)
-            np.savez(fh, **arrays)
+                np.savez(
+                    fh,
+                    X=X_out,
+                    y=y_out,
+                    g=np.asarray(groups).astype("int64", copy=False),
+                )
+            else:
+                np.savez(fh, X=X_out, y=y_out)
         tmp.replace(path)
 
 
@@ -128,9 +136,10 @@ def iter_residue_embeddings(
 
     # AMPLIFY needs an ADDITIVE (0/-inf) mask padded to a multiple of 8, like the
     # sequence-level embed path; a bool mask raises. Resolved once, not per batch.
-    is_amplify = str(
-        getattr(getattr(encoder, "config", None), "model_type", "")
-    ).lower() == "amplify"
+    is_amplify = (
+        str(getattr(getattr(encoder, "config", None), "model_type", "")).lower()
+        == "amplify"
+    )
     if is_amplify:
         from model_utils import _prepare_amplify_inputs
 
@@ -238,7 +247,9 @@ def extract_residue_embeddings(
         max_length=max_length,
     )
     n_misaligned = 0
-    for prot_idx, (row_hidden, lab_list, seq) in enumerate(zip(per_protein, labels, sequences)):
+    for prot_idx, (row_hidden, lab_list, seq) in enumerate(
+        zip(per_protein, labels, sequences)
+    ):
         if row_hidden.shape[0] == 0:
             continue
         n_keep, n_lab = row_hidden.shape[0], len(lab_list)
@@ -364,6 +375,8 @@ def evaluate_token_classification(
     model_hash: str = "unknown-model",
     task_key: Optional[str] = None,
     probe_type: str = "linear",
+    prediction_path: Path | None = None,
+    query_fasta_path: Path | None = None,
 ) -> Dict[str, float]:
     """Run the residue probe pipeline for a token-classification task.
 
@@ -374,12 +387,14 @@ def evaluate_token_classification(
 
     from sklearn.model_selection import GroupKFold
 
-    task = task_key or getattr(cfg, "name", "task")
+    task = str(task_key or getattr(cfg, "name", "task"))
 
     def _extract_or_load(seqs, labs, split: str):
         key = cache_key(model_hash, task, split) if cache is not None else None
-        if key is not None and cache.has(key):
-            logger.info("residue cache HIT: model=%s task=%s split=%s", model_hash, task, split)
+        if key is not None and cache is not None and cache.has(key):
+            logger.info(
+                "residue cache HIT: model=%s task=%s split=%s", model_hash, task, split
+            )
             return cache.get(key)
         X, y, g = extract_residue_embeddings(
             encoder=encoder,
@@ -390,7 +405,7 @@ def evaluate_token_classification(
             batch_size=batch_size,
             max_length=max_length,
         )
-        if key is not None:
+        if key is not None and cache is not None:
             cache.put(key, X, y, g)
         return X, y, g
 
@@ -412,23 +427,45 @@ def evaluate_token_classification(
     X_tr, y_tr, g_tr = _extract_scorable(train_sequences, train_labels, "train")
     problem_type = "binary" if len(np.unique(y_tr)) == 2 else "multiclass"
 
-    def _fit_score(X_a, y_a, X_b, y_b):
-        from protein_benchmark_suite import _make_probe_model_for_training_size, timed_fit
+    def _fit_score(X_a, y_a, X_b, y_b, groups_b=None):
+        from protein_benchmark_suite import (
+            _make_probe_model_for_training_size,
+            timed_fit,
+        )
 
         probe = _make_probe_model_for_training_size(probe_type, problem_type, len(X_a))
         fit_seconds = timed_fit(probe, X_a, y_a)
+        predictions = probe.predict(X_b)
         m = _compute_metrics(
-            y_b, probe.predict(X_b), main_metric=cfg.main_metric, problem_type=problem_type
+            y_b, predictions, main_metric=cfg.main_metric, problem_type=problem_type
         )
         m["ProbeFitSec"] = fit_seconds
+        if prediction_path is not None:
+            if groups_b is None:
+                raise ValueError("prediction output requires an explicit test split")
+            from prediction_artifacts import write_residue_predictions
+
+            write_residue_predictions(
+                prediction_path,
+                sequences=test_sequences or (),
+                groups=groups_b,
+                labels=y_b,
+                predictions=predictions,
+                metadata={"task": task, "problem_type": problem_type, "split": "test"},
+                query_fasta_path=query_fasta_path,
+            )
         return m
 
     if test_sequences is not None and test_labels is not None:
-        X_te, y_te, _ = _extract_scorable(test_sequences, test_labels, "test")
-        return _fit_score(X_tr, y_tr, X_te, y_te)
+        X_te, y_te, g_te = _extract_scorable(test_sequences, test_labels, "test")
+        return _fit_score(X_tr, y_tr, X_te, y_te, g_te)
 
+    if prediction_path is not None:
+        raise ValueError("prediction output requires an explicit test split")
     fold_metrics: List[Dict[str, float]] = []
     for tr_idx, te_idx in GroupKFold(n_splits=4).split(X_tr, y_tr, groups=g_tr):
-        fold_metrics.append(_fit_score(X_tr[tr_idx], y_tr[tr_idx], X_tr[te_idx], y_tr[te_idx]))
+        fold_metrics.append(
+            _fit_score(X_tr[tr_idx], y_tr[tr_idx], X_tr[te_idx], y_tr[te_idx])
+        )
     keys = set().union(*(m.keys() for m in fold_metrics))
     return {k: float(np.mean([m[k] for m in fold_metrics if k in m])) for k in keys}

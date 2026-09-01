@@ -56,3 +56,23 @@ def test_metric_priority_is_untouched():
 
     assert "MCC" not in METRIC_PRIORITY
     assert "BalancedAccuracy" not in METRIC_PRIORITY
+
+
+def test_sequence_probe_exposes_identical_test_predictions_to_an_artifact_writer():
+    X, y = _separable()
+    captured = []
+    pbs.evaluate_classification_probe(
+        "linear",
+        "binary",
+        X,
+        y,
+        X,
+        y,
+        prediction_callback=lambda labels, predictions, scores: captured.append(
+            (labels, predictions, scores)
+        ),
+    )
+    labels, predictions, scores = captured[0]
+    np.testing.assert_array_equal(labels, y)
+    np.testing.assert_array_equal(predictions, y)
+    assert scores.shape == y.shape

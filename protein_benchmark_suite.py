@@ -2624,6 +2624,7 @@ def evaluate_classification_probe(
     y_test: np.ndarray,
     knn_k: int = 3,
     knn_weights: str = "uniform",
+    prediction_callback=None,
 ) -> dict[str, float]:
     """Evaluate binary or multiclass classification with the selected probe."""
     if len(y_train) > 0 and isinstance(y_train[0], str):
@@ -2665,6 +2666,7 @@ def evaluate_classification_probe(
     )
     metrics["ProbeFitSec"] = fit_seconds
 
+    scores = None
     if problem_type == "multiclass":
         if hasattr(classifier, "predict_proba"):
             try:
@@ -2675,12 +2677,11 @@ def evaluate_classification_probe(
                 )
             except ValueError as exc:
                 logger.warning("  Could not compute AUC for multiclass: %s", exc)
-        return metrics
-
-    if hasattr(classifier, "predict_proba"):
+    elif hasattr(classifier, "predict_proba"):
         probabilities = classifier.predict_proba(X_test)
         if probabilities.shape[1] == 2:
             positive_prob = probabilities[:, 1]
+            scores = positive_prob
             try:
                 metrics["AUC"] = roc_auc_score(y_test, positive_prob)
                 metrics["AP"] = average_precision_score(y_test, positive_prob)
@@ -2689,6 +2690,8 @@ def evaluate_classification_probe(
                     "  Binary probabilities were unsuitable for AUC/AP: %s",
                     exc,
                 )
+    if prediction_callback is not None:
+        prediction_callback(y_test, predictions, scores)
     return metrics
 
 
@@ -3130,6 +3133,8 @@ def evaluate_task(
     eval_split: str = DEFAULT_BENCHMARK_EVAL_SPLIT,
     tta_cfg=None,
     probe_embed_mode: str = "trunk",
+    prediction_dir: Optional[str] = None,
+    prediction_query_dir: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], str, str]:
     """Run full evaluation for a single task.
 
@@ -3191,6 +3196,18 @@ def evaluate_task(
             model_hash=model_hash,
             task_key=cfg.name,
             probe_type=probe_type,
+            prediction_path=(
+                Path(prediction_dir)
+                / f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', cfg.name)}.jsonl.gz"
+                if prediction_dir and test_seqs is not None
+                else None
+            ),
+            query_fasta_path=(
+                Path(prediction_query_dir)
+                / f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', cfg.name)}.fasta"
+                if prediction_query_dir and test_seqs is not None
+                else None
+            ),
         )
         return metrics, resolved_eval_split, eval_strategy
 
@@ -3522,6 +3539,34 @@ def evaluate_task(
         logger.info("  Applied L2 normalization to embeddings")
 
     logger.info("  Training %s probe...", probe_label(probe_type))
+    prediction_callback = None
+    if prediction_dir and cfg.problem_type in {"binary", "multiclass"}:
+        from prediction_artifacts import write_sequence_predictions
+
+        path = (
+            Path(prediction_dir)
+            / f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', cfg.name)}.jsonl.gz"
+        )
+
+        def prediction_callback(labels, predictions, scores) -> None:
+            write_sequence_predictions(
+                path,
+                sequences=test_seqs,
+                labels=labels,
+                predictions=predictions,
+                scores=scores,
+                metadata={
+                    "task": cfg.name,
+                    "problem_type": cfg.problem_type,
+                    "split": resolved_eval_split,
+                },
+                query_fasta_path=(
+                    Path(prediction_query_dir)
+                    / f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', cfg.name)}.fasta"
+                    if prediction_query_dir
+                    else None
+                ),
+            )
     if cfg.problem_type == "binary":
         results = evaluate_classification_probe(
             probe_type,
@@ -3532,6 +3577,7 @@ def evaluate_task(
             y_test,
             knn_k=knn_k,
             knn_weights=knn_weights,
+            prediction_callback=prediction_callback,
         )
     elif cfg.problem_type == "multiclass":
         results = evaluate_classification_probe(
@@ -3543,6 +3589,7 @@ def evaluate_task(
             y_test,
             knn_k=knn_k,
             knn_weights=knn_weights,
+            prediction_callback=prediction_callback,
         )
     elif cfg.problem_type == "multilabel":
         results = evaluate_multilabel(X_train, y_train, X_test, y_test, mlb, probe_type=probe_type)
@@ -3949,6 +3996,14 @@ def parse_args():
         "Each model gets its own subfolder: <dir>/<safe_model_name>/embeddings.pth.",
     )
     parser.add_argument(
+        "--prediction-dir",
+        help="Optional directory for compact per-example frozen-probe predictions.",
+    )
+    parser.add_argument(
+        "--prediction-query-dir",
+        help="Outside-Git FASTA directory for corpus-homology queries of saved predictions.",
+    )
+    parser.add_argument(
         "--proteingym",
         action="store_true",
         default=False,
@@ -4128,6 +4183,8 @@ def main():
         "knn_weights": args.knn_weights,
         "l2_normalize_embeddings": args.l2_normalize_embeddings,
         "probe_embed_mode": args.probe_embed_mode,
+        "prediction_dir": args.prediction_dir,
+        "prediction_query_dir": args.prediction_query_dir,
     }
 
     device = config["device"] or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -4363,6 +4420,8 @@ def main():
                     ),
                     tta_cfg=tta_cfg,
                     probe_embed_mode=config.get("probe_embed_mode", "trunk"),
+                    prediction_dir=config.get("prediction_dir"),
+                    prediction_query_dir=config.get("prediction_query_dir"),
                 )
 
                 main_val = metrics.get(cfg.main_metric, None)

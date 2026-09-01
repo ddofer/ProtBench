@@ -25,6 +25,7 @@ if str(_BENCH) not in sys.path:
     sys.path.insert(0, str(_BENCH))
 
 from benchmark_tasks import TaskConfig  # noqa: E402
+from prediction_artifacts import read_prediction_rows  # noqa: E402
 
 # Under test (created during GREEN phase).
 from token_classification_probe import (  # noqa: E402
@@ -97,10 +98,9 @@ class _FakeAmplifyEncoder(_TinyEncoder):
         return hidden
 
     def __call__(self, input_ids, attention_mask=None, **kwargs):
-        assert (
-            attention_mask is not None
-            and attention_mask.dtype.is_floating_point
-        ), "AMPLIFY expects an additive attention_mask."
+        assert attention_mask is not None and attention_mask.dtype.is_floating_point, (
+            "AMPLIFY expects an additive attention_mask."
+        )
         return super().__call__(input_ids, attention_mask=attention_mask, **kwargs)
 
     def parameters(self):
@@ -179,7 +179,9 @@ def _toy_ss3_dataset(seed: int = 0, n: int = 32, length: int = 24) -> List[_Samp
     return samples
 
 
-def _toy_conservation_dataset(seed: int = 0, n: int = 32, length: int = 20) -> List[_Sample]:
+def _toy_conservation_dataset(
+    seed: int = 0, n: int = 32, length: int = 20
+) -> List[_Sample]:
     """9-class conservation dataset (labels 1-9) matching the conservation_flip format."""
     rng = np.random.RandomState(seed)
     samples: List[_Sample] = []
@@ -332,16 +334,47 @@ def test_task_exception_resolved(tmp_path):
     assert 0.0 <= metrics["Accuracy"] <= 1.0
 
 
+def test_token_probe_persists_test_predictions(tmp_path):
+    enc, tok = _TinyEncoder(hidden=8), _TinyTokenizer()
+    train = _toy_ss3_dataset(n=16, length=10)
+    test = _toy_ss3_dataset(seed=1, n=8, length=10)
+    cfg = TaskConfig(
+        name="SS3 (predictions)",
+        dataset="local://synthetic",
+        input_map={"seq": "sequence"},
+        label_col="labels",
+        problem_type="token_classification",
+        main_metric="Accuracy",
+    )
+    path = tmp_path / "ss3.jsonl.gz"
+    evaluate_token_classification(
+        cfg=cfg,
+        encoder=enc,
+        tokenizer=tok,
+        train_sequences=[row.sequence for row in train],
+        train_labels=[row.labels for row in train],
+        test_sequences=[row.sequence for row in test],
+        test_labels=[row.labels for row in test],
+        prediction_path=path,
+    )
+    metadata, rows = read_prediction_rows(path)
+    assert metadata["task"] == "SS3 (predictions)"
+    assert len(rows) == 80
+
+
 def test_conservation_9class_labels_decoded_correctly():
     """Labels 1-9 (conservation_flip format) pass through _decode_residue_label
     as a plain list[int] and produce 9-class F1_Macro metric in [0, 1]."""
     import sys
     from pathlib import Path
+
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from protein_benchmark_suite import _decode_residue_label
 
     raw = [1, 3, 5, 7, 9, 2, 4, 6, 8]
-    decoded = _decode_residue_label("Residue Conservation (FLIP)", "conservation_labels", raw)
+    decoded = _decode_residue_label(
+        "Residue Conservation (FLIP)", "conservation_labels", raw
+    )
     assert decoded == [1, 3, 5, 7, 9, 2, 4, 6, 8], f"unexpected decode: {decoded}"
 
 
@@ -387,8 +420,12 @@ def test_fast_task_lists_include_conservation():
     """conservation_flip must appear in both FAST_TASKS and VERY_FAST_TASKS."""
     from benchmark_tasks import FAST_TASKS, VERY_FAST_TASKS
 
-    assert "conservation_flip" in FAST_TASKS, "conservation_flip missing from FAST_TASKS"
-    assert "conservation_flip" in VERY_FAST_TASKS, "conservation_flip missing from VERY_FAST_TASKS"
+    assert "conservation_flip" in FAST_TASKS, (
+        "conservation_flip missing from FAST_TASKS"
+    )
+    assert "conservation_flip" in VERY_FAST_TASKS, (
+        "conservation_flip missing from VERY_FAST_TASKS"
+    )
     assert "ss3" in FAST_TASKS
     assert "ss3" in VERY_FAST_TASKS
 
@@ -503,11 +540,20 @@ def test_iter_residue_embeddings_preserves_input_order():
     seqs = ["ACDEFGHIKL", "AC", "ACDEFG", "A", "ACDEFGHIKLMNPQ", "ACD"]
     out = list(
         iter_residue_embeddings(
-            encoder=enc, tokenizer=tok, sequences=seqs, device="cpu", batch_size=2, max_length=32
+            encoder=enc,
+            tokenizer=tok,
+            sequences=seqs,
+            device="cpu",
+            batch_size=2,
+            max_length=32,
         )
     )
     assert [o.shape[0] for o in out] == [len(s) for s in seqs]
-    single = next(iter_residue_embeddings(encoder=enc, tokenizer=tok, sequences=[seqs[4]], device="cpu"))
+    single = next(
+        iter_residue_embeddings(
+            encoder=enc, tokenizer=tok, sequences=[seqs[4]], device="cpu"
+        )
+    )
     np.testing.assert_allclose(out[4], single)
 
 

@@ -136,8 +136,14 @@ def pending_tasks(
         for _, r in df.iterrows():
             if str(r.get("EvalStrategy", "")) == "task_exception":
                 continue
-            done.add((str(r["Task"]), str(r["Probe"]), str(r["EvalSplit"]),
-                      _samples_key(r.get("Samples"))))
+            done.add(
+                (
+                    str(r["Task"]),
+                    str(r["Probe"]),
+                    str(r["EvalSplit"]),
+                    _samples_key(r.get("Samples")),
+                )
+            )
     want_samples = _samples_key(max_samples)
     pending: dict[str, list[str]] = {}
     for task in tasks:
@@ -169,17 +175,19 @@ def summarize(csv_path: Path, out_path: Path) -> Path:
         if metric is None or metric not in df.columns or pd.isna(r.get(metric)):
             metric, _ = get_best_metric_for_task(r)
         fit = r.get("ProbeFitSec")
-        rows.append({
-            "task": task,
-            "type": getattr(cfg, "problem_type", "") if cfg else "",
-            "metric": metric or "",
-            "value": "" if metric is None else round(float(r[metric]), 4),
-            "probe": r.get("Probe", ""),
-            "split": r.get("EvalSplit", ""),
-            "eval": r.get("EvalStrategy", ""),
-            "n": r.get("Samples", ""),
-            "fit s": "" if pd.isna(fit) else round(float(fit), 1),
-        })
+        rows.append(
+            {
+                "task": task,
+                "type": getattr(cfg, "problem_type", "") if cfg else "",
+                "metric": metric or "",
+                "value": "" if metric is None else round(float(r[metric]), 4),
+                "probe": r.get("Probe", ""),
+                "split": r.get("EvalSplit", ""),
+                "eval": r.get("EvalStrategy", ""),
+                "n": r.get("Samples", ""),
+                "fit s": "" if pd.isna(fit) else round(float(fit), 1),
+            }
+        )
 
     model = df["Model"].iloc[0] if "Model" in df and len(df) else out_path.stem
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -199,24 +207,56 @@ def _run(cmd: list[str]) -> None:
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--model_name", "-m", required=True, help="HF id or local checkpoint path")
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument(
+        "--model_name", "-m", required=True, help="HF id or local checkpoint path"
+    )
     p.add_argument("--preset", default="fast", choices=tuple(PRESETS))
-    p.add_argument("--tasks", "-t", nargs="+", help="Explicit task keys (overrides --preset)")
+    p.add_argument(
+        "--tasks", "-t", nargs="+", help="Explicit task keys (overrides --preset)"
+    )
     p.add_argument("--eval_split", default="test", choices=("test", "validation"))
-    p.add_argument("--finetune", default="none", choices=("none", "lora", "last_n", "full"),
-                   help="Also fine-tune on sequence-level tasks (default: probes only).")
-    p.add_argument("--proteingym", action="store_true",
-                   help="Also run ProteinGym zero-shot (masked-marginal). Substitutions only "
-                        "by default; add --proteingym_indels for the indel benchmarks.")
-    p.add_argument("--proteingym_indels", action="store_true",
-                   help="Include the ProteinGym indel benchmarks (much slower; see docs).")
+    p.add_argument(
+        "--finetune",
+        default="none",
+        choices=("none", "lora", "last_n", "full"),
+        help="Also fine-tune on sequence-level tasks (default: probes only).",
+    )
+    p.add_argument(
+        "--proteingym",
+        action="store_true",
+        help="Also run ProteinGym zero-shot (masked-marginal). Substitutions only "
+        "by default; add --proteingym_indels for the indel benchmarks.",
+    )
+    p.add_argument(
+        "--proteingym_indels",
+        action="store_true",
+        help="Include the ProteinGym indel benchmarks (much slower; see docs).",
+    )
     p.add_argument("--output_dir", "-o", default="results/benchmarks")
-    p.add_argument("--force", action="store_true", help="Re-run tasks that already have results")
-    p.add_argument("--probe_args", nargs=argparse.REMAINDER, default=[],
-                   help="Everything after this flag is passed to protein_benchmark_suite.py")
+    p.add_argument(
+        "--prediction_dir",
+        help="Optional compact per-example prediction directory passed to the suite.",
+    )
+    p.add_argument(
+        "--prediction_query_dir",
+        help="Outside-Git FASTA directory for prediction homology queries.",
+    )
+    p.add_argument(
+        "--force", action="store_true", help="Re-run tasks that already have results"
+    )
+    p.add_argument(
+        "--probe_args",
+        nargs=argparse.REMAINDER,
+        default=[],
+        help="Everything after this flag is passed to protein_benchmark_suite.py",
+    )
     args = p.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
 
     explicit_tasks = bool(args.tasks)
     tasks = args.tasks or PRESETS[args.preset]
@@ -230,21 +270,35 @@ def main(argv=None) -> int:
             "--preset %s SUBSAMPLES to %d sequences per task (residue tasks tighter still). "
             "These are scout rows: recorded as Samples=%d, and NOT comparable with full-data "
             "results for another model.",
-            args.preset, max_samples, max_samples,
+            args.preset,
+            max_samples,
+            max_samples,
         )
 
     out_dir = Path(args.output_dir)
     csv_path = out_dir / f"bench_{safe_model_name(args.model_name)}.csv"
     groups = (
-        {probe: [t for t in tasks if choose_probe(t) == probe] for probe in ("linear", "torch_linear")}
+        {
+            probe: [t for t in tasks if choose_probe(t) == probe]
+            for probe in ("linear", "torch_linear")
+        }
         if args.force
         else pending_tasks(tasks, csv_path, args.eval_split, max_samples=max_samples)
     )
     groups = {probe: task_list for probe, task_list in groups.items() if task_list}
     if not groups:
-        logger.info("Nothing to run: every task already has %s results in %s", args.eval_split, csv_path)
+        logger.info(
+            "Nothing to run: every task already has %s results in %s",
+            args.eval_split,
+            csv_path,
+        )
     for probe, task_list in groups.items():
-        logger.info("=== %d task(s) with probe=%s: %s", len(task_list), probe, " ".join(task_list))
+        logger.info(
+            "=== %d task(s) with probe=%s: %s",
+            len(task_list),
+            probe,
+            " ".join(task_list),
+        )
         # A preset is passed to the suite as its own FLAG whenever the whole
         # preset is still pending, so the suite resolves the task list and the
         # sample cap itself -- expanding --tasks here silently dropped the cap.
@@ -258,9 +312,33 @@ def main(argv=None) -> int:
             selector = ["--tasks", *task_list]
             if max_samples is not None:
                 selector += ["--max_samples", str(max_samples)]
-        _run([sys.executable, "protein_benchmark_suite.py", "-m", args.model_name,
-              *selector, "-p", probe, "--eval_split", args.eval_split,
-              "--cache_embeddings", "-o", str(out_dir), *args.probe_args])
+        _run(
+            [
+                sys.executable,
+                "protein_benchmark_suite.py",
+                "-m",
+                args.model_name,
+                *selector,
+                "-p",
+                probe,
+                "--eval_split",
+                args.eval_split,
+                "--cache_embeddings",
+                "-o",
+                str(out_dir),
+                *(
+                    ["--prediction-dir", args.prediction_dir]
+                    if args.prediction_dir
+                    else []
+                ),
+                *(
+                    ["--prediction-query-dir", args.prediction_query_dir]
+                    if args.prediction_query_dir
+                    else []
+                ),
+                *args.probe_args,
+            ]
+        )
 
     if args.proteingym:
         # Masked-marginal, NOT the suite's cosine zero-shot: one masked forward per
@@ -273,9 +351,18 @@ def main(argv=None) -> int:
         todo = zs_tasks if args.force else pending_zeroshot_tasks(zs_tasks, jsonl)
         if todo:
             logger.info("=== ProteinGym zero-shot: %s", " ".join(todo))
-            _run([sys.executable, "proteingym_mlm_zeroshot.py",
-                  "--model_name", args.model_name, "--tasks", *todo,
-                  "--output_dir", str(out_dir)])
+            _run(
+                [
+                    sys.executable,
+                    "proteingym_mlm_zeroshot.py",
+                    "--model_name",
+                    args.model_name,
+                    "--tasks",
+                    *todo,
+                    "--output_dir",
+                    str(out_dir),
+                ]
+            )
         else:
             logger.info("ProteinGym: already scored in %s", jsonl)
 
@@ -283,18 +370,35 @@ def main(argv=None) -> int:
         ft_tasks = [t for t in tasks if TASKS[t].problem_type in FINETUNABLE]
         logger.info("=== fine-tuning (%s) on %d task(s)", args.finetune, len(ft_tasks))
         for task in ft_tasks:
-            _run([sys.executable, "finetune_sequence.py", "--model_name", args.model_name,
-                  "--task", task, "--mode", args.finetune, "--early_stop", "-o", str(out_dir)])
+            _run(
+                [
+                    sys.executable,
+                    "finetune_sequence.py",
+                    "--model_name",
+                    args.model_name,
+                    "--task",
+                    task,
+                    "--mode",
+                    args.finetune,
+                    "--early_stop",
+                    "-o",
+                    str(out_dir),
+                ]
+            )
 
     # Readable outputs: the long-format CSV across every model, plus a summary
     # of this model alone.
     collect = [sys.executable, "collect_bench_results.py", "--probe-csv", str(csv_path)]
-    ft_jsonl = sorted(out_dir.glob(f"finetune_*_{safe_model_name(args.model_name)}.jsonl"))
+    ft_jsonl = sorted(
+        out_dir.glob(f"finetune_*_{safe_model_name(args.model_name)}.jsonl")
+    )
     if ft_jsonl:
         collect += ["--ft-jsonl", *map(str, ft_jsonl)]
     _run(collect)
     if csv_path.exists():
-        summary = summarize(csv_path, out_dir / f"SUMMARY_{safe_model_name(args.model_name)}.md")
+        summary = summarize(
+            csv_path, out_dir / f"SUMMARY_{safe_model_name(args.model_name)}.md"
+        )
         logger.info("Wrote %s", summary)
     return 0
 
