@@ -9,6 +9,7 @@ import pytest
 
 import protein_benchmark_suite as pbs
 from benchmark_tasks import TaskConfig
+from probe_cv import DEFAULT_GRID
 from test_embed_pooling import PositionModel, PositionTokenizer
 
 # The stand-in embeds a sequence by its length, so "long vs short" is learnable.
@@ -40,5 +41,5 @@ def test_linear_cv_selects_on_validation_scores_on_test_and_reports_the_chosen_c
     )
     assert sorted(splits_seen) == ["test", "validation"]
     assert split == "test"
-    assert metrics["ProbeC"] in pbs.PROBE_CV_GRID
+    assert metrics["ProbeC"] in DEFAULT_GRID
     assert metrics["AP"] == pytest.approx(1.0)
