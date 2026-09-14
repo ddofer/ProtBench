@@ -235,13 +235,14 @@ _VALIDATION_SPLIT_ALIASES = ("validation", "valid", "val", "dev", "eval")
 PROBE_LABELS = {
     "auto": "Auto (fastest probe per task)",
     "linear": "Linear",
+    "linear_cv": "Linear (C selected on validation)",
     "torch_linear": "Torch Linear (AdamW, early stopping)",
     "histgb": "HistGradientBoosting",
     "knn": "K-Nearest Neighbors",
 }
 # Multilabel tasks (GO/EC) only have linear heads: OvR LogisticRegression or
 # one multi-output torch head. knn/histgb are silently the linear evaluator there.
-MULTILABEL_PROBES = frozenset({DEFAULT_RESULT_PROBE, "torch_linear"})
+MULTILABEL_PROBES = frozenset({DEFAULT_RESULT_PROBE, "linear_cv", "torch_linear"})
 # Tasks where sklearn's solver scales badly in the number of outputs or rows, so
 # ``-p auto`` routes them to the torch head. Measured on ESM-C 300M, full data:
 # remote_homology (1195 classes) 61s lbfgs vs 2.2s; ec_classification (572
@@ -2096,12 +2097,20 @@ def embed_sequences(
     embed_save_path: Optional[str] = None,
     l2_normalize_embeddings: bool = False,
     probe_embed_mode: str = "trunk",
+    pooling: str = "mean",
+    layer: Optional[int] = None,
 ) -> np.ndarray:
     """Generate embeddings for sequences (single or pairs).
 
     Supports:
     - SentenceTransformer models (is_sbert=True)
     - HuggingFace models (is_sbert=False, model_obj = (tokenizer, model))
+
+    ``pooling="last"`` takes each sequence's last non-padding token, the only state
+    of a causal model that has read the whole sequence. ``layer`` indexes
+    ``hidden_states`` (0 = embeddings, -1 = final). Either non-default routes a
+    SentenceTransformer through its underlying HF model, since ``.encode()`` only
+    exposes its own pooled output.
     """
 
     if not sequences:
@@ -2131,7 +2140,14 @@ def embed_sequences(
 
     if isinstance(model_obj, _KmerEmbedder):
         embs = kmer_features(flat_seqs, k=model_obj.k)
-    elif is_sbert:
+    elif (
+        is_sbert
+        and pooling == "mean"
+        and layer is None
+        # sentence-transformers 5 gives a causal model with no modules.json a
+        # "lasttoken" Pooling module, so .encode() is only a mean if it says so.
+        and getattr(list(model_obj._modules.values())[-1], "pooling_mode", "mean") == "mean"
+    ):
         if getattr(model_obj, "max_seq_length", None) != max_length:
             model_obj.max_seq_length = max_length
         # SentenceTransformer handles batching internally
@@ -2143,8 +2159,9 @@ def embed_sequences(
         )
     else:
         # Manual HuggingFace embedding with mean pooling
-        # Handle tuple format: (tokenizer, model)
-        tokenizer, model = model_obj
+        # Handle tuple format: (tokenizer, model); a SentenceTransformer reaches here
+        # only for non-default pooling/layer and is unwrapped to its HF encoder.
+        tokenizer, model = _unwrap_encoder_tokenizer(model_obj, is_sbert)
 
         is_amplify_model = (
             getattr(getattr(model, "config", None), "model_type", "") == "AMPLIFY"
@@ -2394,7 +2411,11 @@ def embed_sequences(
                     else:
                         with amp_ctx:
                             with torch.inference_mode():
-                                outputs = model(**inputs, return_dict=True)
+                                outputs = model(
+                                    **inputs,
+                                    return_dict=True,
+                                    **({"output_hidden_states": True} if layer is not None else {}),
+                                )
                 except Exception as e:
                     logger.error(f"Model inference failed: {e}")
                     raise
@@ -2420,6 +2441,9 @@ def embed_sequences(
                             f"Could not extract embeddings from model output: {type(outputs)}"
                         )
 
+                if layer is not None:
+                    hidden = outputs.hidden_states[layer]
+
                 # Slice back to original (pre-padding) length
                 hidden = hidden[:, :orig_len, :]
 
@@ -2431,10 +2455,18 @@ def embed_sequences(
                             hidden = model.layer_norm_2(hidden)
 
                 # Mean pooling with attention mask (always use boolean mask, not additive)
-                mask = pooling_mask.unsqueeze(-1).expand(hidden.size()).float()
-                sum_embeddings = torch.sum(hidden * mask, dim=1)
-                sum_mask = torch.clamp(mask.sum(dim=1), min=1e-9)
-                batch_embs = (sum_embeddings / sum_mask).detach().float().cpu().numpy()
+                if pooling == "last":
+                    # Right padding: the last real token sits at (number of real tokens - 1).
+                    if getattr(tokenizer, "padding_side", "right") != "right":
+                        raise ValueError("--pooling last needs a right-padding tokenizer")
+                    last = pooling_mask.sum(dim=1).clamp(min=1) - 1
+                    pooled = hidden[torch.arange(hidden.shape[0], device=hidden.device), last]
+                    batch_embs = pooled.detach().float().cpu().numpy()
+                else:
+                    mask = pooling_mask.unsqueeze(-1).expand(hidden.size()).float()
+                    sum_embeddings = torch.sum(hidden * mask, dim=1)
+                    sum_mask = torch.clamp(mask.sum(dim=1), min=1e-9)
+                    batch_embs = (sum_embeddings / sum_mask).detach().float().cpu().numpy()
 
                 for j, i in enumerate(idx):
                     out[i] = batch_embs[j]
@@ -2496,6 +2528,7 @@ def evaluate_multilabel(
     y_test,
     mlb: Optional[MultiLabelBinarizer] = None,
     probe_type: str = DEFAULT_RESULT_PROBE,
+    fitted_model: Any = None,
 ) -> Dict[str, Any]:
     """Evaluate multilabel classification task.
 
@@ -2521,17 +2554,20 @@ def evaluate_multilabel(
     if len(X_train_f) == 0 or len(X_test_f) == 0:
         return {"Error": "No valid samples after label filtering"}
 
-    if probe_type == "torch_linear":
-        clf = make_probe_model(probe_type, "multilabel")
+    if fitted_model is not None:
+        clf, fit_seconds = fitted_model, 0.0
     else:
-        clf = OneVsRestClassifier(
-            make_pipeline(
-                StandardScaler(),
-                LogisticRegression(solver="liblinear", random_state=BENCHMARK_SEED),
-            ),
-            n_jobs=DEFAULT_OVR_N_JOBS,
-        )
-    fit_seconds = timed_fit(clf, X_train_f, y_train_f)
+        if probe_type == "torch_linear":
+            clf = make_probe_model(probe_type, "multilabel")
+        else:
+            clf = OneVsRestClassifier(
+                make_pipeline(
+                    StandardScaler(),
+                    LogisticRegression(solver="liblinear", random_state=BENCHMARK_SEED),
+                ),
+                n_jobs=DEFAULT_OVR_N_JOBS,
+            )
+        fit_seconds = timed_fit(clf, X_train_f, y_train_f)
 
     preds = clf.predict(X_test_f)
 
@@ -2576,7 +2612,9 @@ def make_probe_model(
         knn_k: Number of neighbors for KNN probes (default: 3).
         knn_weights: Weight function for KNN ("uniform" or "distance", default: "uniform").
     """
-    if probe_type == DEFAULT_RESULT_PROBE:
+    # linear_cv has no validation split inside the 4-fold CV fallback, so it uses
+    # the fixed linear probe there.
+    if probe_type in (DEFAULT_RESULT_PROBE, "linear_cv"):
         if problem_type == "regression":
             return make_pipeline(StandardScaler(), Ridge(alpha=1.0))
         if problem_type in {"binary", "multiclass"}:
@@ -2761,8 +2799,13 @@ def evaluate_classification_probe(
     y_test: np.ndarray,
     knn_k: int = 3,
     knn_weights: str = "uniform",
+    fitted_model: Any = None,
 ) -> dict[str, float]:
-    """Evaluate binary or multiclass classification with the selected probe."""
+    """Evaluate binary or multiclass classification with the selected probe.
+
+    ``fitted_model`` scores an already-trained probe (``linear_cv``) instead of
+    building and fitting one; labels must then already be numeric.
+    """
     if len(y_train) > 0 and isinstance(y_train[0], str):
         label_encoder = LabelEncoder()
         all_labels = sorted(set(y_train) | set(y_test))
@@ -2780,14 +2823,17 @@ def evaluate_classification_probe(
                 ),
             )
 
-    classifier = _make_probe_model_for_training_size(
-        probe_type,
-        problem_type,
-        train_size=len(X_train),
-        knn_k=knn_k,
-        knn_weights=knn_weights,
-    )
-    fit_seconds = timed_fit(classifier, X_train, y_train)
+    if fitted_model is not None:
+        classifier, fit_seconds = fitted_model, 0.0
+    else:
+        classifier = _make_probe_model_for_training_size(
+            probe_type,
+            problem_type,
+            train_size=len(X_train),
+            knn_k=knn_k,
+            knn_weights=knn_weights,
+        )
+        fit_seconds = timed_fit(classifier, X_train, y_train)
     predictions = classifier.predict(X_test)
 
     metrics = classification_metrics(problem_type, y_test, predictions)
@@ -2837,16 +2883,20 @@ def evaluate_regression_probe(
     y_test: np.ndarray,
     knn_k: int = 3,
     knn_weights: str = "uniform",
+    fitted_model: Any = None,
 ) -> dict[str, float]:
-    """Evaluate regression with the selected probe."""
-    regressor = _make_probe_model_for_training_size(
-        probe_type,
-        "regression",
-        train_size=len(X_train),
-        knn_k=knn_k,
-        knn_weights=knn_weights,
-    )
-    fit_seconds = timed_fit(regressor, X_train, y_train)
+    """Evaluate regression with the selected probe (or an already-fit ``fitted_model``)."""
+    if fitted_model is not None:
+        regressor, fit_seconds = fitted_model, 0.0
+    else:
+        regressor = _make_probe_model_for_training_size(
+            probe_type,
+            "regression",
+            train_size=len(X_train),
+            knn_k=knn_k,
+            knn_weights=knn_weights,
+        )
+        fit_seconds = timed_fit(regressor, X_train, y_train)
     predictions = regressor.predict(X_test)
     y_test_arr = np.asarray(y_test)
 
@@ -3257,6 +3307,62 @@ def _run_zeroshot_tta(
     )
 
 
+def _evaluate_linear_cv(cfg: TaskConfig, X_train, y_train, X_test, y_test, mlb, val_data, embed_val):
+    """``-p linear_cv``: pick C on validation, refit on train, score on test.
+
+    ``val_data`` is the task's own validation split as (seqs, labels), or None, in
+    which case a seeded 10% of train is held out for the selection only and the
+    final probe is still fit on all of train. See probe_cv.py for the protocol.
+    """
+    from probe_cv import fit_selected, make_model
+
+    problem = cfg.problem_type
+    as_labels = functools.partial(np.array, dtype=object if problem == "multilabel" else None)
+    if val_data is None:
+        order = np.random.RandomState(BENCHMARK_SEED).permutation(len(X_train))
+        n_val = max(1, len(order) // 10)
+        sel, held = order[n_val:], order[:n_val]
+        X_sel, y_sel, X_val, y_val = X_train[sel], y_train[sel], X_train[held], y_train[held]
+    else:
+        X_sel, y_sel = X_train, y_train
+        X_val, y_val = embed_val(val_data[0]), as_labels(val_data[1])
+
+    if problem in ("binary", "multiclass") and len(y_train) and isinstance(y_train[0], str):
+        encoder = LabelEncoder().fit(sorted(set(y_train) | set(y_test) | set(y_val)))
+        y_train, y_test, y_sel, y_val = (encoder.transform(a) for a in (y_train, y_test, y_sel, y_val))
+
+    fit_X, fit_y = X_train, y_train
+    if problem == "multilabel":
+        mlb = mlb or MultiLabelBinarizer()
+        mlb.fit(y_train)
+        with warnings.catch_warnings():  # validation labels unseen in train are dropped
+            warnings.simplefilter("ignore")
+            y_sel_bin, y_val_bin = mlb.transform(y_sel), mlb.transform(y_val)
+        y_train_bin = mlb.transform(y_train)
+        keep_sel, keep_val, keep_fit = (b.sum(axis=1) > 0 for b in (y_sel_bin, y_val_bin, y_train_bin))
+        X_sel, y_sel, X_val, y_val = X_sel[keep_sel], y_sel_bin[keep_sel], X_val[keep_val], y_val_bin[keep_val]
+        fit_X, fit_y = X_train[keep_fit], y_train_bin[keep_fit]
+
+    start = time.perf_counter()
+    model, chosen_c = fit_selected(problem, X_sel, y_sel, X_val, y_val)
+    if val_data is None:  # selected on 90% of train; the scored probe uses all of it
+        model = make_model(problem, chosen_c).fit(fit_X, fit_y)
+    fit_seconds = time.perf_counter() - start
+    logger.info("  linear_cv: selected C=%g on %s", chosen_c, "validation split" if val_data else "10% train holdout")
+
+    if problem == "multilabel":
+        results = evaluate_multilabel(X_train, y_train, X_test, y_test, mlb, fitted_model=model)
+    elif problem == "regression":
+        results = evaluate_regression_probe(DEFAULT_RESULT_PROBE, X_train, y_train, X_test, y_test, fitted_model=model)
+    else:
+        results = evaluate_classification_probe(
+            DEFAULT_RESULT_PROBE, problem, X_train, y_train, X_test, y_test, fitted_model=model
+        )
+    results["ProbeC"] = chosen_c
+    results["ProbeFitSec"] = fit_seconds
+    return results
+
+
 def evaluate_task(
     cfg: TaskConfig,
     model_obj,
@@ -3275,6 +3381,8 @@ def evaluate_task(
     eval_split: str = DEFAULT_BENCHMARK_EVAL_SPLIT,
     tta_cfg=None,
     probe_embed_mode: str = "trunk",
+    pooling: str = "mean",
+    layer: Optional[int] = None,
 ) -> Tuple[Dict[str, Any], str, str]:
     """Run full evaluation for a single task.
 
@@ -3561,6 +3669,9 @@ def evaluate_task(
         f"{probe_embed_mode}|l2={int(bool(l2_normalize_embeddings))}"
         f"|ml={max_length}|dt={amp_dtype}"
     )
+    if pooling != "mean" or layer is not None:
+        # Appended only when set, so every existing cache entry keeps its key.
+        _cfg_key += f"|pool={pooling}|layer={layer}"
 
     def _embed(_seqs):
         return embed_sequences(
@@ -3574,6 +3685,8 @@ def evaluate_task(
             embed_save_path=embed_save_path,
             l2_normalize_embeddings=l2_normalize_embeddings,
             probe_embed_mode=probe_embed_mode,
+            pooling=pooling,
+            layer=layer,
         )
 
     if cfg.problem_type == "retrieval":
@@ -3676,6 +3789,30 @@ def evaluate_task(
         norms_test = np.linalg.norm(X_test, axis=1, keepdims=True).clip(min=1e-12)
         X_test = X_test / norms_test
         logger.info("  Applied L2 normalization to embeddings")
+
+    if probe_type == "linear_cv":
+        val_data = None
+        # Select on validation only when scoring test: in validation mode the
+        # validation split IS the evaluation set, so hold out train instead.
+        if resolved_eval_split == "test":
+            _, _, val_seqs, val_labels, _, val_meta = prepare_data(
+                cfg, max_samples, eval_split="validation",
+                top_k_labels_override=top_k_labels_override,
+            )
+            if val_seqs and not val_meta.get("cv_fallback"):
+                val_data = (val_seqs, val_labels)
+
+        def _embed_val(_seqs):
+            X = cached_embed_sequences(
+                lambda: _embed(_seqs), _seqs, cache_root=_seq_cache_root, cfg_key=_cfg_key
+            )
+            if l2_normalize_embeddings:
+                X = X / np.linalg.norm(X, axis=1, keepdims=True).clip(min=1e-12)
+            return X
+
+        logger.info("  Training %s probe...", probe_label(probe_type))
+        results = _evaluate_linear_cv(cfg, X_train, y_train, X_test, y_test, mlb, val_data, _embed_val)
+        return results, resolved_eval_split, eval_strategy
 
     logger.info("  Training %s probe...", probe_label(probe_type))
     if cfg.problem_type == "binary":
@@ -3964,7 +4101,8 @@ def parse_args():
         choices=tuple(PROBE_LABELS),
         default=DEFAULT_RESULT_PROBE,
         help="Probe model type. binary/multiclass/regression/token tasks use the selected probe; "
-        "multilabel supports linear and torch_linear; retrieval and ProteinGym zero-shot keep "
+        "multilabel supports linear, linear_cv and torch_linear; linear_cv selects C on the "
+        "validation split (CLIP protocol, probe_cv.py); retrieval and ProteinGym zero-shot keep "
         "their built-in evaluators.",
     )
     parser.add_argument(
@@ -4160,6 +4298,22 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--pooling",
+        choices=["mean", "last"],
+        default="mean",
+        help=(
+            "Sequence pooling. mean (default): masked mean over tokens. last: each "
+            "sequence's last non-padding token -- the only position a causal model has "
+            "read the whole sequence at."
+        ),
+    )
+    parser.add_argument(
+        "--layer",
+        type=int,
+        default=None,
+        help="hidden_states index to embed from (0 = embeddings, -1 = final). Default: final.",
+    )
+    parser.add_argument(
         "--probe-embed-mode",
         choices=["trunk", "trunk_and_aux", "aux_only"],
         default="trunk",
@@ -4286,6 +4440,8 @@ def main():
         "knn_weights": args.knn_weights,
         "l2_normalize_embeddings": args.l2_normalize_embeddings,
         "probe_embed_mode": args.probe_embed_mode,
+        "pooling": args.pooling,
+        "layer": args.layer,
     }
 
     # Device selection
@@ -4485,6 +4641,12 @@ def main():
                 l2_normalize_embeddings=config.get("l2_normalize_embeddings", False),
                 knn_weights=config.get("knn_weights", "uniform"),
             )
+            # Pooling/layer change the embedding itself, so they belong in the row's
+            # Probe key; defaults add nothing, keeping old rows comparable.
+            if config.get("pooling", "mean") != "mean":
+                probe_variant_label += f"_pool-{config['pooling']}"
+            if config.get("layer") is not None:
+                probe_variant_label += f"_L{config['layer']}"
             probe_display = probe_label(effective_probe)
             if effective_probe != requested_probe:
                 probe_display = f"{probe_display} (requested {probe_label(requested_probe)} ignored)"
@@ -4533,6 +4695,8 @@ def main():
                     ),
                     tta_cfg=tta_cfg,
                     probe_embed_mode=config.get("probe_embed_mode", "trunk"),
+                    pooling=config.get("pooling", "mean"),
+                    layer=config.get("layer"),
                 )
 
                 main_val = metrics.get(cfg.main_metric, None)
