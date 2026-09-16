@@ -105,6 +105,13 @@ def reproduce_classification_metrics(path: Path) -> dict[str, float]:
     return metrics
 
 
+def _residue_score(scores: Any, i: int) -> Any:
+    if scores is None:
+        return None
+    row = np.asarray(scores[i], dtype=float).ravel()
+    return round(float(row[-1]), 4) if row.size <= 2 else [round(float(v), 4) for v in row]
+
+
 def write_residue_predictions(
     path: Path,
     *,
@@ -113,10 +120,15 @@ def write_residue_predictions(
     labels: Sequence[Any],
     predictions: Sequence[Any],
     metadata: dict[str, Any],
+    scores: Any = None,
     query_fasta_path: Path | None = None,
 ) -> None:
+    """``scores``: predict_proba rows aligned to ``metadata["classes"]``; stored
+    as the positive-class probability for two classes, else the full row."""
     if len(groups) != len(labels) or len(labels) != len(predictions):
         raise ValueError("residue prediction lengths differ")
+    if scores is not None and len(scores) != len(labels):
+        raise ValueError("score and label lengths differ")
     positions: dict[int, int] = {}
     if query_fasta_path is not None:
         write_query_fasta(query_fasta_path, sequences)
@@ -129,7 +141,9 @@ def write_residue_predictions(
             )
             + "\n"
         )
-        for group, label, prediction in zip(groups, labels, predictions, strict=True):
+        for i, (group, label, prediction) in enumerate(
+            zip(groups, labels, predictions, strict=True)
+        ):
             example_id = int(group)
             position = positions.get(example_id, 0)
             positions[example_id] = position + 1
@@ -139,5 +153,6 @@ def write_residue_predictions(
                 "sequence_sha256": _sequence_sha256(sequences[example_id]),
                 "label": _scalar(label),
                 "prediction": _scalar(prediction),
+                "score": _residue_score(scores, i),
             }
             handle.write(json.dumps(row, sort_keys=True) + "\n")

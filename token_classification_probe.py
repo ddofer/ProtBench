@@ -302,6 +302,34 @@ def drop_ignored_residues(
     return X[keep], y[keep], groups[keep]
 
 
+def residue_ranking_metrics(y_true, scores, classes) -> Dict[str, float]:
+    """ROC-AUC and PR-AUC from ``predict_proba`` columns aligned to ``classes``.
+
+    Multiclass is one-vs-rest macro over the classes present in ``y_true``
+    (a class with no positives has no AUC). Empty when fewer than two are present.
+    """
+    from sklearn.metrics import average_precision_score, roc_auc_score
+    from sklearn.preprocessing import label_binarize
+
+    y_true, scores = np.asarray(y_true), np.asarray(scores, dtype=float)
+    present = np.isin(classes, y_true)
+    if present.sum() < 2:
+        return {}
+    if len(classes) == 2:
+        hit = y_true == classes[1]
+        pos = scores[:, 1] if scores.ndim == 2 else scores
+        return {
+            "AUC": float(roc_auc_score(hit, pos)),
+            "AP": float(average_precision_score(hit, pos)),
+        }
+    onehot = label_binarize(y_true, classes=classes)[:, present]
+    kept = scores[:, present]
+    return {
+        "AUC": float(roc_auc_score(onehot, kept, average="macro")),
+        "AP": float(average_precision_score(onehot, kept, average="macro")),
+    }
+
+
 def fit_residue_linear_probe(
     X: np.ndarray,
     y: np.ndarray,
@@ -440,6 +468,11 @@ def evaluate_token_classification(
             y_b, predictions, main_metric=cfg.main_metric, problem_type=problem_type
         )
         m["ProbeFitSec"] = fit_seconds
+        scores = classes = None
+        if hasattr(probe, "predict_proba"):
+            scores = np.asarray(probe.predict_proba(X_b), dtype=float)
+            classes = np.asarray(probe.classes_)
+            m.update(residue_ranking_metrics(y_b, scores, classes))
         if prediction_path is not None:
             if groups_b is None:
                 raise ValueError("prediction output requires an explicit test split")
@@ -451,7 +484,13 @@ def evaluate_token_classification(
                 groups=groups_b,
                 labels=y_b,
                 predictions=predictions,
-                metadata={"task": task, "problem_type": problem_type, "split": "test"},
+                scores=scores,
+                metadata={
+                    "task": task,
+                    "problem_type": problem_type,
+                    "split": "test",
+                    "classes": None if classes is None else classes.tolist(),
+                },
                 query_fasta_path=query_fasta_path,
             )
         return m

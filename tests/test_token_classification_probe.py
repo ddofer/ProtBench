@@ -362,6 +362,41 @@ def test_token_probe_persists_test_predictions(tmp_path):
     assert len(rows) == 80
 
 
+def test_token_probe_reports_ranking_metrics_and_persists_scores(tmp_path):
+    enc, tok = _TinyEncoder(hidden=8), _TinyTokenizer()
+    train = _toy_ss3_dataset(n=16, length=10)
+    test = _toy_ss3_dataset(seed=1, n=8, length=10)
+    cfg = TaskConfig(
+        name="SS3 (scores)",
+        dataset="local://synthetic",
+        input_map={"seq": "sequence"},
+        label_col="labels",
+        problem_type="token_classification",
+        main_metric="Accuracy",
+    )
+    path = tmp_path / "ss3.jsonl.gz"
+    metrics = evaluate_token_classification(
+        cfg=cfg,
+        encoder=enc,
+        tokenizer=tok,
+        train_sequences=[row.sequence for row in train],
+        train_labels=[row.labels for row in train],
+        test_sequences=[row.sequence for row in test],
+        test_labels=[row.labels for row in test],
+        prediction_path=path,
+    )
+    assert 0.0 <= metrics["AUC"] <= 1.0
+    assert 0.0 <= metrics["AP"] <= 1.0
+    metadata, rows = read_prediction_rows(path)
+    classes = metadata["classes"]
+    assert len(classes) == 3
+    for row in rows:
+        assert len(row["score"]) == 3
+        assert abs(sum(row["score"]) - 1.0) < 1e-3
+        # The stored prediction is the arg-max class of the stored scores.
+        assert classes[int(np.argmax(row["score"]))] == row["prediction"]
+
+
 def test_conservation_9class_labels_decoded_correctly():
     """Labels 1-9 (conservation_flip format) pass through _decode_residue_label
     as a plain list[int] and produce 9-class F1_Macro metric in [0, 1]."""
