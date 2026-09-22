@@ -15,8 +15,35 @@ from typing import Literal
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression  # type: ignore[import-untyped]
+from sklearn.pipeline import Pipeline, make_pipeline  # type: ignore[import-untyped]
+from sklearn.preprocessing import StandardScaler  # type: ignore[import-untyped]
 
 from ptm_benchmark import PTMSitePrediction
+
+PROBE_MAX_ITER = 1000
+
+
+def fit_scaled_probe(features: np.ndarray, labels: np.ndarray, *, seed: int) -> Pipeline:
+    """Fit the probe behind a ``StandardScaler``, as ``token_classification_probe`` does.
+
+    lbfgs on raw (unscaled) embeddings underfits and needs far more iterations, which
+    penalises a randomly initialized encoder more than a trained one. ``probe_n_iter``
+    is recorded in the metrics so a hit iteration cap is visible rather than silent.
+    """
+
+    return make_pipeline(
+        StandardScaler(),
+        LogisticRegression(
+            max_iter=PROBE_MAX_ITER,
+            class_weight="balanced",
+            random_state=seed,
+            solver="lbfgs",
+        ),
+    ).fit(features, labels)
+
+
+def probe_n_iter(probe: Pipeline) -> int:
+    return int(np.max(probe[-1].n_iter_))
 
 
 @dataclass(frozen=True)
@@ -119,7 +146,7 @@ def fit_site_probe(
     negatives_per_positive: int = 5,
     candidate_residues: frozenset[str] | None = None,
     outside_candidate_positives: Literal["error", "ignore"] = "error",
-) -> tuple[LogisticRegression, dict[str, int]]:
+) -> tuple[Pipeline, dict[str, int]]:
     features: list[np.ndarray] = []
     labels: list[int] = []
     seen = 0
@@ -146,24 +173,21 @@ def fit_site_probe(
         raise ValueError("site probe fit data must contain both classes")
     x = np.concatenate(features)
     y = np.asarray(labels, dtype=np.int8)
-    probe = LogisticRegression(
-        max_iter=300,
-        class_weight="balanced",
-        random_state=seed,
-        solver="lbfgs",
-    ).fit(x, y)
+    probe = fit_scaled_probe(x, y, seed=seed)
     return probe, {
         "fit_proteins": len(examples),
         "fit_residues": len(y),
         "fit_positive": int(y.sum()),
         "fit_negative": int(len(y) - y.sum()),
+        "fit_max_iter": PROBE_MAX_ITER,
+        "fit_n_iter": probe_n_iter(probe),
     }
 
 
 def predict_site_probe(
     examples: Sequence[FrozenSiteExample],
     embeddings: Iterable[np.ndarray],
-    probe: LogisticRegression,
+    probe: Pipeline,
     *,
     candidate_residues: frozenset[str] | None = None,
 ) -> list[PTMSitePrediction]:
@@ -264,24 +288,19 @@ def fit_sequence_probe(
     embeddings: np.ndarray,
     *,
     seed: int = 1337,
-) -> LogisticRegression:
+) -> Pipeline:
     if len(embeddings) != len(examples):
         raise ValueError("one sequence embedding is required per example")
     labels = np.asarray([example.label for example in examples], dtype=np.int8)
     if len(set(labels.tolist())) != 2:
         raise ValueError("sequence probe fit data must contain both classes")
-    return LogisticRegression(
-        max_iter=300,
-        class_weight="balanced",
-        random_state=seed,
-        solver="lbfgs",
-    ).fit(_normalized(embeddings), labels)
+    return fit_scaled_probe(_normalized(embeddings), labels, seed=seed)
 
 
 def predict_sequence_probe(
     examples: Sequence[FrozenSequenceExample],
     embeddings: np.ndarray,
-    probe: LogisticRegression,
+    probe: Pipeline,
     *,
     position: int,
 ) -> list[PTMSitePrediction]:

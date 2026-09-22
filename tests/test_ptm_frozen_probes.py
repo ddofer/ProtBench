@@ -3,6 +3,7 @@ import pytest
 
 from ptm_benchmark import score_ptm_sites
 from ptm_frozen_probes import (
+    PROBE_MAX_ITER,
     FrozenSequenceExample,
     FrozenSiteExample,
     fit_center_residue_baseline,
@@ -13,6 +14,8 @@ from ptm_frozen_probes import (
     predict_residue_identity_baseline,
     predict_sequence_probe,
     predict_site_probe,
+    fit_scaled_probe,
+    probe_n_iter,
     sampled_fit_positions,
 )
 
@@ -100,7 +103,10 @@ def test_site_probe_can_fit_and_predict_only_candidate_residues():
         "fit_residues": 5,
         "fit_positive": 3,
         "fit_negative": 2,
+        "fit_max_iter": PROBE_MAX_ITER,
+        "fit_n_iter": fit["fit_n_iter"],
     }
+    assert 0 < fit["fit_n_iter"] <= PROBE_MAX_ITER
     assert [(item.row_id, item.position) for item in predictions] == [
         ("p1", 0),
         ("p1", 1),
@@ -143,3 +149,29 @@ def test_center_residue_baseline_uses_only_the_candidate_site():
     assert probabilities["K"] > probabilities["S"]
     assert [prediction.position for prediction in predictions] == [2, 2, 2, 2]
     assert score_ptm_sites(predictions)["n_positive"] == 2
+
+
+def test_scaled_probe_beats_the_unscaled_low_iteration_fit():
+    """Raw lbfgs underfits badly conditioned embeddings; the scaled pipeline does not."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+
+    rng = np.random.default_rng(0)
+    labels = np.tile([0, 1], 200)
+    signal = (labels * 2.0 - 1.0) + rng.normal(scale=0.5, size=labels.size)
+    features = np.stack(
+        [signal * 1e-4, rng.normal(scale=1e4, size=labels.size)], axis=1
+    )
+
+    probe = fit_scaled_probe(features, labels, seed=1337)
+    assert isinstance(probe[0], StandardScaler)
+    assert probe[-1].max_iter == PROBE_MAX_ITER
+    assert probe[-1].class_weight == "balanced"
+    assert probe[-1].random_state == 1337
+    assert probe_n_iter(probe) <= PROBE_MAX_ITER
+
+    unscaled = LogisticRegression(
+        max_iter=300, class_weight="balanced", random_state=1337, solver="lbfgs"
+    ).fit(features, labels)
+    assert (probe.predict(features) == labels).mean() > 0.9
+    assert (unscaled.predict(features) == labels).mean() < 0.6
