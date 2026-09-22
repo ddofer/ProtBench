@@ -497,7 +497,7 @@ def get_torch_compile_settings(model) -> tuple[dict[str, object], bool]:
 
 def fix_amplify_meta_tensors(model):
     """Recompute freqs_cis if stuck on meta device (happens with from_pretrained)."""
-    if hasattr(model, "freqs_cis") and model.freqs_cis.is_meta:
+    if getattr(model, "freqs_cis", None) is not None and model.freqs_cis.is_meta:
         mod = importlib.import_module(model.__class__.__module__)
         model.freqs_cis = mod.precompute_freqs_cis(
             model.config.hidden_size // model.config.num_attention_heads,
