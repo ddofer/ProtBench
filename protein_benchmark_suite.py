@@ -176,6 +176,7 @@ from benchmark_utils import (
 )
 from model_utils import (
     _assert_no_wrapper_prefixes,
+    adapt_amplify_c,
     apply_esmplusplus_compat_patch,
     detect_model_type,
     disable_esm2_token_dropout,
@@ -636,6 +637,7 @@ def _load_model_impl(
         patch_amplify_attention_fallback(model)
         model.to(device).eval()
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        adapt_amplify_c(model, tokenizer)
         logger.info("-> Loaded as HF AutoModel (AMPLIFY)")
         return (tokenizer, model), False, device
 
@@ -2703,8 +2705,13 @@ def evaluate_regression_probe(
     y_test: np.ndarray,
     knn_k: int = 3,
     knn_weights: str = "uniform",
+    prediction_callback=None,
 ) -> dict[str, float]:
-    """Evaluate regression with the selected probe."""
+    """Evaluate regression with the selected probe.
+
+    ``prediction_callback(y_test, predictions, None)`` receives the per-example
+    test predictions, e.g. to persist them for paired bootstraps.
+    """
     regressor = _make_probe_model_for_training_size(
         probe_type,
         "regression",
@@ -2715,6 +2722,8 @@ def evaluate_regression_probe(
     fit_seconds = timed_fit(regressor, X_train, y_train)
     predictions = regressor.predict(X_test)
     y_test_arr = np.asarray(y_test)
+    if prediction_callback is not None:
+        prediction_callback(y_test_arr, predictions, None)
 
     try:
         spearman_corr, _ = spearmanr(y_test_arr, predictions)
@@ -3540,7 +3549,7 @@ def evaluate_task(
 
     logger.info("  Training %s probe...", probe_label(probe_type))
     prediction_callback = None
-    if prediction_dir and cfg.problem_type in {"binary", "multiclass"}:
+    if prediction_dir and cfg.problem_type in {"binary", "multiclass", "regression"}:
         from prediction_artifacts import write_sequence_predictions
 
         path = (
@@ -3602,6 +3611,7 @@ def evaluate_task(
             y_test,
             knn_k=knn_k,
             knn_weights=knn_weights,
+            prediction_callback=prediction_callback,
         )
 
     return results, resolved_eval_split, eval_strategy

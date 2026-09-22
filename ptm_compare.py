@@ -9,18 +9,42 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import numpy as np
-from sklearn.metrics import average_precision_score
 
 from ptm_benchmark import PTMSitePrediction
 
 
-def _weighted_average_precision(
-    labels: np.ndarray, scores: np.ndarray, weights: np.ndarray
-) -> float:
-    """Average precision with each protein duplicated by its bootstrap count."""
-    if not (labels * weights).any():
-        return float("nan")
-    return float(average_precision_score(labels, scores, sample_weight=weights))
+def _prepare_average_precision(
+    labels: np.ndarray, scores: np.ndarray
+) -> Callable[[np.ndarray], float]:
+    """Cache score order for exact weighted AP across bootstrap replicates.
+
+    Args:
+        labels: Validated binary labels for a nonempty panel.
+        scores: Validated finite scores aligned with labels.
+    Returns:
+        A function accepting aligned nonnegative sample weights; it returns NaN
+        when positive weight is zero. Ties have sklearn's grouped-threshold semantics.
+    """
+    order = np.argsort(scores, kind="stable")[::-1]
+    sorted_labels = labels[order]
+    ends = np.r_[np.flatnonzero(np.diff(scores[order])), len(scores) - 1]
+
+    def weighted_ap(weights: np.ndarray) -> float:
+        """Return AP for aligned nonnegative weights, or NaN without positives."""
+        sorted_weights = weights[order]
+        true_positive = np.cumsum(sorted_labels * sorted_weights, dtype=np.float64)[
+            ends
+        ]
+        if true_positive[-1] == 0:
+            return float("nan")
+        total = np.cumsum(sorted_weights, dtype=np.float64)[ends]
+        precision = np.divide(
+            true_positive, total, out=np.zeros_like(total), where=total > 0
+        )
+        increments = np.diff(np.r_[0.0, true_positive])
+        return float(np.dot(increments, precision) / true_positive[-1])
+
+    return weighted_ap
 
 
 def paired_site_auprc_bootstrap(
@@ -93,9 +117,11 @@ def paired_site_auprc_bootstrap(
         raise ValueError("PTM site scores must all be finite")
 
     n_groups = len(group_ids)
+    candidate_ap = _prepare_average_precision(labels, candidate_scores)
+    baseline_ap = _prepare_average_precision(labels, baseline_scores)
     unit_weights = np.ones(len(keys), dtype=np.int64)
-    candidate_auprc = _weighted_average_precision(labels, candidate_scores, unit_weights)
-    baseline_auprc = _weighted_average_precision(labels, baseline_scores, unit_weights)
+    candidate_auprc = candidate_ap(unit_weights)
+    baseline_auprc = baseline_ap(unit_weights)
 
     rng = np.random.default_rng(seed)
     replicates = []
@@ -103,8 +129,8 @@ def paired_site_auprc_bootstrap(
         counts = np.bincount(
             rng.integers(0, n_groups, size=n_groups), minlength=n_groups
         )[group_codes]
-        candidate_boot = _weighted_average_precision(labels, candidate_scores, counts)
-        baseline_boot = _weighted_average_precision(labels, baseline_scores, counts)
+        candidate_boot = candidate_ap(counts)
+        baseline_boot = baseline_ap(counts)
         if np.isfinite(candidate_boot) and np.isfinite(baseline_boot):
             replicates.append(candidate_boot - baseline_boot)
     if not replicates:
