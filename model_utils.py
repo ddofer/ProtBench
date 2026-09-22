@@ -505,6 +505,38 @@ def fix_amplify_meta_tensors(model):
         )
 
 
+def adapt_amplify_c(model, tokenizer) -> None:
+    """Give AMPLIFY-C the xformers-era AMPLIFY conventions the bench paths assume.
+
+    AMPLIFY-C's remote code has no xformers path: its SDPA call reads
+    ``attention_mask.bool()`` (True = attend), so the additive 0/-inf mask from
+    :func:`_prepare_amplify_inputs` would silently invert attention. Its
+    ``forward`` also rejects ``return_dict``, its tokenizer truncates to a random
+    window by default, and its final norm is ``layer_norm``, not ``layer_norm_2``.
+    No-op for xformers-backed AMPLIFY.
+
+    Args:
+        model: A loaded AMPLIFY remote-code model; patched in place.
+        tokenizer: The model's tokenizer; patched in place.
+    """
+    if hasattr(importlib.import_module(model.__class__.__module__), "memory_efficient_attention"):
+        return
+    forward = model.forward
+
+    def _forward(*args, attention_mask=None, **kwargs):
+        kwargs.pop("return_dict", None)
+        if attention_mask is not None and attention_mask.is_floating_point():
+            attention_mask = attention_mask == 0
+        return forward(*args, attention_mask=attention_mask, **kwargs)
+
+    model.forward = _forward
+    model.layer_norm_2 = model.layer_norm
+    truncate = tokenizer.truncate
+    tokenizer.truncate = lambda encoded_inputs, max_length=None, random_truncate=True: truncate(
+        encoded_inputs, max_length=max_length, random_truncate=False
+    )
+
+
 def fix_proteva_rope_buffer(model):
     """Recompute Proteva's non-persistent ``encoder.rope_cs`` after ``from_pretrained``.
 

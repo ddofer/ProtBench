@@ -176,6 +176,7 @@ from benchmark_utils import (
 )
 from model_utils import (
     _assert_no_wrapper_prefixes,
+    adapt_amplify_c,
     apply_esmplusplus_compat_patch,
     detect_model_type,
     disable_esm2_token_dropout,
@@ -636,6 +637,7 @@ def _load_model_impl(
         patch_amplify_attention_fallback(model)
         model.to(device).eval()
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        adapt_amplify_c(model, tokenizer)
         logger.info("-> Loaded as HF AutoModel (AMPLIFY)")
         return (tokenizer, model), False, device
 
