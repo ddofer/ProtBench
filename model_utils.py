@@ -530,7 +530,10 @@ def adapt_amplify_c(model, tokenizer) -> None:
         return forward(*args, attention_mask=attention_mask, **kwargs)
 
     model.forward = _forward
-    model.layer_norm_2 = model.layer_norm
+    # Plain assignment would go through nn.Module.__setattr__ and REGISTER a second
+    # submodule, so state_dict() would emit both layer_norm.weight and a spurious
+    # layer_norm_2.weight for any save_pretrained of an adapted model.
+    object.__setattr__(model, "layer_norm_2", model.layer_norm)
     truncate = tokenizer.truncate
     tokenizer.truncate = lambda encoded_inputs, max_length=None, random_truncate=True: truncate(
         encoded_inputs, max_length=max_length, random_truncate=False

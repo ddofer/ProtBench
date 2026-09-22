@@ -64,6 +64,9 @@ def test_final_norm_alias_and_deterministic_truncation():
     adapt_amplify_c(model, tokenizer)
     assert model.layer_norm_2 is model.layer_norm
     assert tokenizer.truncate({}, max_length=4, random_truncate=True) is False
+    # The alias must not become a registered submodule, or save_pretrained writes a
+    # spurious layer_norm_2.weight beside the real layer_norm.weight.
+    assert [k for k in model.state_dict() if k.startswith("layer_norm_2")] == []
 
 
 def test_xformers_amplify_is_left_alone(monkeypatch):
